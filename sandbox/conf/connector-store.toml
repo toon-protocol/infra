@@ -37,14 +37,16 @@ price = { base = 1000, per_kib = 10 }
 [[peers]]
 id = "relay-store"
 
-# Same channel as the hub's row, counterparty pointed the other way: the hub's
-# settlement address, whose signature this node accepts on claims.
+# Same channel as the hub's row, counterparty pointed the other way: the
+# hub's SOLANA settlement public key, whose signature this node accepts on
+# claims. The peering settles on Solana (the Solana row shape of
+# connector/local/mixed-chain — channel_account PDA, no chain_id /
+# token_network / program_id); the channel is opened post-boot through the
+# HUB's operator surface (the payer side opens and deposits).
 [[peer_channels]]
 peer_id = "relay-store"
-channel_id = "0x0e1011bd4e6aa2e04ace59110f78c810ad1daae882c5826bb7460097cd75c5d2"
-counterparty_key = "0x61097BA76cD906d2ba4FD106E757f7Eb455fc295" # relay-connector settlement
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
+counterparty_key = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
 
 [settlement.evm]
 rpc_url = "http://anvil:8545"

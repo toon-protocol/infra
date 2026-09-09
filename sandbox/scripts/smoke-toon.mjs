@@ -19,10 +19,16 @@
 //      routes over the relay-gas peering to the gas station, which answers
 //      its Solana fee payer
 //   5. the money is asserted from the connectors' own books, because a
-//      packet's answer cannot tell you it was paid for:
-//        - the hub's client-book claims advanced by at least the prices paid
-//        - the two payees' PEER-book claims advanced (the peerings were PAID,
-//          not merely traversed)
+//      packet's answer cannot tell you it was paid for — and PER SETTLEMENT
+//      LEG, because this sandbox's topology is cross-chain same-asset:
+//        - the client leg settles on an EVM channel on anvil (the hub's
+//          client-book claims ride the 0x… channel opened in step 1)
+//        - both peer legs settle on SOLANA payment_channel accounts
+//          (asserted live on the validator first — owner, participants,
+//          mint, Opened, the hub's collateral — then the payees' watermarks
+//          on exactly those channel accounts)
+//      Amounts are the same 6-decimal mock-USDC unit end to end; there is
+//      no conversion anywhere (FX is explicitly unsupported).
 import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +49,15 @@ const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 const MNEMONIC = 'test test test test test test test test test test test junk';
 const PAYMENT_CHANNEL_PROGRAM = 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR';
 const REGISTRY = '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512';
+const USDC_MINT = 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H';
+const HUB_SOL = '9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx';
+// The two SOLANA peering channels (PDAs the committed connector tomls name;
+// opened post-boot by the open-toon-solana-channels init job).
+const SOLANA_CHANNELS = {
+  'relay-store': { account: '4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7', peer: '8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe' },
+  'relay-gas': { account: '4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T', peer: '5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q' },
+};
+const HUB_CHANNEL_DEPOSIT = 100_000_000n; // what the open job puts behind each peering
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jstr = (o) => JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
@@ -71,14 +86,50 @@ function clientBookTotal(rows) {
   return [...per.values()].reduce((s, a) => s + a, 0n);
 }
 // Peer-book watermark on a payee: what the peering has actually PAID it.
-function peerBookTotal(rows) {
+// `onChannel` restricts to one channel id, which is how the per-leg
+// settlement assertion is made — a Solana-settled leg's claims are keyed by
+// the base58 channel ACCOUNT, an EVM leg's by the 0x…64-hex channel id.
+function peerBookTotal(rows, onChannel) {
   const per = new Map();
   for (const r of rows) {
     if (r.direction !== 'inbound' || r.book === 'client') continue;
+    if (onChannel !== undefined && r.channel_id !== onChannel) continue;
     const a = BigInt(r.cumulative_amount ?? 0);
     if (a > (per.get(r.channel_id) ?? 0n)) per.set(r.channel_id, a);
   }
   return [...per.values()].reduce((s, a) => s + a, 0n);
+}
+
+// ── Solana payment-channel account layout ─────────────────────────────────
+// Offsets from the connector's packages/solana-program/src/state.rs (see the
+// vendored scripts/open-solana-channel.py, which names the source of each).
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function b58enc(buf) {
+  let v = 0n;
+  for (const b of buf) v = v * 256n + BigInt(b);
+  let out = '';
+  while (v > 0n) { out = B58[Number(v % 58n)] + out; v /= 58n; }
+  for (const b of buf) { if (b === 0) out = '1' + out; else break; }
+  return out;
+}
+async function readSolanaChannel(account) {
+  const res = await fetch(RPC_URL, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [account, { encoding: 'base64', commitment: 'confirmed' }] }),
+  });
+  const { result } = await res.json();
+  if (!result?.value) return null;
+  const data = Buffer.from(result.value.data[0], 'base64');
+  return {
+    owner: result.value.owner,
+    discriminator: data.subarray(0, 8).toString('latin1'),
+    participantA: b58enc(data.subarray(8, 40)),
+    participantB: b58enc(data.subarray(40, 72)),
+    mint: b58enc(data.subarray(72, 104)),
+    depositA: data.readBigUInt64LE(104),
+    depositB: data.readBigUInt64LE(112),
+    status: data[160], // 0 = Opened
+  };
 }
 
 // ── 0. payment infrastructure ────────────────────────────────────────────
@@ -109,6 +160,33 @@ for (const [name, url] of [['relay-connector (hub)', HUB], ['store-connector', S
   ok(`${name}: ${desc.ilpAddresses?.join(',') ?? '(no addresses)'} — routes: ${routes}`);
 }
 
+// ── 0b. the SOLANA peering channels are live on chain ────────────────────
+// Opened post-boot by the open-toon-solana-channels init job (through the
+// hub's operator surface — the only possible InitializeChannel submitter),
+// so poll briefly: `make up` returns before the job finishes. Then assert
+// the program's own account layout: participants, mint, Opened, and the
+// hub's collateral behind its claims. This is the on-chain half of the
+// "peer legs settle on Solana" proof; the claim books below are the other.
+step('0b. the two SOLANA peering channels are open and collateralised on the validator');
+for (const [label, { account, peer }] of Object.entries(SOLANA_CHANNELS)) {
+  let ch = null;
+  for (let i = 0; i < 45 && !ch; i++) {
+    ch = await readSolanaChannel(account);
+    if (!ch) await sleep(2000);
+  }
+  if (!ch) { bad(`${label}: channel account ${account} never appeared on the validator (open-toon-solana-channels job — docker compose logs open-toon-solana-channels)`); continue; }
+  assert(ch.owner === PAYMENT_CHANNEL_PROGRAM && ch.discriminator === 'pchannel',
+    `${label}: ${account} is a payment_channel program account`);
+  const participants = [ch.participantA, ch.participantB].sort();
+  assert(participants.join() === [HUB_SOL, peer].sort().join(),
+    `${label}: participants are the hub and the peer (${participants.join(', ')})`);
+  assert(ch.mint === USDC_MINT, `${label}: settles in the Solana mock USDC mint`);
+  assert(ch.status === 0, `${label}: status Opened`);
+  const hubDeposit = ch.participantA === HUB_SOL ? ch.depositA : ch.depositB;
+  assert(hubDeposit >= HUB_CHANNEL_DEPOSIT,
+    `${label}: the hub's own side holds ${hubDeposit} base units of collateral (>= ${HUB_CHANNEL_DEPOSIT})`);
+}
+
 // ── 1. a channel against the hub ─────────────────────────────────────────
 step('1. a payment channel on anvil against the hub');
 // NOT under data/ — that tree is created root-owned by docker bind mounts.
@@ -128,8 +206,8 @@ const opened = await client.channel.open({ deposit: 10_000_000n });
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 
 const hubBefore = clientBookTotal(await claims('relay-connector'));
-const storeBefore = peerBookTotal(await claims('store-connector'));
-const gasBefore = peerBookTotal(await claims('gas-connector'));
+const storeBefore = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
+const gasBefore = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
 console.log(`  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}`);
 
 // ── 2. paid relay write + free read ──────────────────────────────────────
@@ -216,26 +294,41 @@ if (!gasAnswer.accepted) {
     `the gas station quoted its Solana fee payer: ${feePayer}`);
 }
 
-// ── 5. the money ─────────────────────────────────────────────────────────
-step('5. the connectors’ own books say everything was PAID');
+// ── 5. the money, PER LEG ────────────────────────────────────────────────
+// Cross-chain, same-asset: the client leg settles on the anvil (EVM)
+// channel the client opened in step 1; both peer legs settle on the SOLANA
+// channel accounts asserted on-chain in step 0b. Amounts are the same
+// 6-decimal USDC unit end to end — no conversion anywhere.
+step('5. the connectors’ own books say everything was PAID — per settlement leg');
 // Claims are journaled on the far side of the same round trip; poll briefly.
-let hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore;
+let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore;
 for (let i = 0; i < 20 && (hubAfter <= hubBefore || storeAfter <= storeBefore || gasAfter <= gasBefore); i++) {
   await sleep(500);
-  hubAfter = clientBookTotal(await claims('relay-connector'));
-  storeAfter = peerBookTotal(await claims('store-connector'));
-  gasAfter = peerBookTotal(await claims('gas-connector'));
+  hubRows = await claims('relay-connector');
+  hubAfter = clientBookTotal(hubRows);
+  storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
+  gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
 }
-// Three paid packets entered the hub's client edge: relay write (1), store
-// blob (>= 1100), gas quote (1100).
+// Client leg (EVM): three paid packets entered the hub's client edge —
+// relay write (1), store blob (>= 1100), gas quote (1100) — and every
+// client-book claim rides the EVM channel opened on anvil in step 1.
 assert(hubAfter - hubBefore >= 1n + 1100n + 1100n,
   `hub client book advanced by ${hubAfter - hubBefore} (>= 2201, the three packets' prices)`);
+// The hub's book keys a client channel as `evm:0x<64 hex>` — the chain
+// family prefix plus the anvil channel id.
+const clientChannels = [...new Set(hubRows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
+assert(clientChannels.length > 0 && clientChannels.every((c) => /^(evm:)?0x[0-9a-f]{64}$/i.test(c)),
+  `client leg settles on EVM: hub client-book channels ${clientChannels.join(', ')} are anvil channel ids`);
+assert(clientChannels.some((c) => c.replace(/^evm:/, '').toLowerCase() === String(opened.channelId).toLowerCase()),
+  `and include the channel the client opened in step 1 (${opened.channelId})`);
+// Peer legs (SOLANA): the payees' watermarks advanced ON the Solana channel
+// accounts — the totals above were already restricted to exactly those ids.
 assert(storeAfter - storeBefore >= 1000n,
-  `store-connector PEER book advanced by ${storeAfter - storeBefore} (>= 1000: the peering crossing was PAID)`);
+  `store peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} (>= 1000)`);
 assert(gasAfter - gasBefore >= 1000n,
-  `gas-connector PEER book advanced by ${gasAfter - gasBefore} (>= 1000: the peering crossing was PAID)`);
+  `gas peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} (>= 1000)`);
 
 console.log(failures === 0
-  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store and gas station, with the peerings provably paid.\x1b[0m'
+  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store and gas station — client leg settled on EVM, both peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
   : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
 process.exit(failures === 0 ? 0 : 1);

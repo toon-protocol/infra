@@ -17,20 +17,24 @@ for local development:
 | `store` | paid Arweave blob store, kind:5094/5095 (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays Solana gas, kind:5096 (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
 | `turbo-tls` | TLS shim aliasing `upload.ardrive.io` onto the local Turbo bundler (see "TOON layer") | — |
-| `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm` | one-shot idempotent init jobs | — |
+| `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm`, `open-toon-solana-channels` | one-shot idempotent init jobs | — |
 
 The proven end-to-end flows (what `make smoke` exercises):
 1. **AR.IO**: upload a payload via the local Turbo bundler → buy an ArNS name
    on the local validator → point the ANT's `@` record at the data item →
    fetch `http://<name>.ar.localhost:3000/` through the local gateway.
-2. **TOON payment layer**: a real client (`@toon-protocol/client`) opens a
-   payment channel on anvil against the hub, then a PAID Nostr write to
-   `g.toon.relay`, a PAID kind:5094 blob to `g.toon.store` and a PAID
-   kind:5096 gas quote to `g.toon.gastation` all enter at the HUB's edge
-   (:3200); the store and gas packets route over real, collateralised
-   peerings to the other two connectors, the blob lands in the LOCAL Turbo
-   bundler and is served back by the local gateway, and the connectors' own
-   claim books prove both the client edge and the peerings were paid.
+2. **TOON payment layer — cross-chain, same-asset**: a real client
+   (`@toon-protocol/client`) opens a payment channel on ANVIL against the
+   hub, then a PAID Nostr write to `g.toon.relay`, a PAID kind:5094 blob to
+   `g.toon.store` and a PAID kind:5096 gas quote to `g.toon.gastation` all
+   enter at the HUB's edge (:3200); the store and gas packets route over
+   real, collateralised peerings that settle on SOLANA payment_channel
+   accounts (asserted live on the validator), the blob lands in the LOCAL
+   Turbo bundler and is served back by the local gateway, and the
+   connectors' own claim books prove each leg was paid on its own chain —
+   client leg on the anvil channel, both peer legs on the Solana channel
+   accounts. Amounts are the same 6-decimal mock-USDC unit end to end;
+   conversion/FX is explicitly out of scope and unsupported.
 
 No mainnet is touched anywhere on either path.
 
@@ -158,10 +162,16 @@ smoke test / any client (host)
 relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ relay reads┘
    │        (hub)      ── g.toon.relay.ephemeral ─▶ relay:3100/write-ephemeral
    ├─ g.toon.store ──[peering relay-store]──▶ store-connector :3210
-   │                                            └─▶ store:3300/store (kind:5094/5095)
+   │        (settles on SOLANA)                 └─▶ store:3300/store (kind:5094/5095)
    └─ g.toon.gastation ──[peering relay-gas]──▶ gas-connector :3220
-                                                └─▶ gas-station:3300/gas (kind:5096)
+            (settles on SOLANA)                 └─▶ gas-station:3300/gas (kind:5096)
 ```
+
+Cross-chain, same-asset: the CLIENT leg settles on anvil (EVM mock USDC, the
+channel the smoke opens in step 1), both PEERING legs settle on the local
+validator (payment_channel-program channels in the Solana mock USDC mint).
+Both mocks are 6-decimal USDC, so amounts cross the chain boundary
+unconverted — conversion/FX is explicitly unsupported.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220** (all
   `GET /ilp` self-describing; the operator surface rides the same port).
@@ -189,11 +199,27 @@ the hub collects `price`, retains `fee = 100`, forwards the rest; the payees
 terminate at exactly the forwarded amount (store `{base=1000, per_kib=10}`
 behind hub `{base=1100, per_kib=10}`; gas `1000` behind `1100`).
 
-The peering channels are REAL channels on anvil's TokenNetwork: opened and
-collateralised (100 USDC each) by the `seed-toon-evm` init job from the
-hub's settlement key, at ids that are `keccak(p1, p2, epoch=0)` (ADR 0059) —
-precomputed, committed in `conf/connector-*.toml`, and re-asserted against
-the chain on every seed run.
+The channel rows use the connector's SOLANA shape (`local/mixed-chain`,
+connector issues #759/#1146/#1128): a `channel_account` PDA instead of an
+EVM `channel_id`, base58 Solana settlement pubkeys as `counterparty_key`, no
+`chain_id`/`token_network`/`program_id` (the program is bound in from
+`[settlement.solana]` alone). The accounts are
+`find_program_address(["channel", min, max, mint])` with the participants
+sorted by 32-byte value — precomputed and committed in
+`conf/connector-*.toml`.
+
+The channels are REAL: `InitializeChannel` is a positional account list no
+chain CLI can build, so — exactly as the connector repo's
+`local/keys.sh <topology> solana-channels` stage does — the
+`open-toon-solana-channels` init job opens and collateralises both AFTER the
+hub boots, through the hub's own operator surface (`POST /channels` +
+`POST /channels/:id/fund`, signed with the hub's allowlisted operator key),
+using the repo's own `open-solana-channel.py` vendored verbatim into
+`scripts/`. The program's `Deposit` credits strictly by signer, so only the
+hub can put its own 100 USDC behind its own claims; the script re-reads the
+program's account afterwards and fails unless participants, mint, `Opened`
+status and the deposit all agree with the committed configs. Idempotent:
+an open channel is left alone, the deposit is a top-up.
 
 ### Keys and provisioning
 
@@ -212,8 +238,10 @@ claim journal against a wiped chain satisfies payment assertions vacuously).
 
 Init jobs, in order: `seed-toon-solana` (creates the deterministic mock USDC
 mint `H8HSre…A77H`, airdrops SOL + mints USDC to every settlement key and
-the gas station's fee payer) and `seed-toon-evm` (funds ETH + USDC, opens +
-collateralises the two peering channels). Both gate the connectors, whose
+the gas station's fee payer), `seed-toon-evm` (funds ETH + USDC — the
+client-leg channel lives on anvil), and — after the hub is healthy —
+`open-toon-solana-channels` (opens + collateralises the two Solana peering
+channels; see "Peering mechanism"). The first two gate the connectors, whose
 startup is fail-closed on BOTH settlement backends — the Solana backend
 submits a real ATA-create and simulates an `InitializeChannel` against the
 genesis-loaded `payment_channel` program, so three healthy connectors are
@@ -274,11 +302,11 @@ assertions over the operator surface with the committed bearer tokens).
   is unset, and the store's ArNS SDK has no RPC override pointed at the
   local validator; direct ArNS buys against the local validator are already
   proven by the AR.IO smoke.
-- **Solana-settled peerings**: the two peerings settle on anvil (EVM), like
-  the connector repo's two-hop topology. Opening a Solana channel needs a
-  running node's operator surface (`POST /channels`,
-  `connector/local/open-solana-channel.py`) and is left out; the Solana
-  settlement *backends* are live on all three connectors regardless.
+- ~~Solana-settled peerings~~ **closed**: both peerings now settle on
+  SOLANA payment_channel accounts (the client leg stays EVM — that split is
+  the cross-chain design, not a gap). What remains true: conversion/FX is
+  unsupported and out of scope — the topology works because both mock USDCs
+  share one 6-decimal unit.
 
 ## Restarting the validator
 

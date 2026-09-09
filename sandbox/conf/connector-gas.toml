@@ -26,12 +26,13 @@ price = 1000
 [[peers]]
 id = "relay-gas"
 
+# The peering settles on SOLANA (row shape per connector/local/mixed-chain);
+# counterparty is the hub's Solana settlement public key, and the channel is
+# opened post-boot through the hub's operator surface (payer side).
 [[peer_channels]]
 peer_id = "relay-gas"
-channel_id = "0xd57686b20c10ed895bc3e2485d935655bf6f480fd9609ff633b6a751a261d64b"
-counterparty_key = "0x61097BA76cD906d2ba4FD106E757f7Eb455fc295" # relay-connector settlement
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
+counterparty_key = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
 
 [settlement.evm]
 rpc_url = "http://anvil:8545"

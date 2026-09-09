@@ -85,35 +85,43 @@ fee = 100
 # cover-forward claims this node signs BEFORE each forwarded PREPARE leaves
 # (ADR 0042 item 2 — required since connector#1145).
 #
-# channel_id = keccak(p1, p2, channelEpoch=0), participants sorted; opened and
-# funded by scripts/seed-toon-evm.sh before this node boots. token_network is
-# TokenNetworkRegistry.getTokenNetwork(mock USDC) — NOT the registry itself.
+# BOTH PEERINGS SETTLE ON SOLANA (the client edge stays EVM — that is the
+# cross-chain, same-asset shape this sandbox proves; both mock USDCs are
+# 6-decimal, so amounts pass through unconverted). The Solana row shape is
+# the connector repo's own (local/mixed-chain, issue #759/#1146): a
+# `channel_account` PDA rather than an EVM channel_id, no chain_id (Solana
+# has none), no token_network (the channel account IS the claim's signed
+# message), and no program_id (since connector#1128 the program is read from
+# [settlement.solana] alone). `counterparty_key` is the peer's Solana
+# settlement PUBLIC key.
+#
+# channel_account = find_program_address(["channel", min, max, mint]) with
+# the participants sorted by 32-byte value (packages/solana-program
+# processor.rs). Opened and collateralised AFTER this node boots by the
+# open-toon-solana-channels init job through THIS node's own operator
+# surface (POST /channels + /channels/:id/fund) — the repo's only
+# InitializeChannel submitter, and Deposit credits strictly by signer, so
+# only this node can put its own collateral behind its own claims
+# (connector#1118; scripts/open-solana-channel.py, vendored from
+# connector/local/).
 [[peer_channels]]
 peer_id = "relay-store"
-channel_id = "0x0e1011bd4e6aa2e04ace59110f78c810ad1daae882c5826bb7460097cd75c5d2"
-counterparty_key = "0xDf37F81dAAD2b0327A0A50003740e1C935C70913" # store-connector settlement
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
+counterparty_key = "8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe" # store-connector Solana settlement
 
 [[pay_channels]]
 peer_id = "relay-store"
-channel_id = "0x0e1011bd4e6aa2e04ace59110f78c810ad1daae882c5826bb7460097cd75c5d2"
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
 client_edge_url = "http://store-connector:3000/ilp"
 
 [[peer_channels]]
 peer_id = "relay-gas"
-channel_id = "0xd57686b20c10ed895bc3e2485d935655bf6f480fd9609ff633b6a751a261d64b"
-counterparty_key = "0x553BC17A05702530097c3677091C5BB47a3a7931" # gas-connector settlement
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
+counterparty_key = "5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q" # gas-connector Solana settlement
 
 [[pay_channels]]
 peer_id = "relay-gas"
-channel_id = "0xd57686b20c10ed895bc3e2485d935655bf6f480fd9609ff633b6a751a261d64b"
-chain_id = 31337
-token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
 client_edge_url = "http://gas-connector:3000/ilp"
 
 # ── Settlement ───────────────────────────────────────────────────────────────

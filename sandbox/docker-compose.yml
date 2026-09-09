@@ -482,12 +482,17 @@ services:
   #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
   #   any client ──ws──▶ relay:7100 (free reads, host :7100)
   #
-  # The peering channels live on anvil (mock USDC TokenNetwork), opened and
-  # funded by seed-toon-evm BEFORE the connectors boot. Every connector also
-  # settles on the local validator ([settlement.solana]), whose startup
-  # submits a real ATA-create and simulates an InitializeChannel against the
-  # genesis-loaded payment_channel program — so three healthy connectors ARE
-  # the "payment_channel.so deployed and working" proof.
+  # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
+  # (EVM mock USDC), while BOTH peering legs settle on the LOCAL VALIDATOR —
+  # real payment_channel-program channels in the Solana mock USDC mint. Both
+  # mocks are 6-decimal USDC, so amounts cross the boundary unconverted
+  # (conversion/FX is explicitly unsupported). The Solana channels are opened
+  # AFTER the hub boots by the open-toon-solana-channels init job, through
+  # the hub's own operator surface — the repo's only InitializeChannel
+  # submitter (connector/local/mixed-chain is the upstream proof of this
+  # exact shape). Every connector still runs both settlement backends;
+  # Solana startup submits a real ATA-create and simulates an
+  # InitializeChannel against the genesis-loaded payment_channel program.
   #
   # Key material under keys/toon/ is committed valueless throwaway (see
   # scripts/gen-toon-keys.sh); configs under conf/connector-*.toml. The
@@ -510,8 +515,8 @@ services:
       solana-validator:
         condition: service_healthy
 
-  # One-shot: ETH + USDC for every settlement key, peering channels opened
-  # and collateralised (EVM leg).
+  # One-shot: ETH + USDC for every settlement key (EVM leg — the client
+  # channel the smoke opens against the hub lives on anvil).
   seed-toon-evm:
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: 'no'
@@ -524,6 +529,28 @@ services:
       - ./keys/toon:/keys:ro
     depends_on:
       anvil:
+        condition: service_healthy
+
+  # One-shot, POST-BOOT: opens + collateralises the two SOLANA peering
+  # channels through the HUB's operator surface (the payer node is the only
+  # possible submitter — InitializeChannel is a positional account list no
+  # chain CLI can build, and the program's Deposit credits strictly by
+  # signer). Vendored connector/local/open-solana-channel.py; refuses success
+  # unless the chain's own account layout agrees with the committed configs.
+  open-toon-solana-channels:
+    image: python:3.12-slim
+    restart: 'no'
+    entrypoint: ['/bin/sh', '/seed/seed-toon-solana-channels.sh']
+    environment:
+      RPC_URL: http://solana-validator:8899
+      HUB_OPERATOR_URL: http://relay-connector:3000
+      KEYS_DIR: /keys
+    volumes:
+      - ./scripts/seed-toon-solana-channels.sh:/seed/seed-toon-solana-channels.sh:ro
+      - ./scripts/open-solana-channel.py:/seed/open-solana-channel.py:ro
+      - ./keys/toon:/keys:ro
+    depends_on:
+      relay-connector:
         condition: service_healthy
 
   # ── The apps ─────────────────────────────────────────────────────────────
