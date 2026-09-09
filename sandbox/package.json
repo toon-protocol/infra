@@ -1,0 +1,13 @@
+{
+  "name": "toon-sandbox",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@ar.io/sdk": "^4.3.0",
+    "@ar.io/solana-contracts": "^1.2.0",
+    "@solana/kit": "^6.10.0",
+    "@ardrive/turbo-sdk": "^1.43.0",
+    "arweave": "^1.15.7"
+  },
+  "description": "TOON Protocol local dev sandbox scripts (seeding + smoke test)"
+}

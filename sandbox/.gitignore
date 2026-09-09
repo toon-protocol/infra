@@ -1,0 +1,4 @@
+# runtime state (wiped by `make clean`)
+data/
+# host-side script deps (`make setup`)
+node_modules/
