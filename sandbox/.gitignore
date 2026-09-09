@@ -2,3 +2,5 @@
 data/
 # host-side script deps (`make setup`)
 node_modules/
+# smoke-test client channel store (wiped by `make clean`)
+.toon-client/

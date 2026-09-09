@@ -1,0 +1,150 @@
+# =============================================================================
+# relay-connector — the HUB. Terminates the relay's paid write routes and
+# FORWARDS g.toon.store / g.toon.gastation over two ILP-over-HTTP peerings.
+# =============================================================================
+# Shape copied from the connector repo's proven multi-node topologies
+# (connector/local/two-hop + local/mixed-chain — the repo's own CI-exercised
+# peering mechanism: static config-file peering, ADR 0060/0028/0042). Three
+# things to know before editing (from the connector's own config docs):
+#   1. There is NO environment-variable layer; every value comes from this file.
+#   2. Every table is deny_unknown_fields — a typo is a load failure by name.
+#   3. Startup is FAIL-CLOSED: missing key file / unreachable chain = exit 1.
+#
+# Every address below is deterministic, which is what lets this file be
+# committed: settlement keys are derived from anvil's public test mnemonic at
+# fixed indices (see keys/toon/README inside scripts/gen-toon-keys.sh), the
+# contracts land at fixed addresses (DeployLocal.s.sol by anvil account 0 at
+# fixed nonces), and the channel ids are keccak(p1, p2, epoch=0) with the
+# participants sorted (ADR 0059) — recomputed and asserted on every `make up`
+# by scripts/seed-toon-evm.sh.
+
+client_edge_addr = "0.0.0.0:3000"
+
+# Peer claim ledger + claim journal (named volume; the image ships /app/state
+# owned by uid 10001, which a fresh named volume inherits and a bind does not).
+state_dir = "/app/state"
+
+# The two peerings below dial plain http:// inside the compose network. A peer
+# endpoint is wss/https-only unless a node says otherwise; local dev says so.
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# What this node says about itself on GET /ilp. Loopback URLs because the
+# payer (the smoke test) runs on the host; the edge is published at 3200.
+[node]
+addresses = ["g.toon.relay", "g.toon.relay.ephemeral"]
+http_endpoint = "http://127.0.0.1:3200/ilp"
+btp_endpoint = "ws://127.0.0.1:3200/ilp/btp"
+
+# ── Terminated: the relay's paid write path ──────────────────────────────────
+[[routes]]
+prefix = "g.toon.relay"
+handler_url = "http://relay:3100/write"
+price = 1
+
+[[routes]]
+prefix = "g.toon.relay.ephemeral"
+handler_url = "http://relay:3100/write-ephemeral"
+price = 0
+
+# ── Forwarded: the store, over the relay-store peering ───────────────────────
+# ADR 0028 arithmetic, enforced by NOTHING in code, so written out: this hop
+# collects `price`, retains the peering's `fee` (100), forwards the rest. The
+# store-connector terminates g.toon.store at {base=1000, per_kib=10}, so
+# base 1100 - fee 100 == 1000 exactly, with no slack, at every payload size
+# (the per-KiB component is forwarded untouched).
+[[routes]]
+prefix = "g.toon.store"
+peer_id = "relay-store"
+price = { base = 1100, per_kib = 10 }
+
+# ── Forwarded: the gas station, over the relay-gas peering ───────────────────
+# gas-connector terminates g.toon.gastation at 1000; 1100 - 100 == 1000.
+[[routes]]
+prefix = "g.toon.gastation"
+peer_id = "relay-gas"
+price = 1100
+
+# ── The peerings ─────────────────────────────────────────────────────────────
+# Only the dialing side has an endpoint; http:// scheme selects ILP-over-HTTP
+# carriage, and on HTTP the dialer is structurally the payer.
+[[peers]]
+id = "relay-store"
+endpoint = "http://store-connector:3000/ilp"
+fee = 100
+
+[[peers]]
+id = "relay-gas"
+endpoint = "http://gas-connector:3000/ilp"
+fee = 100
+
+# One on-chain channel per peering, in two roles (the deployed shape): the
+# peer role for claims that arrive, the client role (pay_channels) for the
+# cover-forward claims this node signs BEFORE each forwarded PREPARE leaves
+# (ADR 0042 item 2 — required since connector#1145).
+#
+# channel_id = keccak(p1, p2, channelEpoch=0), participants sorted; opened and
+# funded by scripts/seed-toon-evm.sh before this node boots. token_network is
+# TokenNetworkRegistry.getTokenNetwork(mock USDC) — NOT the registry itself.
+[[peer_channels]]
+peer_id = "relay-store"
+channel_id = "0x0e1011bd4e6aa2e04ace59110f78c810ad1daae882c5826bb7460097cd75c5d2"
+counterparty_key = "0xDf37F81dAAD2b0327A0A50003740e1C935C70913" # store-connector settlement
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+[[pay_channels]]
+peer_id = "relay-store"
+channel_id = "0x0e1011bd4e6aa2e04ace59110f78c810ad1daae882c5826bb7460097cd75c5d2"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+client_edge_url = "http://store-connector:3000/ilp"
+
+[[peer_channels]]
+peer_id = "relay-gas"
+channel_id = "0xd57686b20c10ed895bc3e2485d935655bf6f480fd9609ff633b6a751a261d64b"
+counterparty_key = "0x553BC17A05702530097c3677091C5BB47a3a7931" # gas-connector settlement
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+[[pay_channels]]
+peer_id = "relay-gas"
+channel_id = "0xd57686b20c10ed895bc3e2485d935655bf6f480fd9609ff633b6a751a261d64b"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+client_edge_url = "http://gas-connector:3000/ilp"
+
+# ── Settlement ───────────────────────────────────────────────────────────────
+# contract_address is the TokenNetworkRegistry (getTokenNetwork is resolved
+# through it at startup, refuse-to-start on empty). decimals must match the
+# token's own decimals() — the deployed mock USDC is 6.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# Solana settlement: startup submits a real ATA-create and simulates an
+# InitializeChannel against the payment_channel program, so a green boot IS
+# the "payment_channel.so loaded and working" proof. The settlement key must
+# hold SOL before boot — seed-toon-solana funds it.
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+# ── Operator surface ─────────────────────────────────────────────────────────
+# Reads (GET /claims — how the smoke test proves a write was PAID) need the
+# bearer token; writes need an RFC 9421 signature from the allowlisted key.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"

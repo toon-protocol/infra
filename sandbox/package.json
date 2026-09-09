@@ -7,7 +7,10 @@
     "@ar.io/solana-contracts": "^1.2.0",
     "@solana/kit": "^6.10.0",
     "@ardrive/turbo-sdk": "^1.43.0",
-    "arweave": "^1.15.7"
+    "@toon-protocol/client": "2.2.0",
+    "@toon-protocol/core": "3.5.0",
+    "arweave": "^1.15.7",
+    "nostr-tools": "^2.25.1"
   },
   "description": "TOON Protocol local dev sandbox scripts (seeding + smoke test)"
 }
