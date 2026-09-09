@@ -1,0 +1,18 @@
+{
+  "name": "solana-arns",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@ar.io/sdk": "^4.3.0",
+    "@ar.io/solana-contracts": "^1.2.0",
+    "@solana/kit": "^6.10.0"
+  }
+}

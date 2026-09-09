@@ -1,0 +1,80 @@
+# PROTOTYPE — throwaway. Local Solana validator with AR.IO's five Anchor
+# programs + Metaplex Core preloaded at genesis, plus a pre-created (2MB)
+# NameRegistry account (the tests' add_account pattern; creating it on-chain
+# needs ~200 create_name_registry txs).
+#
+# Program ids reuse the committed STAGING (devnet) ids from
+# ar-io-solana-contracts/program-ids/staging.json — the .so files in
+# artifacts/ were dumped from devnet under exactly those ids (declare_id!
+# must match), and they equal @ar.io/sdk's DEVNET_PROGRAM_IDS, so the SDK
+# override wiring is identical to the store's proven devnet path.
+#
+# The five AR.IO programs are loaded with --upgradeable-program (NOT
+# --bpf-program): their `initialize` instructions gate on the program's
+# upgrade authority via the BPF upgradeable-loader ProgramData account,
+# which plain --bpf-program never creates. Upgrade authority = the committed
+# throwaway keys/admin.json (5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX).
+#
+# Image note: ghcr.io/beeman/solana-test-validator is community-maintained and
+# frozen (nightly builds stopped 2026-07-06); observed agave 4.1.1 at the
+# digest below. seccomp=unconfined is required (Agave v2+ uses io_uring).
+name: proto-solana-arns
+services:
+  solana-validator:
+    image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
+    security_opt:
+      - seccomp=unconfined
+    command:
+      - solana-test-validator
+      - --reset
+      - --ledger
+      - /workspace/test-ledger
+      - --rpc-port
+      - '8899'
+      - --limit-ledger-size
+      - '10000000'
+      - --upgradeable-program
+      - 8Njx9wPkXiNzDCgjwVsJFRjpAEV34gGW3n8DzX3V23m1 # ario_core
+      - /data/ario_core.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX # admin = upgrade authority
+      - --upgradeable-program
+      - 7WsDTrtZBsfKtnP33XkjuqXCY69JE7n4QVYpynqJCFxz # ario_gar
+      - /data/ario_gar.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - 6EZNezcg4rc5hnh8HG34vGquT3WpW5xXypzPb24uyEpp # ario_arns
+      - /data/ario_arns.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - DbHbRwUD1oAn1mrDSqtWtvwGcNrmhWdD2g8L4xmeQ7NX # ario_ant
+      - /data/ario_ant.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - bttco5oAnBwCucG63iKokBJCZmNr493f3Ewe9LM3oTx # ario_ant_escrow
+      - /data/ario_ant_escrow.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --bpf-program
+      - CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d # mpl_core (canonical mainnet id)
+      - /data/mpl_core.so
+      - --account
+      - FPotW9q4i2pRsyADBwzWyiQremEanAGtnrKVbr4Kxn35 # NameRegistry PDA (pre-created, 2MB)
+      - /genesis/name-registry.json
+    volumes:
+      - ./artifacts:/data:ro
+      - ./genesis:/genesis:ro
+    ports:
+      - '8899:8899' # JSON-RPC
+      - '8900:8900' # WebSocket (pubsub)
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - solana cluster-version -u http://127.0.0.1:8899
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s

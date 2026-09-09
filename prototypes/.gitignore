@@ -1,0 +1,9 @@
+# Regenerable / heavy prototype dependencies — see each prototype's README for how to restore
+node_modules/
+data/
+# upstream clones (shallow re-clone per README)
+gateway-upload/ar-io-node/
+solana-arns/ar-io-solana-contracts/
+# regenerable artifacts: solana program dumps (`solana program dump --url devnet`) and genesis accounts (gen-genesis.mjs)
+solana-arns/artifacts/
+solana-arns/genesis/

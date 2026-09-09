@@ -1,0 +1,15 @@
+# PROTOTYPE override for ar-io-node/docker-compose.yaml
+# - remaps core's host port off 4000 (taken by a sibling stack on this machine)
+# - adds an ArLocal service so the gateway's "trusted node" is local
+services:
+  core:
+    ports: !override
+      - '3004:4000'
+
+  arlocal:
+    image: textury/arlocal:v1.1.66
+    restart: unless-stopped
+    ports:
+      - '1984:1984'
+    networks:
+      - ar-io-network
