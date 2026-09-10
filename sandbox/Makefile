@@ -15,6 +15,13 @@ export HOST_GID ?= $(shell id -g)
 # README "Prerequisites".
 STORE_CONTEXT := ../../store-gaps-worktree
 
+# The claim-minter image is BUILT from the anytoon sibling checkout (there is
+# no published image for it). Exported, so docker-compose.yml's build context
+# `${ANYTOON_CONTEXT:-../../anytoon}/claim-minter` picks it up — repoint it
+# here (or in your environment) if your checkout lives elsewhere. Keep the
+# default RELATIVE: the compose file has to stay portable.
+export ANYTOON_CONTEXT ?= ../../anytoon
+
 ## one-time: install the script deps (needed by `make smoke` on the host)
 setup:
 	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
@@ -25,6 +32,14 @@ setup:
 		echo "ARNS_SOLANA_RPC_URL/ARNS_SOLANA_WS_URL). Clone/see it there, or"; \
 		echo "update STORE_CONTEXT in the Makefile + the store build context in"; \
 		echo "docker-compose.yml to where your checkout lives."; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
+		echo "ERROR: anytoon checkout not found at $(ANYTOON_CONTEXT)"; \
+		echo "The sandbox builds the claim-minter image from a sibling checkout"; \
+		echo "of the anytoon repo (it publishes no image). Clone it there, or"; \
+		echo "set ANYTOON_CONTEXT to where your checkout lives:"; \
+		echo "    make up ANYTOON_CONTEXT=/path/to/anytoon"; \
 		exit 1; \
 	fi
 	npm ci

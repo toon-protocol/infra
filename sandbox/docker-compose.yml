@@ -487,7 +487,8 @@ services:
       start_period: 15s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # TOON payment layer: three connectors + relay + store + gas-station
+  # TOON payment layer: four connectors + relay + store + gas-station +
+  # the Anyone credentials issuer
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Topology (peering = the connector repo's CI-proven static config-file
   # mechanism, local/two-hop + local/mixed-chain there; ADR 0060/0028/0042):
@@ -496,10 +497,12 @@ services:
   #             g.toon.relay            ──▶ relay:3100/write         (paid)
   #             g.toon.store            ──peering──▶ store-connector ──▶ store:3300/store
   #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
+  #             g.anyone.credentials    ──peering──▶ anytoon-connector ──▶ claim-minter:8080 ──▶ issuer:3000
+  #             g.anyone.credentials.keys ──peering──▶ anytoon-connector ──▶ issuer:3000/v1/keys/ (price 0 there)
   #   any client ──ws──▶ relay:7100 (free reads, host :7100)
   #
   # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
-  # (EVM mock USDC), while BOTH peering legs settle on the LOCAL VALIDATOR —
+  # (EVM mock USDC), while ALL THREE peering legs settle on the LOCAL VALIDATOR —
   # real payment_channel-program channels in the Solana mock USDC mint. Both
   # mocks are 6-decimal USDC, so amounts cross the boundary unconverted
   # (conversion/FX is explicitly unsupported). The Solana channels are opened
@@ -659,6 +662,203 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ── The Anyone credentials issuer stack ──────────────────────────────────
+  # The fourth app behind the payment layer, and the first one that REFUSES TO
+  # SERVE without proof of payment at the APP layer: the issuer will not blind-
+  # sign a bundle without an Ed25519-signed X-Payment-Claim. Vendored, with its
+  # comments' reasoning, from the anytoon sibling checkout's compose.yml.
+  #
+  # THE CHAIN:  anytoon-connector ──▶ claim-minter ──▶ issuer ──▶ postgres/redis
+  #
+  # TRUST BOUNDARY: the connector is the only ingress. The minter, the issuer
+  # and their datastores publish NO host ports — exactly how the relay's write
+  # port and the store's/gas station's handler ports are protected in this file
+  # — and that unreachability is what authorises issuance: the minter does not,
+  # and must not, check X-TOON-Amount (anytoon ADR 0001). (The anytoon repo
+  # uses an `internal:` compose network for the same boundary; this file has no
+  # networks at all, so "unpublished" is the sandbox's own idiom for it.)
+  #
+  # PRICE COUPLING — the hazard of this subsystem. THREE numbers must agree or
+  # every paid request answers 402 CLAIM_INVALID: the connector route price
+  # (conf/connector-anytoon.toml, base units), the minter's BUNDLE_PRICE and
+  # the issuer's BUNDLE_PRICE (both decimals). The latter two are ONE FILE —
+  # conf/anytoon.conf is the `env_file` of both services below, so they cannot
+  # drift; the first is that decimal x 10^6, re-derived and asserted by
+  # scripts/smoke-toon.mjs on every run.
+
+  # One-shot: the issuer's epoch keyring + the minter/issuer Ed25519 proxy pair.
+  #
+  # Runs the UPSTREAM IMAGE'S OWN dev-key generator (`bun run keys:dev` ->
+  # scripts/generate-dev-keys.ts), not a hand-rolled openssl script: the
+  # current issuer wants a SIGNED KEYRING (config/keys/keyring.json — an
+  # Ed25519 root key, an RSA-2048 epoch key, and a root_sig over the canonical
+  # key document), which openssl alone cannot produce. Same image, different
+  # command; nothing about the image is modified. Idempotent — the generator
+  # returns early when all four files exist — except that an EXPIRED epoch is
+  # re-forged, because the keyring lives in a named volume that outlives the
+  # generator's 30-day epoch window and an expired epoch signs nothing.
+  #
+  # proxy.key.pem is a 0644 copy of the generator's 0600 proxy.pem, under the
+  # filename the anytoon repo documents: the minter runs as uid `node` and
+  # could not read the original. DEV KEY MATERIAL, valueless, like everything
+  # else under keys/ here.
+  issuer-keys:
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    restart: 'no'
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        bun run keys:dev
+        bun -e 'const k = await Bun.file("config/keys/keyring.json").json();
+                const e = k.epochs.find((x) => x.epoch_id === k.current_epoch);
+                process.exit(Date.parse(e.not_after) > Date.now() + 86400000 ? 0 : 1)' \
+          || bun scripts/generate-dev-keys.ts --force
+        cp config/keys/proxy.pem config/keys/proxy.key.pem
+        chmod 0644 config/keys/proxy.key.pem config/keys/proxy.pub.pem
+    volumes:
+      - anytoon-keys:/app/config/keys
+
+  # The upstream issuer, UNMODIFIED. Pinned by digest (the `latest` tag is
+  # mutable and this stack's env names track the image's config loader).
+  issuer:
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    env_file:
+      # BUNDLE_PRICE — shared verbatim with claim-minter. See the header above.
+      - conf/anytoon.conf
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      # No DB_SYNCHRONIZE: the schema comes from `issuer-migrate`, which runs
+      # the image's own TypeORM migrations exactly once.
+      POSTGRES_HOST: issuer-postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+      REDIS_HOST: issuer-redis
+      REDIS_PORT: '6379'
+      # The signed epoch keyring + the proxy's PUBLIC half. The issuer never
+      # holds the proxy private key — that is the whole point of the pair.
+      KEYRING_PATH: /keys/keyring.json
+      PROXY_PUBLIC_KEY_PATH: /keys/proxy.pub.pem
+      # A safety net, not a billing trap: a paid request answered 429 is money
+      # for nothing, and payment is the real rate limiter here.
+      RATE_LIMIT_MAX: '6000'
+      RATE_LIMIT_WINDOW_SECONDS: '60'
+    expose:
+      - '3000' # UNPUBLISHED — only the connector's free keys route and the minter dial this
+    volumes:
+      - anytoon-keys:/keys:ro
+    healthcheck:
+      test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    depends_on:
+      issuer-keys:
+        condition: service_completed_successfully
+      issuer-migrate:
+        condition: service_completed_successfully
+      issuer-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Runs the schema migrations exactly once, then exits, so no issuer ever
+  # races another to migrate.
+  issuer-migrate:
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    restart: 'no'
+    entrypoint: ['bun', 'run', 'migration:run']
+    working_dir: /app/apps/backend
+    environment:
+      POSTGRES_HOST: issuer-postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    depends_on:
+      issuer-postgres:
+        condition: service_healthy
+
+  issuer-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - issuer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP check. Without it pg_isready talks to the
+      # local socket and passes against the temporary server the image runs
+      # during initdb, which does not listen on TCP — so `issuer-migrate`
+      # starts and dies with ECONNREFUSED on a cold volume.
+      #
+      # The window is generous on purpose: a COLD volume runs initdb first, and
+      # on a loaded dev box its shutdown checkpoint alone has been measured at
+      # ~9s. A stack that comes up in seconds on an idle machine gave
+      # "dependency failed to start: container ... is unhealthy" on a busy one.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U app -d app']
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  issuer-redis:
+    image: redis:7-alpine
+    volumes:
+      - issuer-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Turns the connector's statement of WHO PAID into the signed payment claim
+  # the issuer requires, and does nothing else. It proxies POST /v1/bundles
+  # only — its handler_url is its ROOT, so without that whitelist a caller
+  # could reach any issuer path with a freshly minted claim attached.
+  #
+  # BUILT from the anytoon sibling checkout, the same pattern the `store` image
+  # uses: relative default (`../../anytoon`), overridable with ANYTOON_CONTEXT
+  # (exported by the Makefile) if your checkout lives elsewhere. There is no
+  # published image for it.
+  claim-minter:
+    build:
+      context: ${ANYTOON_CONTEXT:-../../anytoon}/claim-minter
+    env_file:
+      # BUNDLE_PRICE — the SAME FILE the issuer reads. See the header above.
+      - conf/anytoon.conf
+    environment:
+      PORT: '8080'
+      ISSUER_URL: http://issuer:3000
+      PROXY_PRIVATE_KEY_PATH: /keys/proxy.key.pem
+      # Signed into every claim; the issuer records it but does not check it.
+      ROUTE_ID: g.anyone.credentials
+    expose:
+      - '8080' # UNPUBLISHED — only anytoon-connector dials this
+    volumes:
+      - anytoon-keys:/keys:ro
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    depends_on:
+      issuer:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
   # ── The connectors ───────────────────────────────────────────────────────
   # Stock image on the same immutable pin the relay/store/gas-station deploy
   # bundles carry (rust-2026.08.28.1). No environment layer — every value
@@ -720,7 +920,35 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
-  # The hub. Starts after both accepting peers are healthy (it dials them; a
+  anytoon-connector:
+    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-anytoon.toml:/app/config/connector.toml:ro
+      - ./keys/toon/anytoon-connector:/app/data:ro
+      - anytoon-connector-state:/app/state
+    ports:
+      - '3230:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      # Both terminated routes' handlers: the paid one goes through the minter,
+      # the free keys one straight at the issuer.
+      claim-minter:
+        condition: service_healthy
+      issuer:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The hub. Starts after all three accepting peers are healthy (it dials them; a
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
   relay-connector:
@@ -748,6 +976,8 @@ services:
         condition: service_healthy
       gas-connector:
         condition: service_healthy
+      anytoon-connector:
+        condition: service_healthy
     restart: unless-stopped
     logging: *chain-logging
 
@@ -757,3 +987,9 @@ volumes:
   relay-connector-state:
   store-connector-state:
   gas-connector-state:
+  anytoon-connector-state:
+  # The issuer's signed epoch keyring + the minter/issuer proxy pair, written
+  # by the issuer-keys job. Dev key material; dies with `make clean`.
+  anytoon-keys:
+  issuer-postgres-data:
+  issuer-redis-data:
