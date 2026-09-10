@@ -1,0 +1,106 @@
+##======== /etc/anon/anonrc — the sandbox's HIDDEN-SERVICE ingress ==========##
+#
+# The daemon that gives the anytoon issuer path an address. It generates the
+# address, publishes a descriptor for it on the REAL Anyone network, and
+# forwards what arrives to the anytoon-connector's client edge. It opens no
+# SOCKS port: this daemon is only ever dialed. The buyer's way ONTO the network
+# is a second daemon — see conf/anonrc-client.
+#
+# Vendored from the anytoon sibling checkout's config/anonrc, which is the
+# reference implementation. Only the two HiddenServicePort targets differ, and
+# the block above them says why.
+#
+# The connector NEVER READS THIS FILE and never speaks this daemon's control
+# protocol (connector ADR 0070 decision 7). It is a sidecar, in the relationship
+# this sandbox already has with a chain node: infrastructure a node talks to,
+# never something it contains. What crosses between them is one TCP connection
+# and one address, copied by scripts/hs-address.sh.
+#
+# Mounted READ-ONLY at /etc/anon/anonrc.
+
+# WITHOUT THIS THE DAEMON DOES NOT START. `anon` refuses to run until the terms
+# are accepted, and in a non-interactive container it fails fast —
+# "User has not agreed to the terms and conditions. Exiting." — rather than
+# prompting. It is the most common reason a first bring-up leaves a container
+# that exited at once beside a connector that looks healthy and is unreachable.
+AgreeToTerms 1
+
+# Drop from root to the image's own unprivileged user, whose home the
+# DataDirectory is. The entrypoint has already chowned it.
+User anond
+DataDirectory /var/lib/anon
+
+# EXPLICIT, and it cannot be dropped: the image's entrypoint APPENDS a Nickname
+# when it finds none, and this file is mounted read-only — so a missing one is a
+# write failure at boot rather than a default.
+Nickname toonsandboxhs
+
+# A SERVICE, not a relay and not a client. This node has no peers and no
+# pay-channels of its own, so it opens no circuits for anyone else and needs no
+# SOCKS port. Nothing routes through it either.
+ClientOnly 1
+SocksPort 0
+ORPort 0
+DirPort 0
+ControlSocket 0
+
+# --- The address, and where it lives ----------------------------------------
+#
+# `anon` writes the generated address to HiddenServiceDir/hostname and keeps the
+# private key beside it. On v0.4.10.2 that address ends in `.anyone`, NOT
+# `.onion` — the TLD was renamed, the rename is total, and @toon-protocol/client
+# accepts `.anyone` alone. See anon/Dockerfile.
+#
+# THIS DIRECTORY IS INSIDE THE NAMED VOLUME compose mounts at /var/lib/anon.
+# In a DEPLOYMENT that persistence is load-bearing and its loss is expensive:
+# the address changes and every buyer's configuration goes stale silently. In
+# THIS SANDBOX it is deliberately disposable — `make down` keeps it (so a
+# restart keeps the address), `make clean` wipes it with every other volume, and
+# a new address on the next cold start is expected rather than a fault. That is
+# the one way a rehearsal is easier than the thing it rehearses.
+HiddenServiceDir /var/lib/anon/hidden_service
+
+# --- The two virtual ports, and why they are 127.0.0.1 ----------------------
+#
+# `anon` resolves these targets when it PARSES its config, not when a stream
+# arrives — so a container name here aborts the daemon before it ever runs if
+# that container does not exist yet:
+#
+#     [warn] Unparseable address in hidden service port configuration.
+#     free(): invalid size
+#
+# ...and it cannot exist yet, because the anytoon-connector's own config has to
+# name an address only THIS daemon can generate. The daemon must start first.
+# anytoon breaks that circle with a pinned subnet and a fixed container IP; this
+# sandbox breaks it with a loopback the daemon shares — `anon` runs inside the
+# `hs-ingress` container's network namespace, and that container forwards these
+# two loopback ports on to `anytoon-connector` and `anvil` by NAME, resolved per
+# connection. Nothing needs a fixed IP, no existing service is touched, and
+# recreating the connector (which `make up-hs` does, to give it the rendered
+# config) cannot leave this daemon pointed at a dead address.
+#
+# PORT 80 — THE ISSUER PATH. `client_edge_addr = "0.0.0.0:3000"` is the single
+# socket the anytoon-connector binds, and `POST /ilp` on it is the client edge a
+# buyer pays through. An address is a host, so it is addressed the way any host
+# is: port 80, and the path decides the rest.
+HiddenServicePort 80 127.0.0.1:3000
+
+# PORT 8545 — THE CHAIN RPC, on the SAME address and the same circuit.
+#
+# This is not a second ingress; it is what makes the first one honest. The TOON
+# client sends EVM JSON-RPC through `socksProxy` BY DEFAULT (proxyRpc), because
+# reaching a connector inside the overlay while reading chain state on clearnet
+# would broadcast the payer's settlement address, from the payer's own IP, timed
+# either side of every paid request (toon-client ADR 0002). A buyer settling
+# against this sandbox's `anvil` therefore needs anvil reachable over the
+# overlay too — and the alternative, `proxyRpc: false`, is exactly the property
+# the rehearsal exists to exercise. One address, one descriptor, one key, two
+# virtual ports: `http://<addr>.anyone` is the connector and
+# `http://<addr>.anyone:8545` is the chain it settles on.
+HiddenServicePort 8545 127.0.0.1:8545
+
+# Twice, deliberately: stdout is where `docker compose logs` reads, and the file
+# is what the healthcheck greps for `Bootstrapped 100%`. A container that is Up
+# is not a container that has a circuit.
+Log notice stdout
+Log notice file /var/lib/anon/notice.log

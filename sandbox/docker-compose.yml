@@ -51,8 +51,21 @@ name: toon-sandbox
 #             depends_on marks those peers `required: false` (a required
 #             dependency that is disabled by profile is a hard config error,
 #             not a warning).
+#   hs        THREE EXTRA SERVICES ON TOP OF `full`, never on their own and
+#             never part of it: the `anon` daemon that publishes a `.anyone`
+#             hidden service in front of the anytoon issuer path, the
+#             `hs-ingress` forwarder whose network namespace it shares, and the
+#             `anon-client` SOCKS5 proxy a buyer dials through. OPT-IN, and it
+#             must stay that way: `anon` bootstraps against the REAL Anyone
+#             network, so anything on this profile takes a third-party
+#             dependency and a sandbox whose cold start can go red because a
+#             relay network had a bad day has stopped being a sandbox. Entry
+#             point `make up-hs` (= --profile full --profile hs) + `make
+#             smoke-hs`; `make up` and `make smoke` never render it. See the
+#             "The hidden-service ingress" section at the bottom of this file.
 #
-# `make up` / `make up-payments` are the supported entry points; see Makefile.
+# `make up` / `make up-payments` / `make up-hs` are the supported entry points;
+# see Makefile.
 
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
@@ -998,7 +1011,26 @@ services:
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-anytoon.toml:/app/config/connector.toml:ro
+      # THE CONFIG FILE IS A VARIABLE, and the default is the committed one —
+      # so `make up`, `make up-payments` and a bare `docker compose config`
+      # render exactly what they always did.
+      #
+      # `make up-hs` is the only thing that overrides it, with the RENDERED
+      # config scripts/hs-address.sh writes (conf/.rendered/connector-anytoon.toml
+      # = this file with its [node] endpoints pointed at the daemon's `.anyone`
+      # address). It has to be a different FILE rather than an edit in place,
+      # because the committed one is a source of truth and the address is
+      # generated: it changes on any cold start that wipes the anon volume.
+      #
+      # WHY THE ENDPOINT MATTERS AT ALL: a client dials the URL the node
+      # PUBLISHES at GET /ilp, not the one the caller typed
+      # (ToonClient.transportFor -> selectTransport). A node fronted by a hidden
+      # service that still advertises http://127.0.0.1:3230/ilp sends every
+      # buyer's packet at the buyer's own loopback through the SOCKS proxy. And
+      # a relative endpoint is not the way out: this connector refuses one at
+      # load ("[node] http_endpoint '/ilp' is not a URL: relative URL without a
+      # base").
+      - ${ANYTOON_CONNECTOR_CONF:-./conf/connector-anytoon.toml}:/app/config/connector.toml:ro
       - ./keys/toon/anytoon-connector:/app/data:ro
       - anytoon-connector-state:/app/state
     ports:
@@ -1064,6 +1096,166 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # The hidden-service ingress — profile `hs` ONLY (`make up-hs`)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Everything below rehearses the one production shape the rest of this file
+  # cannot: a node whose ONLY ingress is a `.anyone` hidden service, which is
+  # how the anytoon credentials issuer actually deploys. The buyer dials an
+  # address no DNS resolves, through a SOCKS5h proxy, and its chain RPC rides
+  # the same circuit.
+  #
+  # OPT-IN, AND NEVER IN `make up`. There is no local Anyone directory
+  # authority: `anon` bootstraps against the real network, so every target here
+  # takes a third-party dependency. `make smoke-hs` is a rehearsal, not a gate —
+  # it can fail because the relay network had a bad day, and its output says so
+  # in those words. Two precedents in this org draw the same line: anytoon
+  # splits `make hs-e2e` out of `make local-e2e`, and the connector repo keeps
+  # its hidden-service rehearsals off CI.
+  #
+  # NOTHING IN `full` DEPENDS ON THESE, in either direction — no service outside
+  # this section names one, and `make up` renders none of them. What DOES change
+  # under `hs` is what the anytoon node ADVERTISES: `make up-hs` recreates it
+  # against the rendered config, so its self-description names the `.anyone`
+  # address instead of http://127.0.0.1:3230/ilp. That is the production shape
+  # (the circuit is the ingress), and it is load-bearing rather than cosmetic —
+  # a client dials what a node publishes. Consequences, stated plainly:
+  #   - the HUB is unaffected: it dials the endpoint its own [[peers]] row
+  #     names (http://anytoon-connector:3000/ilp), so hub-routed purchases still
+  #     work exactly as they did.
+  #   - a CLEARNET client pointed straight at localhost:3230 no longer can be:
+  #     the endpoint it is handed is a hidden service and it has no proxy, which
+  #     @toon-protocol/client refuses by name. That is `make smoke` step 4c's
+  #     free-route half. Run `make smoke` against `make up`, `make smoke-hs`
+  #     against `make up-hs`; they are two rehearsals of the same node, not one
+  #     suite split in two.
+
+  # The TCP forwarder the daemon's loopback ports lead to, and the owner of the
+  # network namespace the daemon shares.
+  #
+  # WHY IT EXISTS. `anon` resolves a HiddenServicePort target when it PARSES its
+  # config — before any stream arrives, and before the connector it fronts can
+  # possibly exist, because that connector's own config has to name an address
+  # only this daemon can generate. anytoon breaks that circle with a pinned
+  # subnet and a fixed container IP (compose.yml there, `edge` + 172.31.0.10).
+  # This sandbox breaks it with a shared loopback instead: conf/anonrc names
+  # 127.0.0.1, which always parses, and `socat` here resolves `anytoon-connector`
+  # and `anvil` BY NAME once per connection. The gain is that no existing
+  # service acquires a fixed IP, this project needs no pinned subnet to collide
+  # with someone else's, and `make up-hs` can recreate the connector (it must —
+  # rendered config) without leaving the daemon pointed at a dead address.
+  #
+  # Same image as `anon` — it carries socat for exactly this (see anon/Dockerfile)
+  # — so the profile builds one image and pulls no second one.
+  hs-ingress:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        # 3000 -> the anytoon-connector's client edge (the issuer path).
+        socat -d TCP-LISTEN:3000,bind=127.0.0.1,fork,reuseaddr TCP:anytoon-connector:3000 &
+        # 8545 -> anvil, for the buyer's proxied chain RPC.
+        socat -d TCP-LISTEN:8545,bind=127.0.0.1,fork,reuseaddr TCP:anvil:8545 &
+        wait
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The daemon that gives the anytoon issuer path its address: it generates the
+  # `.anyone` address, publishes a descriptor for it on the real network, and
+  # forwards what arrives to the two loopback ports above. Config: conf/anonrc.
+  #
+  # BUILT, NOT PULLED: ghcr publishes no image past v0.4.9.7, whose `.onion` TLD
+  # every current client refuses by name. See anon/Dockerfile — it is the
+  # anytoon checkout's anon-image pattern, sha256-verified.
+  #
+  # NO `depends_on` ON THE CONNECTOR, deliberately (anytoon's compose.yml makes
+  # the same point). The connector does not need this daemon in order to serve;
+  # it needs it in order to be REACHED, which is a different claim and one
+  # compose cannot express. `make up-hs` orders them: this daemon first, because
+  # its address has to exist before the connector's config can be rendered.
+  anon:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    # Shares hs-ingress's network stack, which is what makes `127.0.0.1` in
+    # conf/anonrc mean "the forwarder". A service in this mode cannot declare
+    # `networks:` — it has hs-ingress's, i.e. the project default, which is also
+    # where its outbound route to the Anyone network comes from.
+    network_mode: 'service:hs-ingress'
+    depends_on:
+      hs-ingress:
+        condition: service_started
+    volumes:
+      - ./conf/anonrc:/etc/anon/anonrc:ro
+      # A NAMED VOLUME: it holds hidden_service/hostname and the private key
+      # behind this address. `make down` keeps it, so the address survives a
+      # restart; `make clean` wipes it with everything else and the next cold
+      # start publishes a NEW address, which in a sandbox is expected rather
+      # than a fault. In a deployment losing it is expensive and silent — see
+      # conf/anonrc.
+      - anon-data:/var/lib/anon
+    restart: unless-stopped
+    logging: *chain-logging
+    healthcheck:
+      # BOTH halves, and neither alone is enough. The hostname file appears at
+      # key generation, seconds in and long before the descriptor is published;
+      # `Bootstrapped 100%` is what says the daemon can actually publish it. A
+      # container that is Up is not a container that has a circuit.
+      test:
+        - 'CMD-SHELL'
+        - "test -s /var/lib/anon/hidden_service/hostname && grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log"
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # The buyer's way in: a SOCKS5 proxy and nothing else, on the host's loopback.
+  # `make smoke-hs` names it as the TOON client's `socksProxy`, which carries
+  # the packets AND (proxyRpc, on by default) the chain RPC.
+  #
+  # ON ITS OWN NETWORK, WITH NO ROUTE TO ANYTHING IN THIS PROJECT. A `.anyone`
+  # name cannot be resolved by anything but the Anyone network, so a packet that
+  # arrives at all arrived over a circuit; being unable to reach
+  # `anytoon-connector` or `anvil` directly makes the shortcut impossible as
+  # well as unused, which is what makes smoke-hs proof rather than assertion.
+  anon-client:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    volumes:
+      - ./conf/anonrc-client:/etc/anon/anonrc:ro
+      - anon-client-data:/var/lib/anon
+    networks: [hs-payer]
+    ports:
+      # 19050, not 9050: an `anon` (or Tor) daemon on a developer's machine
+      # already holds 9050 more often than not, and a second one is
+      # "Bind for 127.0.0.1:9050 failed: port is already allocated" — which
+      # stops the bring-up before anything is proved. Override with
+      # ANON_SOCKS_PORT (the Makefile passes it to smoke-hs too).
+      - '127.0.0.1:${ANON_SOCKS_PORT:-19050}:9050'
+    restart: unless-stopped
+    logging: *chain-logging
+    healthcheck:
+      test: ['CMD-SHELL', "grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+networks:
+  # The buyer's proxy, and nothing else — see `anon-client`. Rendered ONLY under
+  # the `hs` profile, so `make up` creates no such network.
+  hs-payer:
+
 volumes:
   envoy-eds-data:
   relay-data:
@@ -1076,3 +1268,8 @@ volumes:
   anytoon-keys:
   issuer-postgres-data:
   issuer-redis-data:
+  # `hs` profile only. anon-data holds this sandbox's `.anyone` address and the
+  # private key behind it: it survives `make down` (same address next `make
+  # up-hs`) and dies with `make clean` (new address, which is fine here).
+  anon-data:
+  anon-client-data:
