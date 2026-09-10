@@ -22,6 +22,10 @@ Arweave uploads served by the local gateway, the full brokered ArNS buy
 ceremony, and paid gas on both chains, all entering at the hub connector and
 settling on local payment channels.
 
+Working on the payment layer or on a TOON client? `make up-payments && make
+smoke-payments` runs the chains, the hub and its seed jobs alone — seven
+services, five ports, and none of the permaweb half's prerequisites.
+
 **Read the [operator guide](sandbox/README.md)** — it covers what's running,
 a cookbook for every surface, and a step-by-step path to putting **your own
 app** behind a TOON connector (from a five-minute route on the hub to your

@@ -18,6 +18,40 @@
 # See README.md for the cold-start guide; `make up` / `make smoke`.
 name: toon-sandbox
 
+# ── Profiles ────────────────────────────────────────────────────────────────
+# EVERY service carries a profile, deliberately: a compose invocation that
+# selects none then renders an EMPTY project and does nothing at all, which is
+# obvious, instead of silently bringing up some partial stack that looks like
+# the sandbox and is not. The Makefile is the entry point and always
+# selects one — `make up` passes --profile full, which is the same 21 services
+# `make up` started before profiles existed. Driving compose by hand needs the
+# flag too (`docker compose --profile full ps`), or export COMPOSE_PROFILES=full
+# in your shell / a local sandbox/.env once. A --profile flag on the command
+# line REPLACES COMPOSE_PROFILES rather than adding to it.
+#
+#   full      every service — the full-stack proof, the sandbox's default.
+#   payments  the PAYMENT LAYER ONLY, for someone iterating on a TOON client
+#             or on their own route and who has no store sibling checkout:
+#               anvil                      client-leg settlement (EVM)
+#               solana-validator           peer-leg settlement + payment_channel
+#               seed-toon-evm              funds the EVM settlement keys
+#               seed-toon-solana           mock USDC mint + funds/ATAs
+#               relay                      the hub's one TERMINATED paid route
+#                                          (g.toon.relay -> relay:3100/write),
+#                                          i.e. the only destination a paid
+#                                          packet can reach without a peer
+#               relay-connector            the hub itself
+#               open-toon-solana-channels  opens the hub's Solana channels
+#             Everything else — the AR.IO gateway + Turbo bundler, the store
+#             and gas-station apps and their two peering connectors — is `full`
+#             only. The hub still LOADS both peerings under `payments`; a
+#             peering whose far side is not serving simply answers T01, which
+#             is why relay-connector's depends_on marks those two peers
+#             `required: false` (a required dependency that is disabled by
+#             profile is a hard config error, not a warning).
+#
+# `make up` / `make up-payments` are the supported entry points; see Makefile.
+
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
 # see connector/docker-compose.yml's incident note).
@@ -54,6 +88,7 @@ services:
   #    2026-07-06; agave 4.1.1 at this digest). Fallback if it ever breaks:
   #    a tiny Dockerfile over Anza release binaries.
   solana-validator:
+    profiles: ['payments', 'full']
     image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
     security_opt:
       - seccomp=unconfined
@@ -134,6 +169,7 @@ services:
   # exported by the Makefile) with HOME=/tmp (an arbitrary uid has no
   # /etc/passwd entry; forge needs a writable home for ~/.svm).
   anvil:
+    profiles: ['payments', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
     environment:
@@ -228,6 +264,7 @@ services:
   # point at it (core's block importer crashes on ArLocal's minimal genesis;
   # that is why gateway.conf sets START_WRITERS=false).
   arlocal:
+    profiles: ['full']
     image: textury/arlocal:v1.1.66
     restart: unless-stopped
     ports:
@@ -242,9 +279,10 @@ services:
   # ario_arns::initialize + ario_core::initialize (signer = the programs'
   # upgrade authority). Exits 0 immediately if the ArnsConfig PDA already
   # exists. Note: the validator runs with --reset, so a *restart* of that
-  # container wipes chain state — `docker compose up -d` re-runs this job
-  # and reseeds (see README "Restarting the validator").
+  # container wipes chain state — a later `make up` re-runs this job and
+  # reseeds (see README "Restarting the validator").
   seed-solana:
+    profiles: ['full'] # ARIO mint + ArNS/core initialize — store side only
     build: .
     restart: 'no'
     environment:
@@ -265,6 +303,7 @@ services:
   # better-sqlite3) against the shared sqlite bind mount. Idempotent
   # (INSERT OR REPLACE of the same row).
   seed-gateway-block:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-head-block.sh']
@@ -284,6 +323,7 @@ services:
   # routes 503, which nothing in the sandbox uses.
 
   envoy:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-envoy:a487df83812f30d8753d89d28f45200606c64678
     restart: unless-stopped
     ports:
@@ -323,6 +363,7 @@ services:
       - core
 
   core:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: unless-stopped
     ports:
@@ -368,6 +409,7 @@ services:
         condition: service_healthy
 
   redis:
+    profiles: ['full']
     image: redis:7
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save "" --appendonly no
     restart: unless-stopped
@@ -383,6 +425,7 @@ services:
   # load-bearing, envoy's cluster targets it by DNS).
 
   upload-service:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service:fd1032e3012c0179577b08bbfe932f4ad7d805cd
     restart: on-failure
     env_file:
@@ -416,6 +459,7 @@ services:
         condition: service_completed_successfully
 
   fulfillment-service:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service-fulfillment:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     env_file:
@@ -450,6 +494,7 @@ services:
         condition: service_completed_successfully
 
   upload-service-pg:
+    profiles: ['full']
     image: postgres:13.8
     restart: on-failure
     environment:
@@ -460,6 +505,7 @@ services:
       - ./data/upload-service-pg:/var/lib/postgresql/data
 
   localstack:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service-localstack:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     ports:
@@ -519,6 +565,7 @@ services:
 
   # One-shot: mock USDC mint + SOL/USDC for every settlement key (Solana leg).
   seed-toon-solana:
+    profiles: ['payments', 'full']
     build: .
     restart: 'no'
     environment:
@@ -534,6 +581,7 @@ services:
   # One-shot: ETH + USDC for every settlement key (EVM leg — the client
   # channel the smoke opens against the hub lives on anvil).
   seed-toon-evm:
+    profiles: ['payments', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-evm.sh']
@@ -554,6 +602,11 @@ services:
   # signer). Vendored connector/local/open-solana-channel.py; refuses success
   # unless the chain's own account layout agrees with the committed configs.
   open-toon-solana-channels:
+    # In the `payments` profile the two counterparty connectors are not
+    # running, but nothing here talks to them: the channels are opened by the
+    # HUB against the peers' committed Solana settlement PUBLIC keys, so both
+    # accounts still land on chain and the Solana leg is still proven.
+    profiles: ['payments', 'full']
     image: python:3.12-slim
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-solana-channels.sh']
@@ -576,6 +629,10 @@ services:
   # verification for paid ephemeral kinds on exactly that guarantee). Reads
   # (7100) are free NIP-01 over WebSocket.
   relay:
+    # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
+    # this is the one destination a paid packet can reach with no peer running
+    # — i.e. what makes "a paid request against the hub settles" testable.
+    profiles: ['payments', 'full']
     image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
     env_file:
       - conf/relay.conf
@@ -607,9 +664,14 @@ services:
   # Once upstream ships them, the pin works again:
   #   image: ghcr.io/toon-protocol/store@sha256:564323255704529e0cad7ed9b3c00b6d6716ebcb887117de04c0f4937f80cfec # :release, 2026-09 (pre-override)
   store:
+    # `full` only — this is the one service built from a SIBLING CHECKOUT, and
+    # keeping it out of `payments` is what lets a payments-only developer work
+    # without STORE_CONTEXT existing at all (see Makefile).
+    profiles: ['full']
     build:
       # The store sibling checkout (documented in README prerequisites; `make
-      # setup` preflights it). Relative so the compose file stays portable.
+      # up` preflights it — `make setup` only notes it, and `make up-payments`
+      # never renders this service). Relative so the file stays portable.
       context: ../../store-gaps-worktree
       dockerfile: Dockerfile.store
     env_file:
@@ -637,6 +699,7 @@ services:
   # contracts/DeploySandboxExtras.s.sol and conf/gas-station.conf). Handler
   # port 3300 UNPUBLISHED; free /describe + /health surface at host 3400.
   gas-station:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/gas-station@sha256:93429c3ad170dac358a58e0692037f2bd0071d5d53619c312afa80d359869cf4 # :release, 2026-09
     env_file:
       - conf/gas-station.conf
@@ -668,6 +731,7 @@ services:
   # binds IPv4 only and busybox wget resolves ::1 first).
 
   store-connector:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -697,6 +761,7 @@ services:
     logging: *chain-logging
 
   gas-connector:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -724,6 +789,7 @@ services:
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
   relay-connector:
+    profiles: ['payments', 'full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -744,10 +810,17 @@ services:
         condition: service_completed_successfully
       relay:
         condition: service_healthy
+      # `required: false` ONLY so the `payments` profile renders: a depends_on
+      # naming a service the active profiles disable is a hard config error
+      # ("depends on undefined service"), and required:false downgrades that to
+      # a warning. Under `full` both peers exist, so the wait is unchanged —
+      # the hub still starts only after both accepting peers are healthy.
       store-connector:
         condition: service_healthy
+        required: false
       gas-connector:
         condition: service_healthy
+        required: false
     restart: unless-stopped
     logging: *chain-logging
 
