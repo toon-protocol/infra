@@ -2,6 +2,13 @@
 // one run (run from sandbox/ on the host after `make up`; second half of
 // `make smoke`).
 //
+// TOON_SMOKE_PAYMENTS_ONLY=1 (what `make smoke-payments` sets, after
+// `make up-payments`) runs the PAYMENT LAYER HALF ONLY — steps 0, 0b, 1, 2 and
+// a client-leg-only version of step 5. The store, the gas station and their
+// two peering connectors are not running under the `payments` compose profile,
+// so steps 3/3b/4/4b and the peer-leg book assertions are skipped rather than
+// duplicated into a second script.
+//
 //   0. payment infrastructure is live:
 //        - TokenNetworkRegistry has code on anvil (the forge deploy landed)
 //        - payment_channel is an EXECUTABLE account on the validator
@@ -61,6 +68,9 @@ import {
 } from 'ethers';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // sandbox/
+// Set by `make smoke-payments`; see the header. Everything it gates is a
+// store/gas-station assertion, never a payment-layer one.
+const PAYMENTS_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_SMOKE_PAYMENTS_ONLY ?? '');
 const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
 const GAS_EDGE = process.env.GAS_EDGE_URL ?? 'http://localhost:3220';
@@ -181,7 +191,10 @@ step('0. payment infrastructure is live');
   if (!result?.value?.executable) fatal(`payment_channel ${PAYMENT_CHANNEL_PROGRAM} is not an executable account on the validator`);
   ok(`payment_channel is loaded and executable on the validator (owner ${result.value.owner})`);
 }
-for (const [name, url] of [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE]]) {
+const EDGES = PAYMENTS_ONLY
+  ? [['relay-connector (hub)', HUB]] // the peer edges are not running
+  : [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE]];
+for (const [name, url] of EDGES) {
   const res = await fetch(`${url}/ilp`).catch((e) => fatal(`${name} unreachable at ${url}: ${e.message}`));
   if (!res.ok) fatal(`${name} GET /ilp -> ${res.status}`);
   const desc = await res.json();
@@ -196,6 +209,9 @@ for (const [name, url] of [['relay-connector (hub)', HUB], ['store-connector', S
 // the program's own account layout: participants, mint, Opened, and the
 // hub's collateral behind its claims. This is the on-chain half of the
 // "peer legs settle on Solana" proof; the claim books below are the other.
+// Asserted under the `payments` profile too: the hub is the sole submitter and
+// signs against the peers' committed PUBLIC keys, so the accounts land whether
+// or not the counterparty connectors are running.
 step('0b. the two SOLANA peering channels are open and collateralised on the validator');
 for (const [label, { account, peer }] of Object.entries(SOLANA_CHANNELS)) {
   let ch = null;
@@ -235,9 +251,13 @@ const opened = await client.channel.open({ deposit: 10_000_000n });
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 
 const hubBefore = clientBookTotal(await claims('relay-connector'));
-const storeBefore = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
-const gasBefore = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
-console.log(`  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}`);
+const storeBefore = PAYMENTS_ONLY ? 0n
+  : peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
+const gasBefore = PAYMENTS_ONLY ? 0n
+  : peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+console.log(PAYMENTS_ONLY
+  ? `  books before: hub client=${hubBefore}`
+  : `  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}`);
 
 // ── 2. paid relay write + free read ──────────────────────────────────────
 step('2. a PAID write reaches the relay; a FREE read returns it');
@@ -272,6 +292,36 @@ const read = await new Promise((resolve, reject) => {
 }).catch((e) => { bad(e.message); return null; });
 if (read) {
   assert(read.id === event.id && read.sig === event.sig, 'the free read returned the event byte-for-byte');
+}
+
+// ── the `payments` profile ends here ─────────────────────────────────────
+// Everything below drives the store and the gas station over the two
+// peerings, and neither app (nor its connector) runs under that profile. The
+// money is still asserted, on the one leg this profile has: the client's EVM
+// channel against the hub. g.toon.relay is priced at 1 base unit (conf/
+// connector-relay.toml), so one paid write is exactly +1 on the hub's client
+// book — small, but it is a real signed claim on the anvil channel opened in
+// step 1, which is the whole point.
+if (PAYMENTS_ONLY) {
+  step('5. the hub’s own book says the write was PAID — client leg, on EVM');
+  let rows = [];
+  let hubNow = hubBefore;
+  for (let i = 0; i < 20 && hubNow - hubBefore < 1n; i++) {
+    await sleep(500);
+    rows = await claims('relay-connector');
+    hubNow = clientBookTotal(rows);
+  }
+  assert(hubNow - hubBefore >= 1n,
+    `hub client book advanced by ${hubNow - hubBefore} (>= 1, the paid relay write)`);
+  const payChannels = [...new Set(rows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
+  assert(payChannels.length > 0 && payChannels.every((c) => /^(evm:)?0x[0-9a-f]{64}$/i.test(c)),
+    `client leg settles on EVM: hub client-book channels ${payChannels.join(', ')} are anvil channel ids`);
+  assert(payChannels.some((c) => c.replace(/^evm:/, '').toLowerCase() === String(opened.channelId).toLowerCase()),
+    `and include the channel the client opened in step 1 (${opened.channelId})`);
+  console.log(failures === 0
+    ? '\n\x1b[32mTOON PAYMENTS SMOKE OK: contracts + payment_channel live, the hub’s two Solana peering channels open and collateralised, an EVM channel opened against the hub, a paid write routed through it and journaled as a claim on that channel.\x1b[0m'
+    : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
+  process.exit(failures === 0 ? 0 : 1);
 }
 
 // ── 3. paid store blob THROUGH THE PEERING ───────────────────────────────

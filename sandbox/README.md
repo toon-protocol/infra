@@ -90,20 +90,22 @@ hold the detailed findings).
   service bind-mounts its Foundry project (`packages/contracts`) and deploys
   the settlement contracts in-container on every start (the connector repo's
   own proven pattern; submodules self-heal if the clone wasn't `--recursive`)
-- The **store sibling checkout** at `../../store-gaps-worktree` — the `store`
-  image is BUILT from it (compose build context), because the sandbox needs
-  the local-endpoint-override change that checkout carries (branch
-  `feat/local-endpoint-overrides`: `STORE_TURBO_UPLOAD_URL`,
-  `ARNS_SOLANA_RPC_URL`/`ARNS_SOLANA_WS_URL`) and the pinned upstream image
-  predates it. `make setup` preflights this and says how to repoint the
-  context (Makefile `STORE_CONTEXT` + the `store` service in
+- **Full stack only** — the **store sibling checkout** at
+  `../../store-gaps-worktree`: the `store` image is BUILT from it (compose
+  build context), because the sandbox needs the local-endpoint-override
+  change that checkout carries (branch `feat/local-endpoint-overrides`:
+  `STORE_TURBO_UPLOAD_URL`, `ARNS_SOLANA_RPC_URL`/`ARNS_SOLANA_WS_URL`) and
+  the pinned upstream image predates it. `make up` preflights it and says how
+  to repoint the context (Makefile `STORE_CONTEXT` + the `store` service in
   `docker-compose.yml`) if your checkout lives elsewhere; once upstream
   ships the change, the commented image pin in `docker-compose.yml` works
-  again
+  again. The `payments` profile below never builds the store, so it needs
+  none of this
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
-  3210, 3220, 3300, 3400, 7100
-- `*.localhost` resolving to loopback (default on modern Linux/macOS
-  resolvers; check with `getent hosts foo.ar.localhost`)
+  3210, 3220, 3300, 3400, 7100 — the `payments` profile only needs 8545,
+  8899, 8900, 3200 and 7100
+- **Full stack only** — `*.localhost` resolving to loopback (default on
+  modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
 
 ### Cold start
 
@@ -125,6 +127,55 @@ make down    # stop, keep state (uploads, gateway caches, claim journals)
 make clean   # stop + wipe ALL state; next `make up` is a cold start again
 make logs    # follow everything        make ps   # service status
 ```
+
+### Payment layer only (the `payments` profile)
+
+If you are writing a TOON **client**, or iterating on your own route against
+the hub (§5), you do not need the permaweb half of the sandbox — and you do
+not need the store sibling checkout either:
+
+```bash
+cd sandbox
+make setup           # npm ci; says so and moves on if there's no store checkout
+make up-payments     # docker compose --profile payments up -d --build
+make smoke-payments  # payment-layer proof only
+```
+
+Seven services instead of twenty-one:
+
+| in `payments` | why |
+|---|---|
+| `anvil` | the CLIENT leg settles here (EVM mock USDC) |
+| `solana-validator` | the PEER legs settle here; carries `payment_channel` |
+| `seed-toon-evm` | ETH + mock USDC for every settlement key |
+| `seed-toon-solana` | the Solana mock USDC mint, ATAs and SOL |
+| `relay` | `g.toon.relay` is the hub's only TERMINATED route — the one destination a paid packet can reach with no peer running |
+| `relay-connector` | the hub itself, client edge on **3200** |
+| `open-toon-solana-channels` | opens + collateralises the hub's two Solana channels |
+
+Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
+`arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
+`localstack`, `seed-gateway-block`, `seed-solana`), the `store` and
+`gas-station` apps, and the two peering connectors that front them
+(`store-connector`, `gas-connector`).
+
+The hub still LOADS both peerings under this profile — nothing about its
+config changes — so `g.toon.store` and `g.toon.gastation` are still priced and
+routed, they simply answer `T01` with nobody on the far side. `g.toon.relay`
+(price 1) and `g.toon.relay.ephemeral` (free) work exactly as in the full
+stack, which is what `make smoke-payments` proves: contracts + program live,
+both Solana peering channels open and collateralised on the validator, an EVM
+channel opened against the hub, a paid write routed through it and journaled
+as a claim on that channel.
+
+`make down`, `make clean`, `make logs` and `make ps` work the same either way.
+
+> **Driving compose by hand:** every service carries a profile, so a bare
+> `docker compose …` in `sandbox/` selects nothing and does nothing. Pass the
+> profile (`docker compose --profile full ps -a`) or export
+> `COMPOSE_PROFILES=full` in your shell — or drop it in a local `sandbox/.env`
+> once. A `--profile` flag on the command line replaces `COMPOSE_PROFILES`
+> rather than adding to it. The `make` targets always pass one for you.
 
 ## 3. The tour: what's running
 
@@ -282,9 +333,15 @@ Fastest way to see your app earn money. No new connector, no peering.
 
    ```yaml
    myapp:
-     build: ../../myapp          # or image: ...
+     profiles: ['payments', 'full']   # or just ['full']; omitting the key
+                                      # entirely also means "always on"
+     build: ../../myapp               # or image: ...
      # no ports: — reachable only through a connector
    ```
+
+   Listing `payments` is usually what you want here: your app plus the hub
+   and the chains is exactly the `make up-payments` set (§2), and it does not
+   drag in the gateway, the bundler or the store checkout.
 
 2. Add the route to the hub's config, `conf/connector-relay.toml` (next to
    the existing `g.toon.relay` rows):
@@ -508,22 +565,23 @@ the local bundler skips balance checks anyway.
 - **`make clean`** wipes all of it; the next `make up` is a true cold start.
 - **Validator restarts wipe chain state**: the validator runs `--reset`, so
   a container restart loses bought names and channel accounts (the
-  gateway's caches expire within ~30s). A plain `docker compose up -d`
-  afterwards re-runs the seed jobs (they detect the missing state and
-  reseed, and `open-toon-solana-channels` re-opens the peering channels) —
-  but names bought before the restart are gone; re-buy them.
+  gateway's caches expire within ~30s). Re-running `make up` (or
+  `make up-payments`) afterwards re-runs the seed jobs (they detect the
+  missing state and reseed, and `open-toon-solana-channels` re-opens the
+  peering channels) — but names bought before the restart are gone; re-buy
+  them.
 - Re-running `make up` on a healthy stack is a no-op: every init job checks
   before it writes.
 
 ## 8. Troubleshooting
 
 - **Upload 503 "Unable to sign receipt"**: `seed-gateway-block` didn't run —
-  `docker compose ps -a` should show it `Exited (0)`; re-run with
-  `docker compose up -d seed-gateway-block`.
+  `make ps` should show it `Exited (0)`; re-run with
+  `docker compose up -d seed-gateway-block` (naming a service explicitly
+  enables its profile, so no `--profile` flag is needed for that form).
 - **Name never resolves**: check `seed-solana` logs
   (`docker compose logs seed-solana`) — if the validator restarted after
-  seeding, run `docker compose up -d` to reseed, then re-buy (chain state
-  was wiped).
+  seeding, run `make up` to reseed, then re-buy (chain state was wiped).
 - **`*.ar.localhost` doesn't resolve**: use
   `curl -H 'Host: <name>.ar.localhost' http://localhost:3000/` (note: Node's
   `fetch()` silently drops a user-set Host header; curl is fine).
@@ -532,9 +590,12 @@ the local bundler skips balance checks anyway.
   the healthcheck requires code at the registry AND the sandbox extras) and
   the validator answers on 8899; then `docker compose logs <connector>`
   names the failing backend.
-- **`make setup` complains about the store context**: the store image
-  builds from the sibling checkout — see Prerequisites for repointing
-  `STORE_CONTEXT`.
+- **`make up` stops on the store context**: the store image builds from the
+  sibling checkout — see Prerequisites for repointing `STORE_CONTEXT`, or use
+  `make up-payments`, which never builds it. `make setup` only prints a note
+  about it; the gate lives on `make up`, the one path that builds the image.
+- **A bare `docker compose` command does nothing**: it selected no profile —
+  see the note at the end of §2.
 
 ### Known noise (harmless)
 
