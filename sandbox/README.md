@@ -83,6 +83,12 @@ hub's edge:
    claim books are asserted per leg: the client leg on the anvil channel,
    all three peering legs on the committed Solana channel accounts.
 
+And one thing `make smoke` deliberately does **not** prove, because it takes a
+third-party dependency: reaching a node whose **only** ingress is a `.anyone`
+hidden service, which is how the credentials issuer actually deploys. That is
+the opt-in `hs` profile — `make up-hs` + `make smoke-hs`, never part of a cold
+start (§2, *Hidden-service ingress*).
+
 Everything here was distilled from three proven throwaway prototypes on the
 `prototype/local-ar-io-stack` branch
 (`prototypes/{solana-arns,gateway-upload,full-stack}` — their `VERDICT.md`s
@@ -184,6 +190,77 @@ channel opened against the hub, a paid write routed through it and journaled
 as a claim on that channel.
 
 `make down`, `make clean`, `make logs` and `make ps` work the same either way.
+
+### Hidden-service ingress (the `hs` profile) — opt-in, and it dials a real network
+
+Everything above reaches every node at a published clearnet port. The Anyone
+credentials issuer (§6.5) does not deploy that way: its connector publishes no
+port at all and a `.anyone` hidden service is the only way in. The `hs` profile
+rehearses exactly that, and **nothing else in this sandbox depends on it**:
+
+```bash
+make up-hs      # = --profile full --profile hs; expect 2-5 min of bootstrapping
+make smoke-hs   # buy one bundle over the circuit, chain RPC included
+```
+
+> **This is the one target that takes a third-party dependency.** `anon`
+> bootstraps against the **real Anyone Protocol network** — there is no local
+> directory authority and no private relay set, so `make up-hs` and
+> `make smoke-hs` can both fail because that network had a bad day. **They are
+> deliberately excluded from `make up` and `make smoke`**: a sandbox whose cold
+> start can go red because someone else's relays are having a bad afternoon has
+> stopped being a sandbox. `make smoke-hs` is a **rehearsal, not a gate** — run
+> it on purpose, and expect it to be flaky in a way nothing else here is.
+> (`anytoon` splits `make hs-e2e` out of `make local-e2e` for the same reason,
+> and the connector repo keeps its hidden-service rehearsals off CI.)
+
+Three extra services, all `hs`-only:
+
+| in `hs` | what |
+|---|---|
+| `anon` | the daemon, **v0.4.10.2 built from source-of-truth release binaries** (§6.6). Generates this sandbox's `.anyone` address, publishes a descriptor for it, forwards what arrives |
+| `hs-ingress` | a two-port `socat` forwarder; owns the network namespace `anon` shares, so the daemon's config can name `127.0.0.1` (§6.6) |
+| `anon-client` | a SOCKS5 proxy on `127.0.0.1:19050` — the buyer's way onto the network, and nothing else. On its own compose network with **no route to any other service** |
+
+What `make smoke-hs` proves, in one paid purchase:
+
+- the address is dialled through **`socks5h://`**, so the hostname is resolved
+  by the daemon and never leaks into a local DNS query;
+- the **chain RPC rides the same circuit** — `proxyRpc` is the TOON client's
+  default and this script never turns it off, so the channel open, the deposit
+  and the buyer's own mock-USDC mint all leave through the proxy. `conf/anonrc`
+  publishes anvil on **virtual port 8545 of the same address** to make that
+  possible: reaching the connector inside the overlay while reading chain state
+  on clearnet would broadcast the payer's settlement address, from the payer's
+  own IP, either side of every paid request;
+- the issuer really blind-signs a bundle, and the payee's own claim book agrees
+  it was paid.
+
+**Two verdicts, never confused.** `smoke-hs` checks everything this sandbox
+controls *before* it dials anything — the daemon is healthy (address on disk
+**and** `Bootstrapped 100%`), the proxy is listening, the node advertises that
+exact address, the price triple agrees — and only then opens a circuit. So:
+
+| exit | meaning |
+|---|---|
+| `0` | bought |
+| `1` | **SANDBOX-SIDE**: something here is wrong, and the message says what |
+| `75` | **NETWORK-SIDE** (`EX_TEMPFAIL`): preflight passed, the overlay would not carry. It retries three times first (`SMOKE_HS_ATTEMPTS`) and prints both daemons' own last words. Try again later — this is not a bug to hunt |
+
+**`make smoke` and `make smoke-hs` are alternatives, not a suite.** `make up-hs`
+recreates `anytoon-connector` against a rendered config whose `[node]` endpoints
+are the `.anyone` address, because **a client dials what a node publishes**.
+That is the production shape — and it means a clearnet client pointed straight
+at `localhost:3230` is handed a hidden-service endpoint it has no proxy for, and
+refuses (by name) to dial it. The hub is unaffected (it dials the endpoint its
+own `[[peers]]` row names), so hub-routed purchases still work; but
+`make smoke`'s step 4c talks to that node directly and will not survive it. Run
+`make smoke` against `make up`, `make smoke-hs` against `make up-hs`.
+
+**The address is disposable here.** It lives in the `anon-data` named volume:
+`make down` keeps it (same address next `make up-hs`), `make clean` wipes it and
+the next cold start publishes a new one. In a deployment that same wipe would
+strand every buyer's configuration silently; in a sandbox it is expected.
 
 > **Driving compose by hand:** every service carries a profile, so a bare
 > `docker compose …` in `sandbox/` selects nothing and does nothing. Pass the
@@ -733,6 +810,70 @@ issuer image's own generator (§6.1). The connector's own keys are committed
 like the other three nodes' — `keys/toon/anytoon-connector/`, mnemonic
 indices 28 (EVM) / 37 (Solana).
 
+### 6.6 The hidden-service ingress (`hs` profile)
+
+Read §2's *Hidden-service ingress* first for what it is and why it is opt-in.
+This is how it is put together, and the four facts that are easy to get wrong.
+
+**The daemon is BUILT, not pulled, and the version is the whole point.**
+`ghcr.io/anyone-protocol/ator-protocol` publishes nothing past **v0.4.9.7**
+(October 2024), and Anyone Protocol renamed the hidden-service TLD after it:
+v0.4.9.7 writes `<56-base32>.onion`, **v0.4.10.2 writes `.anyone` and refuses
+the same address spelled `.onion`**. `@toon-protocol/client` accepts `.anyone`
+alone — its hostname regex is `/^[a-z2-7]+\.anyone$/` and it rejects `.onion`
+by name, because that is Tor. So a daemon at the published tag would publish an
+address every client here refuses. `anon/Dockerfile` overlays the official
+v0.4.10.2 release binary — **sha256-verified before it is ever executed** — onto
+that ghcr image, keeping the image contract (the `anond` user, `/var/lib/anon`,
+the entrypoint) identical. It is vendored from the anytoon checkout's
+`anon-image/Dockerfile`, which is the reference implementation.
+
+**`hs-ingress` exists to break a circle.** `anon` resolves a `HiddenServicePort`
+target when it *parses* its config — before a stream ever arrives, and before
+the connector it fronts can possibly exist, because that connector's config has
+to name an address only the daemon can generate. anytoon breaks the circle with
+a pinned subnet and a fixed container IP; this sandbox breaks it with a shared
+loopback: `anon` runs inside `hs-ingress`'s network namespace, `conf/anonrc`
+names `127.0.0.1` (which always parses), and `socat` there resolves
+`anytoon-connector` and `anvil` **by name, once per connection**. No existing
+service acquires a fixed IP, this project pins no subnet that could collide with
+someone else's, and `make up-hs` can recreate the connector without leaving the
+daemon pointed at an address that has moved.
+
+**Two virtual ports on one address**, both in `conf/anonrc`:
+
+| virtual port | forwards to | why |
+|---|---|---|
+| `80` | `anytoon-connector:3000` | the issuer path — the client edge a buyer pays through |
+| `8545` | `anvil:8545` | the buyer's chain RPC, on the same address and the same circuit |
+
+The second is not a second ingress; it is what makes the first honest. See §2.
+
+**The connector's config is rendered, and that is the load-bearing step.**
+`scripts/hs-address.sh` reads `hidden_service/hostname` out of the daemon and
+writes `conf/.rendered/connector-anytoon.toml` — the committed
+`conf/connector-anytoon.toml` with its two `[node]` endpoints repointed at
+`http://<addr>.anyone`. `make up-hs` then brings the stack up with
+`ANYTOON_CONNECTOR_CONF` naming that file (nothing else ever sets it, so every
+other target mounts the committed config unchanged). This matters because **a
+client dials the endpoint a node publishes, not the URL the caller typed**: a
+node behind a hidden service still advertising `http://127.0.0.1:3230/ilp` sends
+every buyer's packet at the buyer's own loopback, through the proxy. A relative
+endpoint is not a way out — this connector refuses one at load
+(`[node] http_endpoint '/ilp' is not a URL: relative URL without a base`).
+`smoke-hs`'s preflight asserts the published endpoint before it dials, so that
+particular mistake can never masquerade as a bad day on the network.
+
+**`smoke-hs` buys as its own party** (`accountIndex 5`, not 0). `make smoke`
+deliberately opens a **zero-deposit** channel between account 0 and this node —
+that is how its step 4c proves an unpaid request is refused. A client reusing
+account 0 would *adopt* that channel (an open channel is taken as found,
+deposit and all) and could never pay from it; collateralising it instead would
+silently break the assertion `make smoke` makes. Two buyers, two channels,
+no interference in either direction. The buyer mints its own mock USDC —
+`MockERC20.mint` is ungated on the from-source deploy — over the circuit, like
+everything else it does.
+
 ## 7. Lifecycle and state
 
 - **`make down`** stops everything but keeps state: gateway/bundler data
@@ -748,6 +889,13 @@ indices 28 (EVM) / 37 (Solana).
   them.
 - Re-running `make up` on a healthy stack is a no-op: every init job checks
   before it writes.
+- **The `.anyone` address (`hs` profile) survives `make down` and dies with
+  `make clean`.** It lives in the `anon-data` volume with the private key
+  behind it; `make down`/`make up-hs` keeps the same address, `make clean`
+  publishes a new one on the next cold start (and drops
+  `conf/.rendered/`). That is fine here and expensive in a deployment — §6.6.
+- `make down` and `make clean` sweep **every** profile's containers, whichever
+  one brought them up, so `make up-hs && make down` leaves no daemon running.
 
 ## 8. Troubleshooting
 
@@ -783,6 +931,25 @@ indices 28 (EVM) / 37 (Solana).
 - **Credentials purchases fail after the stack has run a month**: the
   issuer's epoch expired. `docker compose up -d --force-recreate
   issuer-keys issuer` re-forges it.
+- **`make up-hs` waits five minutes and gives up on `anon`**: read the
+  daemon's own log (`docker compose --profile hs logs --tail 80 anon`). A
+  container that is *Up* but not healthy is bootstrapping against the real
+  Anyone network and is usually not your fault; a container that **exited at
+  once** is a config fault — almost always a missing `AgreeToTerms 1` or a
+  missing explicit `Nickname` in `conf/anonrc` (the image's entrypoint would
+  append one, and the file is mounted read-only, so it fails at boot instead).
+- **`make smoke-hs` exits 75**: network-side, by construction — it only reaches
+  that verdict after preflight has proved the daemon holds the address, the
+  proxy is listening and the node advertises exactly that address. Re-run it
+  later. Exit 1 is the other kind and names what is wrong here.
+- **`make smoke` fails at step 4c after `make up-hs`**: expected, not a
+  regression. That node now advertises its `.anyone` address, and a clearnet
+  client has no proxy to reach it with — §2, *Hidden-service ingress*.
+- **`F01 … no record of that channel` after `make down` + `make up-hs`**:
+  anvil keeps nothing across a restart, so a kept channel store outlives its
+  chain. `smoke-hs` reads its channel's collateral back off the chain before it
+  signs anything and starts a fresh channel when the old one is gone; a client
+  of your own needs the same check, or a `make clean`.
 
 ### Known noise (harmless)
 
