@@ -4,3 +4,7 @@ data/
 node_modules/
 # smoke-test client channel store (wiped by `make clean`)
 .toon-client/
+# the connector config `make up-hs` renders with the generated .anyone address
+# (scripts/hs-address.sh; wiped by `make clean`). Generated, never committed:
+# the address dies with the anon volume.
+conf/.rendered/

@@ -18,6 +18,55 @@
 # See README.md for the cold-start guide; `make up` / `make smoke`.
 name: toon-sandbox
 
+# ── Profiles ────────────────────────────────────────────────────────────────
+# EVERY service carries a profile, deliberately: a compose invocation that
+# selects none then renders an EMPTY project and does nothing at all, which is
+# obvious, instead of silently bringing up some partial stack that looks like
+# the sandbox and is not. The Makefile is the entry point and always
+# selects one — `make up` passes --profile full, which is every service in
+# this file, exactly what `make up` started before profiles existed. Driving
+# compose by hand needs the
+# flag too (`docker compose --profile full ps`), or export COMPOSE_PROFILES=full
+# in your shell / a local sandbox/.env once. A --profile flag on the command
+# line REPLACES COMPOSE_PROFILES rather than adding to it.
+#
+#   full      every service — the full-stack proof, the sandbox's default.
+#   payments  the PAYMENT LAYER ONLY, for someone iterating on a TOON client
+#             or on their own route and who has no store sibling checkout:
+#               anvil                      client-leg settlement (EVM)
+#               solana-validator           peer-leg settlement + payment_channel
+#               seed-toon-evm              funds the EVM settlement keys
+#               seed-toon-solana           mock USDC mint + funds/ATAs
+#               relay                      the hub's one TERMINATED paid route
+#                                          (g.toon.relay -> relay:3100/write),
+#                                          i.e. the only destination a paid
+#                                          packet can reach without a peer
+#               relay-connector            the hub itself
+#               open-toon-solana-channels  opens the hub's Solana channels
+#             Everything else — the AR.IO gateway + Turbo bundler, the store,
+#             gas-station and Anyone credentials-issuer subsystems and their
+#             three peering connectors — is `full` only. The hub still LOADS
+#             all three peerings under `payments`; a peering whose far side is
+#             not serving simply answers T01, which is why relay-connector's
+#             depends_on marks those peers `required: false` (a required
+#             dependency that is disabled by profile is a hard config error,
+#             not a warning).
+#   hs        THREE EXTRA SERVICES ON TOP OF `full`, never on their own and
+#             never part of it: the `anon` daemon that publishes a `.anyone`
+#             hidden service in front of the anytoon issuer path, the
+#             `hs-ingress` forwarder whose network namespace it shares, and the
+#             `anon-client` SOCKS5 proxy a buyer dials through. OPT-IN, and it
+#             must stay that way: `anon` bootstraps against the REAL Anyone
+#             network, so anything on this profile takes a third-party
+#             dependency and a sandbox whose cold start can go red because a
+#             relay network had a bad day has stopped being a sandbox. Entry
+#             point `make up-hs` (= --profile full --profile hs) + `make
+#             smoke-hs`; `make up` and `make smoke` never render it. See the
+#             "The hidden-service ingress" section at the bottom of this file.
+#
+# `make up` / `make up-payments` / `make up-hs` are the supported entry points;
+# see Makefile.
+
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
 # see connector/docker-compose.yml's incident note).
@@ -54,6 +103,7 @@ services:
   #    2026-07-06; agave 4.1.1 at this digest). Fallback if it ever breaks:
   #    a tiny Dockerfile over Anza release binaries.
   solana-validator:
+    profiles: ['payments', 'full']
     image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
     security_opt:
       - seccomp=unconfined
@@ -134,6 +184,7 @@ services:
   # exported by the Makefile) with HOME=/tmp (an arbitrary uid has no
   # /etc/passwd entry; forge needs a writable home for ~/.svm).
   anvil:
+    profiles: ['payments', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
     environment:
@@ -228,6 +279,7 @@ services:
   # point at it (core's block importer crashes on ArLocal's minimal genesis;
   # that is why gateway.conf sets START_WRITERS=false).
   arlocal:
+    profiles: ['full']
     image: textury/arlocal:v1.1.66
     restart: unless-stopped
     ports:
@@ -242,9 +294,10 @@ services:
   # ario_arns::initialize + ario_core::initialize (signer = the programs'
   # upgrade authority). Exits 0 immediately if the ArnsConfig PDA already
   # exists. Note: the validator runs with --reset, so a *restart* of that
-  # container wipes chain state — `docker compose up -d` re-runs this job
-  # and reseeds (see README "Restarting the validator").
+  # container wipes chain state — a later `make up` re-runs this job and
+  # reseeds (see README "Restarting the validator").
   seed-solana:
+    profiles: ['full'] # ARIO mint + ArNS/core initialize — store side only
     build: .
     restart: 'no'
     environment:
@@ -265,6 +318,7 @@ services:
   # better-sqlite3) against the shared sqlite bind mount. Idempotent
   # (INSERT OR REPLACE of the same row).
   seed-gateway-block:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-head-block.sh']
@@ -284,6 +338,7 @@ services:
   # routes 503, which nothing in the sandbox uses.
 
   envoy:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-envoy:a487df83812f30d8753d89d28f45200606c64678
     restart: unless-stopped
     ports:
@@ -323,6 +378,7 @@ services:
       - core
 
   core:
+    profiles: ['full']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: unless-stopped
     ports:
@@ -368,6 +424,7 @@ services:
         condition: service_healthy
 
   redis:
+    profiles: ['full']
     image: redis:7
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save "" --appendonly no
     restart: unless-stopped
@@ -383,6 +440,7 @@ services:
   # load-bearing, envoy's cluster targets it by DNS).
 
   upload-service:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service:fd1032e3012c0179577b08bbfe932f4ad7d805cd
     restart: on-failure
     env_file:
@@ -416,6 +474,7 @@ services:
         condition: service_completed_successfully
 
   fulfillment-service:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service-fulfillment:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     env_file:
@@ -450,6 +509,7 @@ services:
         condition: service_completed_successfully
 
   upload-service-pg:
+    profiles: ['full']
     image: postgres:13.8
     restart: on-failure
     environment:
@@ -460,6 +520,7 @@ services:
       - ./data/upload-service-pg:/var/lib/postgresql/data
 
   localstack:
+    profiles: ['full']
     image: ghcr.io/ardriveapp/turbo-upload-service-localstack:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     ports:
@@ -487,7 +548,8 @@ services:
       start_period: 15s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # TOON payment layer: three connectors + relay + store + gas-station
+  # TOON payment layer: four connectors + relay + store + gas-station +
+  # the Anyone credentials issuer
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Topology (peering = the connector repo's CI-proven static config-file
   # mechanism, local/two-hop + local/mixed-chain there; ADR 0060/0028/0042):
@@ -496,10 +558,12 @@ services:
   #             g.toon.relay            ──▶ relay:3100/write         (paid)
   #             g.toon.store            ──peering──▶ store-connector ──▶ store:3300/store
   #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
+  #             g.anyone.credentials    ──peering──▶ anytoon-connector ──▶ claim-minter:8080 ──▶ issuer:3000
+  #             g.anyone.credentials.keys ──peering──▶ anytoon-connector ──▶ issuer:3000/v1/keys/ (price 0 there)
   #   any client ──ws──▶ relay:7100 (free reads, host :7100)
   #
   # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
-  # (EVM mock USDC), while BOTH peering legs settle on the LOCAL VALIDATOR —
+  # (EVM mock USDC), while ALL THREE peering legs settle on the LOCAL VALIDATOR —
   # real payment_channel-program channels in the Solana mock USDC mint. Both
   # mocks are 6-decimal USDC, so amounts cross the boundary unconverted
   # (conversion/FX is explicitly unsupported). The Solana channels are opened
@@ -519,6 +583,7 @@ services:
 
   # One-shot: mock USDC mint + SOL/USDC for every settlement key (Solana leg).
   seed-toon-solana:
+    profiles: ['payments', 'full']
     build: .
     restart: 'no'
     environment:
@@ -534,6 +599,7 @@ services:
   # One-shot: ETH + USDC for every settlement key (EVM leg — the client
   # channel the smoke opens against the hub lives on anvil).
   seed-toon-evm:
+    profiles: ['payments', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-evm.sh']
@@ -554,6 +620,11 @@ services:
   # signer). Vendored connector/local/open-solana-channel.py; refuses success
   # unless the chain's own account layout agrees with the committed configs.
   open-toon-solana-channels:
+    # In the `payments` profile the two counterparty connectors are not
+    # running, but nothing here talks to them: the channels are opened by the
+    # HUB against the peers' committed Solana settlement PUBLIC keys, so both
+    # accounts still land on chain and the Solana leg is still proven.
+    profiles: ['payments', 'full']
     image: python:3.12-slim
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-solana-channels.sh']
@@ -576,6 +647,10 @@ services:
   # verification for paid ephemeral kinds on exactly that guarantee). Reads
   # (7100) are free NIP-01 over WebSocket.
   relay:
+    # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
+    # this is the one destination a paid packet can reach with no peer running
+    # — i.e. what makes "a paid request against the hub settles" testable.
+    profiles: ['payments', 'full']
     image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
     env_file:
       - conf/relay.conf
@@ -607,9 +682,14 @@ services:
   # Once upstream ships them, the pin works again:
   #   image: ghcr.io/toon-protocol/store@sha256:564323255704529e0cad7ed9b3c00b6d6716ebcb887117de04c0f4937f80cfec # :release, 2026-09 (pre-override)
   store:
+    # `full` only — this is the one service built from a SIBLING CHECKOUT, and
+    # keeping it out of `payments` is what lets a payments-only developer work
+    # without STORE_CONTEXT existing at all (see Makefile).
+    profiles: ['full']
     build:
       # The store sibling checkout (documented in README prerequisites; `make
-      # setup` preflights it). Relative so the compose file stays portable.
+      # up` preflights it — `make setup` only notes it, and `make up-payments`
+      # never renders this service). Relative so the file stays portable.
       context: ../../store-gaps-worktree
       dockerfile: Dockerfile.store
     env_file:
@@ -637,6 +717,7 @@ services:
   # contracts/DeploySandboxExtras.s.sol and conf/gas-station.conf). Handler
   # port 3300 UNPUBLISHED; free /describe + /health surface at host 3400.
   gas-station:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/gas-station@sha256:93429c3ad170dac358a58e0692037f2bd0071d5d53619c312afa80d359869cf4 # :release, 2026-09
     env_file:
       - conf/gas-station.conf
@@ -659,6 +740,209 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ── The Anyone credentials issuer stack ──────────────────────────────────
+  # The fourth app behind the payment layer, and the first one that REFUSES TO
+  # SERVE without proof of payment at the APP layer: the issuer will not blind-
+  # sign a bundle without an Ed25519-signed X-Payment-Claim. Vendored, with its
+  # comments' reasoning, from the anytoon sibling checkout's compose.yml.
+  #
+  # THE CHAIN:  anytoon-connector ──▶ claim-minter ──▶ issuer ──▶ postgres/redis
+  #
+  # TRUST BOUNDARY: the connector is the only ingress. The minter, the issuer
+  # and their datastores publish NO host ports — exactly how the relay's write
+  # port and the store's/gas station's handler ports are protected in this file
+  # — and that unreachability is what authorises issuance: the minter does not,
+  # and must not, check X-TOON-Amount (anytoon ADR 0001). (The anytoon repo
+  # uses an `internal:` compose network for the same boundary; this file has no
+  # networks at all, so "unpublished" is the sandbox's own idiom for it.)
+  #
+  # PRICE COUPLING — the hazard of this subsystem. THREE numbers must agree or
+  # every paid request answers 402 CLAIM_INVALID: the connector route price
+  # (conf/connector-anytoon.toml, base units), the minter's BUNDLE_PRICE and
+  # the issuer's BUNDLE_PRICE (both decimals). The latter two are ONE FILE —
+  # conf/anytoon.conf is the `env_file` of both services below, so they cannot
+  # drift; the first is that decimal x 10^6, re-derived and asserted by
+  # scripts/smoke-toon.mjs on every run.
+
+  # One-shot: the issuer's epoch keyring + the minter/issuer Ed25519 proxy pair.
+  #
+  # Runs the UPSTREAM IMAGE'S OWN dev-key generator (`bun run keys:dev` ->
+  # scripts/generate-dev-keys.ts), not a hand-rolled openssl script: the
+  # current issuer wants a SIGNED KEYRING (config/keys/keyring.json — an
+  # Ed25519 root key, an RSA-2048 epoch key, and a root_sig over the canonical
+  # key document), which openssl alone cannot produce. Same image, different
+  # command; nothing about the image is modified. Idempotent — the generator
+  # returns early when all four files exist — except that an EXPIRED epoch is
+  # re-forged, because the keyring lives in a named volume that outlives the
+  # generator's 30-day epoch window and an expired epoch signs nothing.
+  #
+  # proxy.key.pem is a 0644 copy of the generator's 0600 proxy.pem, under the
+  # filename the anytoon repo documents: the minter runs as uid `node` and
+  # could not read the original. DEV KEY MATERIAL, valueless, like everything
+  # else under keys/ here.
+  issuer-keys:
+    profiles: ['full']
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    restart: 'no'
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        bun run keys:dev
+        bun -e 'const k = await Bun.file("config/keys/keyring.json").json();
+                const e = k.epochs.find((x) => x.epoch_id === k.current_epoch);
+                process.exit(Date.parse(e.not_after) > Date.now() + 86400000 ? 0 : 1)' \
+          || bun scripts/generate-dev-keys.ts --force
+        cp config/keys/proxy.pem config/keys/proxy.key.pem
+        chmod 0644 config/keys/proxy.key.pem config/keys/proxy.pub.pem
+    volumes:
+      - anytoon-keys:/app/config/keys
+
+  # The upstream issuer, UNMODIFIED. Pinned by digest (the `latest` tag is
+  # mutable and this stack's env names track the image's config loader).
+  issuer:
+    profiles: ['full']
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    env_file:
+      # BUNDLE_PRICE — shared verbatim with claim-minter. See the header above.
+      - conf/anytoon.conf
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      # No DB_SYNCHRONIZE: the schema comes from `issuer-migrate`, which runs
+      # the image's own TypeORM migrations exactly once.
+      POSTGRES_HOST: issuer-postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+      REDIS_HOST: issuer-redis
+      REDIS_PORT: '6379'
+      # The signed epoch keyring + the proxy's PUBLIC half. The issuer never
+      # holds the proxy private key — that is the whole point of the pair.
+      KEYRING_PATH: /keys/keyring.json
+      PROXY_PUBLIC_KEY_PATH: /keys/proxy.pub.pem
+      # A safety net, not a billing trap: a paid request answered 429 is money
+      # for nothing, and payment is the real rate limiter here.
+      RATE_LIMIT_MAX: '6000'
+      RATE_LIMIT_WINDOW_SECONDS: '60'
+    expose:
+      - '3000' # UNPUBLISHED — only the connector's free keys route and the minter dial this
+    volumes:
+      - anytoon-keys:/keys:ro
+    healthcheck:
+      test: ['CMD', 'bun', '-e', "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    depends_on:
+      issuer-keys:
+        condition: service_completed_successfully
+      issuer-migrate:
+        condition: service_completed_successfully
+      issuer-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Runs the schema migrations exactly once, then exits, so no issuer ever
+  # races another to migrate.
+  issuer-migrate:
+    profiles: ['full']
+    image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
+    restart: 'no'
+    entrypoint: ['bun', 'run', 'migration:run']
+    working_dir: /app/apps/backend
+    environment:
+      POSTGRES_HOST: issuer-postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    depends_on:
+      issuer-postgres:
+        condition: service_healthy
+
+  issuer-postgres:
+    profiles: ['full']
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - issuer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP check. Without it pg_isready talks to the
+      # local socket and passes against the temporary server the image runs
+      # during initdb, which does not listen on TCP — so `issuer-migrate`
+      # starts and dies with ECONNREFUSED on a cold volume.
+      #
+      # The window is generous on purpose: a COLD volume runs initdb first, and
+      # on a loaded dev box its shutdown checkpoint alone has been measured at
+      # ~9s. A stack that comes up in seconds on an idle machine gave
+      # "dependency failed to start: container ... is unhealthy" on a busy one.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U app -d app']
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  issuer-redis:
+    profiles: ['full']
+    image: redis:7-alpine
+    volumes:
+      - issuer-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Turns the connector's statement of WHO PAID into the signed payment claim
+  # the issuer requires, and does nothing else. It proxies POST /v1/bundles
+  # only — its handler_url is its ROOT, so without that whitelist a caller
+  # could reach any issuer path with a freshly minted claim attached.
+  #
+  # BUILT from the anytoon sibling checkout, the same pattern the `store` image
+  # uses: relative default (`../../anytoon`), overridable with ANYTOON_CONTEXT
+  # (exported by the Makefile) if your checkout lives elsewhere. There is no
+  # published image for it.
+  claim-minter:
+    profiles: ['full']
+    build:
+      context: ${ANYTOON_CONTEXT:-../../anytoon}/claim-minter
+    env_file:
+      # BUNDLE_PRICE — the SAME FILE the issuer reads. See the header above.
+      - conf/anytoon.conf
+    environment:
+      PORT: '8080'
+      ISSUER_URL: http://issuer:3000
+      PROXY_PRIVATE_KEY_PATH: /keys/proxy.key.pem
+      # Signed into every claim; the issuer records it but does not check it.
+      ROUTE_ID: g.anyone.credentials
+    expose:
+      - '8080' # UNPUBLISHED — only anytoon-connector dials this
+    volumes:
+      - anytoon-keys:/keys:ro
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    depends_on:
+      issuer:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
   # ── The connectors ───────────────────────────────────────────────────────
   # Stock image on the same immutable pin the relay/store/gas-station deploy
   # bundles carry (rust-2026.08.28.1). No environment layer — every value
@@ -668,6 +952,7 @@ services:
   # binds IPv4 only and busybox wget resolves ::1 first).
 
   store-connector:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -697,6 +982,7 @@ services:
     logging: *chain-logging
 
   gas-connector:
+    profiles: ['full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -720,10 +1006,59 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
-  # The hub. Starts after both accepting peers are healthy (it dials them; a
+  anytoon-connector:
+    profiles: ['full']
+    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      # THE CONFIG FILE IS A VARIABLE, and the default is the committed one —
+      # so `make up`, `make up-payments` and a bare `docker compose config`
+      # render exactly what they always did.
+      #
+      # `make up-hs` is the only thing that overrides it, with the RENDERED
+      # config scripts/hs-address.sh writes (conf/.rendered/connector-anytoon.toml
+      # = this file with its [node] endpoints pointed at the daemon's `.anyone`
+      # address). It has to be a different FILE rather than an edit in place,
+      # because the committed one is a source of truth and the address is
+      # generated: it changes on any cold start that wipes the anon volume.
+      #
+      # WHY THE ENDPOINT MATTERS AT ALL: a client dials the URL the node
+      # PUBLISHES at GET /ilp, not the one the caller typed
+      # (ToonClient.transportFor -> selectTransport). A node fronted by a hidden
+      # service that still advertises http://127.0.0.1:3230/ilp sends every
+      # buyer's packet at the buyer's own loopback through the SOCKS proxy. And
+      # a relative endpoint is not the way out: this connector refuses one at
+      # load ("[node] http_endpoint '/ilp' is not a URL: relative URL without a
+      # base").
+      - ${ANYTOON_CONNECTOR_CONF:-./conf/connector-anytoon.toml}:/app/config/connector.toml:ro
+      - ./keys/toon/anytoon-connector:/app/data:ro
+      - anytoon-connector-state:/app/state
+    ports:
+      - '3230:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      # Both terminated routes' handlers: the paid one goes through the minter,
+      # the free keys one straight at the issuer.
+      claim-minter:
+        condition: service_healthy
+      issuer:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The hub. Starts after all three accepting peers are healthy (it dials them; a
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
   relay-connector:
+    profiles: ['payments', 'full']
     image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -744,12 +1079,182 @@ services:
         condition: service_completed_successfully
       relay:
         condition: service_healthy
+      # `required: false` ONLY so the `payments` profile renders: a depends_on
+      # naming a service the active profiles disable is a hard config error
+      # ("depends on undefined service"), and required:false downgrades that to
+      # a warning. Under `full` both peers exist, so the wait is unchanged —
+      # the hub still starts only after both accepting peers are healthy.
       store-connector:
         condition: service_healthy
+        required: false
       gas-connector:
         condition: service_healthy
+        required: false
+      anytoon-connector:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
     logging: *chain-logging
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # The hidden-service ingress — profile `hs` ONLY (`make up-hs`)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Everything below rehearses the one production shape the rest of this file
+  # cannot: a node whose ONLY ingress is a `.anyone` hidden service, which is
+  # how the anytoon credentials issuer actually deploys. The buyer dials an
+  # address no DNS resolves, through a SOCKS5h proxy, and its chain RPC rides
+  # the same circuit.
+  #
+  # OPT-IN, AND NEVER IN `make up`. There is no local Anyone directory
+  # authority: `anon` bootstraps against the real network, so every target here
+  # takes a third-party dependency. `make smoke-hs` is a rehearsal, not a gate —
+  # it can fail because the relay network had a bad day, and its output says so
+  # in those words. Two precedents in this org draw the same line: anytoon
+  # splits `make hs-e2e` out of `make local-e2e`, and the connector repo keeps
+  # its hidden-service rehearsals off CI.
+  #
+  # NOTHING IN `full` DEPENDS ON THESE, in either direction — no service outside
+  # this section names one, and `make up` renders none of them. What DOES change
+  # under `hs` is what the anytoon node ADVERTISES: `make up-hs` recreates it
+  # against the rendered config, so its self-description names the `.anyone`
+  # address instead of http://127.0.0.1:3230/ilp. That is the production shape
+  # (the circuit is the ingress), and it is load-bearing rather than cosmetic —
+  # a client dials what a node publishes. Consequences, stated plainly:
+  #   - the HUB is unaffected: it dials the endpoint its own [[peers]] row
+  #     names (http://anytoon-connector:3000/ilp), so hub-routed purchases still
+  #     work exactly as they did.
+  #   - a CLEARNET client pointed straight at localhost:3230 no longer can be:
+  #     the endpoint it is handed is a hidden service and it has no proxy, which
+  #     @toon-protocol/client refuses by name. That is `make smoke` step 4c's
+  #     free-route half. Run `make smoke` against `make up`, `make smoke-hs`
+  #     against `make up-hs`; they are two rehearsals of the same node, not one
+  #     suite split in two.
+
+  # The TCP forwarder the daemon's loopback ports lead to, and the owner of the
+  # network namespace the daemon shares.
+  #
+  # WHY IT EXISTS. `anon` resolves a HiddenServicePort target when it PARSES its
+  # config — before any stream arrives, and before the connector it fronts can
+  # possibly exist, because that connector's own config has to name an address
+  # only this daemon can generate. anytoon breaks that circle with a pinned
+  # subnet and a fixed container IP (compose.yml there, `edge` + 172.31.0.10).
+  # This sandbox breaks it with a shared loopback instead: conf/anonrc names
+  # 127.0.0.1, which always parses, and `socat` here resolves `anytoon-connector`
+  # and `anvil` BY NAME once per connection. The gain is that no existing
+  # service acquires a fixed IP, this project needs no pinned subnet to collide
+  # with someone else's, and `make up-hs` can recreate the connector (it must —
+  # rendered config) without leaving the daemon pointed at a dead address.
+  #
+  # Same image as `anon` — it carries socat for exactly this (see anon/Dockerfile)
+  # — so the profile builds one image and pulls no second one.
+  hs-ingress:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        # 3000 -> the anytoon-connector's client edge (the issuer path).
+        socat -d TCP-LISTEN:3000,bind=127.0.0.1,fork,reuseaddr TCP:anytoon-connector:3000 &
+        # 8545 -> anvil, for the buyer's proxied chain RPC.
+        socat -d TCP-LISTEN:8545,bind=127.0.0.1,fork,reuseaddr TCP:anvil:8545 &
+        wait
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The daemon that gives the anytoon issuer path its address: it generates the
+  # `.anyone` address, publishes a descriptor for it on the real network, and
+  # forwards what arrives to the two loopback ports above. Config: conf/anonrc.
+  #
+  # BUILT, NOT PULLED: ghcr publishes no image past v0.4.9.7, whose `.onion` TLD
+  # every current client refuses by name. See anon/Dockerfile — it is the
+  # anytoon checkout's anon-image pattern, sha256-verified.
+  #
+  # NO `depends_on` ON THE CONNECTOR, deliberately (anytoon's compose.yml makes
+  # the same point). The connector does not need this daemon in order to serve;
+  # it needs it in order to be REACHED, which is a different claim and one
+  # compose cannot express. `make up-hs` orders them: this daemon first, because
+  # its address has to exist before the connector's config can be rendered.
+  anon:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    # Shares hs-ingress's network stack, which is what makes `127.0.0.1` in
+    # conf/anonrc mean "the forwarder". A service in this mode cannot declare
+    # `networks:` — it has hs-ingress's, i.e. the project default, which is also
+    # where its outbound route to the Anyone network comes from.
+    network_mode: 'service:hs-ingress'
+    depends_on:
+      hs-ingress:
+        condition: service_started
+    volumes:
+      - ./conf/anonrc:/etc/anon/anonrc:ro
+      # A NAMED VOLUME: it holds hidden_service/hostname and the private key
+      # behind this address. `make down` keeps it, so the address survives a
+      # restart; `make clean` wipes it with everything else and the next cold
+      # start publishes a NEW address, which in a sandbox is expected rather
+      # than a fault. In a deployment losing it is expensive and silent — see
+      # conf/anonrc.
+      - anon-data:/var/lib/anon
+    restart: unless-stopped
+    logging: *chain-logging
+    healthcheck:
+      # BOTH halves, and neither alone is enough. The hostname file appears at
+      # key generation, seconds in and long before the descriptor is published;
+      # `Bootstrapped 100%` is what says the daemon can actually publish it. A
+      # container that is Up is not a container that has a circuit.
+      test:
+        - 'CMD-SHELL'
+        - "test -s /var/lib/anon/hidden_service/hostname && grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log"
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # The buyer's way in: a SOCKS5 proxy and nothing else, on the host's loopback.
+  # `make smoke-hs` names it as the TOON client's `socksProxy`, which carries
+  # the packets AND (proxyRpc, on by default) the chain RPC.
+  #
+  # ON ITS OWN NETWORK, WITH NO ROUTE TO ANYTHING IN THIS PROJECT. A `.anyone`
+  # name cannot be resolved by anything but the Anyone network, so a packet that
+  # arrives at all arrived over a circuit; being unable to reach
+  # `anytoon-connector` or `anvil` directly makes the shortcut impossible as
+  # well as unused, which is what makes smoke-hs proof rather than assertion.
+  anon-client:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    volumes:
+      - ./conf/anonrc-client:/etc/anon/anonrc:ro
+      - anon-client-data:/var/lib/anon
+    networks: [hs-payer]
+    ports:
+      # 19050, not 9050: an `anon` (or Tor) daemon on a developer's machine
+      # already holds 9050 more often than not, and a second one is
+      # "Bind for 127.0.0.1:9050 failed: port is already allocated" — which
+      # stops the bring-up before anything is proved. Override with
+      # ANON_SOCKS_PORT (the Makefile passes it to smoke-hs too).
+      - '127.0.0.1:${ANON_SOCKS_PORT:-19050}:9050'
+    restart: unless-stopped
+    logging: *chain-logging
+    healthcheck:
+      test: ['CMD-SHELL', "grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+networks:
+  # The buyer's proxy, and nothing else — see `anon-client`. Rendered ONLY under
+  # the `hs` profile, so `make up` creates no such network.
+  hs-payer:
 
 volumes:
   envoy-eds-data:
@@ -757,3 +1262,14 @@ volumes:
   relay-connector-state:
   store-connector-state:
   gas-connector-state:
+  anytoon-connector-state:
+  # The issuer's signed epoch keyring + the minter/issuer proxy pair, written
+  # by the issuer-keys job. Dev key material; dies with `make clean`.
+  anytoon-keys:
+  issuer-postgres-data:
+  issuer-redis-data:
+  # `hs` profile only. anon-data holds this sandbox's `.anyone` address and the
+  # private key behind it: it survives `make down` (same address next `make
+  # up-hs`) and dies with `make clean` (new address, which is fine here).
+  anon-data:
+  anon-client-data:

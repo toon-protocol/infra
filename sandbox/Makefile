@@ -1,5 +1,39 @@
 # TOON Protocol local dev sandbox. See README.md for the full guide.
-COMPOSE := docker compose
+
+# Every service in docker-compose.yml carries a profile, so a profile is always
+# selected here (see the "Profiles" block at the top of that file).
+#   full      the whole stack, every service — the sandbox's default
+#   payments  chains + hub + seed/open jobs only, no store checkout needed
+#   hs        `full` PLUS the anon daemon, its forwarder and the buyer's SOCKS
+#             proxy — OPT-IN (`make up-hs`), never part of `up`/`smoke`
+# Recursively expanded (`=`, not `:=`) so the payments targets can override
+# COMPOSE_PROFILE for their own recipes.
+COMPOSE_PROFILE ?= full
+COMPOSE = docker compose --profile $(COMPOSE_PROFILE)
+
+# `up-hs` is `full` PLUS `hs`: three services on top of the whole stack, never a
+# stack of their own. What it does change about `full` is what the anytoon node
+# ADVERTISES — the rendered config below points its [node] endpoints at the
+# generated `.anyone` address, because a client dials what a node publishes.
+# The hub is unaffected (it dials its own [[peers]] endpoint); a clearnet client
+# aimed straight at localhost:3230 is not. See README §2 + §6.6.
+COMPOSE_HS = docker compose --profile full --profile hs
+
+# down/clean must sweep EVERY profile's containers, whichever one brought them
+# up — otherwise `make up-hs && make down` leaves three daemons running.
+COMPOSE_ALL = docker compose --profile full --profile payments --profile hs
+
+# The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
+# own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
+# docker-compose.yml publishes it and scripts/smoke-hs.mjs dials it.
+export ANON_SOCKS_PORT ?= 19050
+
+# The rendered anytoon-connector config `make up-hs` mounts in place of the
+# committed one: same file, [node] endpoints pointed at the daemon's generated
+# `.anyone` address. Written by scripts/hs-address.sh; gitignored; wiped by
+# `make clean`. Nothing else ever sets ANYTOON_CONNECTOR_CONF, so every other
+# target renders the committed config.
+HS_CONNECTOR_CONF = ./conf/.rendered/connector-anytoon.toml
 
 # The anvil service bind-mounts the connector sibling's Foundry project
 # READ-WRITE and runs as the invoking user so forge's artifacts stay owned by
@@ -7,7 +41,9 @@ COMPOSE := docker compose
 export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
-.PHONY: setup up down clean smoke smoke-ario smoke-toon logs ps
+.PHONY: setup up up-payments up-hs down clean smoke smoke-ario smoke-toon \
+        smoke-payments smoke-hs hs-address logs ps \
+        require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -15,8 +51,17 @@ export HOST_GID ?= $(shell id -g)
 # README "Prerequisites".
 STORE_CONTEXT := ../../store-gaps-worktree
 
-## one-time: install the script deps (needed by `make smoke` on the host)
-setup:
+# The claim-minter image is BUILT from the anytoon sibling checkout (there is
+# no published image for it). Exported, so docker-compose.yml's build context
+# `${ANYTOON_CONTEXT:-../../anytoon}/claim-minter` picks it up — repoint it
+# here (or in your environment) if your checkout lives elsewhere. Keep the
+# default RELATIVE: the compose file has to stay portable.
+export ANYTOON_CONTEXT ?= ../../anytoon
+
+# Hard gate for the paths that BUILD the store image — i.e. `make up` alone.
+# The payments profile never renders the `store` service, so nothing on that
+# path needs the checkout to exist.
+require-store-context:
 	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
 		echo "ERROR: store checkout not found at $(STORE_CONTEXT)"; \
 		echo "The sandbox builds the store image from a sibling checkout of the"; \
@@ -25,17 +70,134 @@ setup:
 		echo "ARNS_SOLANA_RPC_URL/ARNS_SOLANA_WS_URL). Clone/see it there, or"; \
 		echo "update STORE_CONTEXT in the Makefile + the store build context in"; \
 		echo "docker-compose.yml to where your checkout lives."; \
+		echo; \
+		echo "Only the FULL stack needs it. If you are working on the payment"; \
+		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
 		exit 1; \
+	fi
+# Hard gate for the paths that BUILD the claim-minter image — `make up` alone,
+# like the store gate above. The payments profile never renders it.
+require-anytoon-context:
+	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
+		echo "ERROR: anytoon checkout not found at $(ANYTOON_CONTEXT)"; \
+		echo "The sandbox builds the claim-minter image from a sibling checkout"; \
+		echo "of the anytoon repo (it publishes no image). Clone it there, or"; \
+		echo "set ANYTOON_CONTEXT to where your checkout lives:"; \
+		echo "    make up ANYTOON_CONTEXT=/path/to/anytoon"; \
+		echo; \
+		echo "Only the FULL stack needs it. If you are working on the payment"; \
+		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
+		exit 1; \
+	fi
+
+## one-time: install the script deps (needed by `make smoke` on the host).
+## Deliberately does NOT require the store or anytoon checkouts — a
+## payments-only developer must be able to run setup, up-payments and
+## smoke-payments with no sibling checkout at all; `make up` is where those
+## requirements are enforced.
+setup:
+	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
+		echo "NOTE: no store checkout at $(STORE_CONTEXT)."; \
+		echo "      Fine for \`make up-payments\` / \`make smoke-payments\`;"; \
+		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
+		echo; \
+	fi
+	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
+		echo "NOTE: no anytoon checkout at $(ANYTOON_CONTEXT)."; \
+		echo "      Fine for \`make up-payments\` / \`make smoke-payments\`;"; \
+		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
+		echo; \
 	fi
 	npm ci
 
 ## start everything (chains + init jobs + gateway + bundler + TOON layer)
-up:
+up: require-store-context require-anytoon-context
 	$(COMPOSE) up -d --build
 
-## stop the stack (keeps state: gateway sqlite, localstack S3, postgres)
+## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
+## the relay + the hub + the Solana channel-open job (7 services). No gateway,
+## no bundler, no store, no gas station — and no store sibling checkout.
+up-payments: COMPOSE_PROFILE = payments
+up-payments:
+	$(COMPOSE) up -d --build
+
+## OPT-IN, and it takes a THIRD-PARTY DEPENDENCY: `full` plus the hidden-service
+## ingress. The anon daemon bootstraps against the REAL Anyone network (there is
+## no local directory authority), generates this sandbox's `.anyone` address,
+## and fronts the anytoon issuer path with it. Never folded into `make up`: a
+## cold start that can go red because a relay network had a bad day is not a
+## sandbox. Expect a minute or two of bootstrapping, more on a cold volume.
+up-hs: require-store-context require-anytoon-context
+	# Build EVERYTHING first, including the images `up` would otherwise build
+	# later. A `--build` on the final `up` rebuilds the anon image, and a new
+	# image id makes compose RECREATE those containers — throwing away the
+	# circuits this target just spent two minutes waiting for, moments before
+	# smoke-hs needs them. (anytoon's Makefile learned this the same way.)
+	$(COMPOSE_HS) build
+	# The daemons FIRST and alone: the connector's config has to name an
+	# address only the daemon can generate, so the daemon cannot wait for it.
+	$(COMPOSE_HS) up -d anon anon-client
+	@echo
+	@echo "waiting for both daemons to bootstrap against the REAL Anyone network."
+	@echo "a minute or two is normal; a cold volume takes longer. Watch it with:"
+	@echo "    docker compose --profile hs logs -f anon anon-client"
+	@echo
+	@$(call wait_healthy,anon anon-client)
+	# The address, out of the daemon and into the config the connector mounts.
+	./scripts/hs-address.sh
+	# Now the rest of the stack, with the anytoon-connector recreated against
+	# the rendered config so it PUBLISHES the .anyone endpoint. A client dials
+	# what a node publishes, not what the caller typed.
+	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) $(COMPOSE_HS) up -d
+	@echo "  re-checking the daemons, in case the rest of the stack disturbed them"
+	@$(call wait_healthy,anon anon-client)
+	@echo
+	@echo "up. \`make smoke-hs\` buys a bundle over the circuit."
+	@echo
+	@echo "NOTE: the anytoon node now advertises the CIRCUIT as its ingress, which is"
+	@echo "the production shape being rehearsed — so \`make smoke\` no longer reaches it"
+	@echo "directly on clearnet (its hub-routed leg is unaffected). Run \`make smoke\`"
+	@echo "against \`make up\`; run \`make smoke-hs\` against this. See README §2 + §6.6."
+
+## print this sandbox's `.anyone` address (re-renders the connector config).
+hs-address:
+	./scripts/hs-address.sh
+
+# Waits until the named services report docker-healthy. `anon`'s healthcheck is
+# "hostname file exists AND Bootstrapped 100%", so this is a wait for a CIRCUIT,
+# not for a container: one that is merely Up has neither. Vendored from
+# anytoon's Makefile.
+define wait_healthy
+	for svc in $(1); do \
+		n=0; \
+		while :; do \
+			cid=$$($(COMPOSE_HS) ps -q $$svc 2>/dev/null); \
+			if [ -n "$$cid" ] && \
+			   [ "$$(docker inspect -f '{{.State.Health.Status}}' $$cid 2>/dev/null)" = healthy ]; then \
+				echo "  $$svc: healthy"; break; \
+			fi; \
+			n=$$((n+1)); \
+			if [ $$n -gt 60 ]; then \
+				echo; \
+				echo "  $$svc never became healthy after ~5 minutes."; \
+				echo "  This is USUALLY the Anyone network rather than this sandbox:"; \
+				echo "  the daemon has to reach real directory authorities and real"; \
+				echo "  relays. Look at what it says before assuming a config fault:"; \
+				echo "      docker compose --profile hs logs --tail 80 $$svc"; \
+				echo "  A container that exited at once instead is a CONFIG fault —"; \
+				echo "  check conf/anonrc (AgreeToTerms 1, an explicit Nickname)."; \
+				exit 1; \
+			fi; \
+			sleep 5; \
+		done; \
+	done
+endef
+
+## stop the stack (keeps state: gateway sqlite, localstack S3, postgres).
+## Sweeps every profile: the hidden-service key volume survives (that is what
+## `-v` in `clean` is for), but no daemon is left running.
 down:
-	$(COMPOSE) down
+	$(COMPOSE_ALL) down
 
 ## stop the stack and wipe ALL local state (next `make up` is a cold start).
 ## `-v` also removes the connectors' claim-journal volumes — load-bearing: a
@@ -43,9 +205,13 @@ down:
 ## satisfies the next smoke's payment assertion without it having paid.
 ## Some services run as root and leave root-owned files in ./data, so the
 ## wipe happens inside a throwaway container rather than needing sudo.
+## `-v` also takes the anon-data volume, i.e. THIS SANDBOX'S HIDDEN-SERVICE KEY
+## and address. That is deliberate and documented: here the address is
+## disposable operational state, and the next `make up-hs` publishes a new one.
+## In a deployment the same wipe would strand every buyer's configuration.
 clean:
-	$(COMPOSE) down -v --remove-orphans
-	rm -rf .toon-client
+	$(COMPOSE_ALL) down -v --remove-orphans
+	rm -rf .toon-client conf/.rendered
 	@if [ -d data ]; then \
 		docker run --rm -v "$$(pwd)/data:/wipe" alpine:3.20 sh -c 'rm -rf /wipe/* /wipe/.[!.]* /wipe/..?*' 2>/dev/null; \
 		rmdir data; \
@@ -63,6 +229,23 @@ smoke-ario:
 
 smoke-toon:
 	node scripts/smoke-toon.mjs
+
+## payment-layer proof for `make up-payments`: the same smoke-toon.mjs, told to
+## stop after the payment layer — contracts/program live, the hub's two SOLANA
+## peering channels open and collateralised, an EVM channel opened against the
+## hub, a PAID write routed through it, and the hub's own claim journal
+## advanced on that channel. No store, gateway or bundler assertions.
+smoke-payments:
+	TOON_SMOKE_PAYMENTS_ONLY=1 node scripts/smoke-toon.mjs
+
+## hidden-service proof for `make up-hs`: a client dials this sandbox's
+## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,
+## which is the client's default — and buys one real bundle of blind signatures
+## from the issuer. A REHEARSAL, NOT A GATE: it can fail because the Anyone
+## network had a bad day, and it says which side failed in those words. Exit 75
+## (EX_TEMPFAIL) means network-side; exit 1 means this sandbox.
+smoke-hs:
+	node scripts/smoke-hs.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100
