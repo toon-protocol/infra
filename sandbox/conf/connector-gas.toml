@@ -1,0 +1,58 @@
+# =============================================================================
+# gas-connector — terminates g.toon.gastation in front of the gas station and
+# ACCEPTS the relay-gas peering. See conf/connector-relay.toml for provenance.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+state_dir = "/app/state"
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+[node]
+addresses = ["g.toon.gastation"]
+http_endpoint = "http://127.0.0.1:3220/ilp"
+btp_endpoint = "ws://127.0.0.1:3220/ilp/btp"
+
+# ── The terminated route ─────────────────────────────────────────────────────
+# /gas is the gas station's any-phase handler (POST /gas takes quote and
+# execute alike); one route so quote and execute cost the same 1000.
+[[routes]]
+prefix = "g.toon.gastation"
+handler_url = "http://gas-station:3300/gas"
+price = 1000
+
+[[peers]]
+id = "relay-gas"
+
+# The peering settles on SOLANA (row shape per connector/local/mixed-chain);
+# counterparty is the hub's Solana settlement public key, and the channel is
+# opened post-boot through the hub's operator surface (payer side).
+[[peer_channels]]
+peer_id = "relay-gas"
+channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
+counterparty_key = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
+
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+# Kept ON so the smoke test can read this payee's /claims (peering proof).
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"

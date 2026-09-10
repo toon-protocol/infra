@@ -1,0 +1,74 @@
+# =============================================================================
+# store-connector — terminates g.toon.store in front of the store app and
+# ACCEPTS the relay-store peering (it dials nothing; on ILP-over-HTTP the
+# accept-only side is structurally the payee).
+# =============================================================================
+# See conf/connector-relay.toml for the shared provenance notes.
+
+client_edge_addr = "0.0.0.0:3000"
+state_dir = "/app/state"
+
+# Peer carriages ride this node's own listener, told apart from clients by
+# authentication rather than by port. "http" because the hub dials http://.
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+[node]
+addresses = ["g.toon.store"]
+http_endpoint = "http://127.0.0.1:3210/ilp"
+btp_endpoint = "ws://127.0.0.1:3210/ilp/btp"
+
+# ── The terminated route ─────────────────────────────────────────────────────
+# The /store path suffix is load-bearing: the store serves only POST /store
+# (plus /health) — a bare origin answers 404 and the packet dies F99.
+# Price schedule per ADR 0065: base + per_kib * ceil(len/1024), the deployed
+# store's own shape. This node both terminates AND prices the route: a peer
+# PREPARE must arrive covered to this figure or it is refused F06 — the hub's
+# pay_channels row is what covers it.
+[[routes]]
+prefix = "g.toon.store"
+handler_url = "http://store:3300/store"
+price = { base = 1000, per_kib = 10 }
+
+# ── The peering (accepting half) ─────────────────────────────────────────────
+# No endpoint: the hub dials us. The id is a purely local label.
+[[peers]]
+id = "relay-store"
+
+# Same channel as the hub's row, counterparty pointed the other way: the
+# hub's SOLANA settlement public key, whose signature this node accepts on
+# claims. The peering settles on Solana (the Solana row shape of
+# connector/local/mixed-chain — channel_account PDA, no chain_id /
+# token_network / program_id); the channel is opened post-boot through the
+# HUB's operator surface (the payer side opens and deposits).
+[[peer_channels]]
+peer_id = "relay-store"
+channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
+counterparty_key = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
+
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+# Operator surface kept ON here (unlike the connector repo's accept-only
+# examples) so the smoke test can read THIS node's /claims and prove the
+# peering crossing was actually paid, from the payee's own book.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"

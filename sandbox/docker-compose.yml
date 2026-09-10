@@ -1,0 +1,759 @@
+# TOON Protocol local development sandbox.
+#
+# One compose project: local chains (Solana validator with the AR.IO programs
+# preloaded, Anvil for the EVM leg, ArLocal as the fake Arweave node) plus the
+# AR.IO gateway stack (envoy + core + redis) and the Turbo bundler stack
+# (upload-service + fulfillment + postgres + localstack), wired together so
+# that `upload via local Turbo -> buy ArNS name -> serve at
+# http://<name>.ar.localhost:3000/` works fully locally.
+#
+# Built from three proven prototypes (see prototype/local-ar-io-stack branch:
+# prototypes/{solana-arns,gateway-upload,full-stack}); the hard-won facts are
+# annotated inline. The AR.IO gateway/bundler service definitions are vendored
+# from ar-io-node r83's docker-compose.yaml / docker-compose.bundler.yaml
+# (trimmed to the env this sandbox actually sets) so this file is
+# self-contained — no ar-io-node checkout required. Image tags are the exact
+# SHAs the r83 compose files shipped (and the prototypes verified).
+#
+# See README.md for the cold-start guide; `make up` / `make smoke`.
+name: toon-sandbox
+
+# Bounded json-file logs for the chatty chain services (the validator prints a
+# status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
+# see connector/docker-compose.yml's incident note).
+x-chain-logging: &chain-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Chains
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Local Solana validator with AR.IO's five Anchor programs + Metaplex Core
+  # preloaded at genesis, plus the pre-created 2MB NameRegistry account.
+  #
+  # PROVEN FACTS (do not "simplify" these away):
+  #  - The five AR.IO programs MUST be loaded with --upgradeable-program, NOT
+  #    --bpf-program: their `initialize` instructions gate on the program's
+  #    upgrade authority via the BPF upgradeable-loader ProgramData account,
+  #    which plain --bpf-program never creates. Upgrade authority = the
+  #    committed throwaway keys/admin.json
+  #    (5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX).
+  #  - Program ids = @ar.io/sdk DEVNET_PROGRAM_IDS = ar-io-solana-contracts
+  #    program-ids/staging.json. The dumped .so files carry declare_id! for
+  #    exactly these ids, so they cannot be changed independently.
+  #  - The NameRegistry PDA (2,000,048 bytes) is preloaded via --account
+  #    (on-chain creation would need ~200 transactions).
+  #  - Do NOT add --bind-address 0.0.0.0: agave 4.1.1 panics on it
+  #    (UnspecifiedIpAddr). RPC listens on all interfaces anyway.
+  #  - seccomp=unconfined is required (Agave v2+ uses io_uring).
+  #  - Image is community-maintained and frozen (nightly builds stopped
+  #    2026-07-06; agave 4.1.1 at this digest). Fallback if it ever breaks:
+  #    a tiny Dockerfile over Anza release binaries.
+  solana-validator:
+    image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
+    security_opt:
+      - seccomp=unconfined
+    command:
+      - solana-test-validator
+      - --reset
+      - --ledger
+      - /workspace/test-ledger
+      - --rpc-port
+      - '8899'
+      - --limit-ledger-size
+      - '10000000'
+      - --upgradeable-program
+      - 8Njx9wPkXiNzDCgjwVsJFRjpAEV34gGW3n8DzX3V23m1 # ario_core
+      - /data/ario_core.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX # admin = upgrade authority (keys/admin.json)
+      - --upgradeable-program
+      - 7WsDTrtZBsfKtnP33XkjuqXCY69JE7n4QVYpynqJCFxz # ario_gar
+      - /data/ario_gar.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - 6EZNezcg4rc5hnh8HG34vGquT3WpW5xXypzPb24uyEpp # ario_arns
+      - /data/ario_arns.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - DbHbRwUD1oAn1mrDSqtWtvwGcNrmhWdD2g8L4xmeQ7NX # ario_ant
+      - /data/ario_ant.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --upgradeable-program
+      - bttco5oAnBwCucG63iKokBJCZmNr493f3Ewe9LM3oTx # ario_ant_escrow
+      - /data/ario_ant_escrow.so
+      - 5ncaUQEykDpzYaWHAxQ16M3Kq49hxzo6xXUWkVXC3TXX
+      - --bpf-program
+      - CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d # mpl_core (canonical mainnet id; plain --bpf-program is fine, no init gate)
+      - /data/mpl_core.so
+      - --account
+      - FPotW9q4i2pRsyADBwzWyiQremEanAGtnrKVbr4Kxn35 # NameRegistry PDA (pre-created, 2MB)
+      - /data/genesis/name-registry.json
+      # ── TOON payment-channel program (connector) ──────────────────────
+      # Committed BPF artifact (artifacts/payment_channel.so), built from the
+      # connector repo with its pinned toolchain: `make solana-build` there
+      # (platform-tools v1.52 via tools/solana/build-sbf.sh) produces
+      # connector/target/deploy/payment_channel.so; see
+      # scripts/build-payment-channel.sh for the exact regeneration steps.
+      # Loaded with plain --bpf-program under the BARE id the connector's
+      # local tooling shares (infra/solana/entrypoint.sh there) — no init
+      # gate, so no --upgradeable-program needed.
+      - --bpf-program
+      - HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR # payment_channel (TOON connector)
+      - /data/payment_channel.so
+    volumes:
+      - ./artifacts:/data:ro
+    ports:
+      - '8899:8899' # JSON-RPC
+      - '8900:8900' # WebSocket (pubsub; driver scripts use it, the gateway does not)
+    logging: *chain-logging
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - solana cluster-version -u http://127.0.0.1:8899
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # Local EVM chain with the connector's settlement contracts AUTO-DEPLOYED
+  # (MockERC20 USDC 0x5FbDB…0aa3, TokenNetworkRegistry 0xe7f1…0512, and the
+  # TokenNetwork the registry creates at 0xCafa…052c — deterministic outputs
+  # of DeployLocal.s.sol run by anvil account 0 at fixed nonces).
+  #
+  # This is the connector repo's own proven in-container forge pattern,
+  # vendored from ../../connector/docker-compose.yml (see its extensive
+  # comments for the incident history behind every line). It REQUIRES the
+  # connector sibling checkout: the Foundry project is bind-mounted
+  # READ-WRITE from ../../connector/packages/contracts (forge writes out/,
+  # cache/, broadcast/ and — on a checkout without submodules — lib/ into
+  # it), which is why the service runs as the invoking user (HOST_UID/GID,
+  # exported by the Makefile) with HOME=/tmp (an arbitrary uid has no
+  # /etc/passwd entry; forge needs a writable home for ~/.svm).
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.8.1
+    user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+    environment:
+      HOME: /tmp
+    entrypoint: []
+    command:
+      - sh
+      - -c
+      - |
+        echo "Starting Anvil..."
+        anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10 --balance 10000 &
+        ANVIL_PID=$$!
+
+        until cast client --rpc-url http://localhost:8545 2>/dev/null | grep -q 'anvil'; do
+          sleep 1
+        done
+
+        echo "Deploying connector contracts..."
+        cd /contracts
+
+        # Submodule self-heal for a checkout cloned without --recursive,
+        # PINNED to the revisions packages/contracts/foundry.lock commits
+        # (unpinned forge install once dragged in a wrong OpenZeppelin —
+        # connector#1121). One lib at a time, rm -rf first, so a
+        # half-installed tree is repaired rather than fatal.
+        install_lib() {
+          if [ -f "$$3" ]; then
+            return 0
+          fi
+          echo "Foundry lib $$1 is missing — installing $$2..."
+          rm -rf "$$1"
+          forge install "$$2" --no-git
+        }
+        install_lib lib/forge-std \
+          foundry-rs/forge-std@rev=1801b0541f4fda118a10798fd3486bb7051c5dd6 \
+          lib/forge-std/src/Script.sol
+        install_lib lib/openzeppelin-contracts \
+          OpenZeppelin/openzeppelin-contracts@rev=fcbae5394ae8ad52d8e580a3477db99814b9d565 \
+          lib/openzeppelin-contracts/contracts/access/Ownable.sol
+
+        # DeployLocal (the connector's own script, account 0) and then the
+        # SANDBOX-OWNED extras (contracts/DeploySandboxExtras.s.sol, mounted
+        # read-only at /sandbox-extras — forge accepts an out-of-root script
+        # path, so nothing is ever created inside the connector checkout;
+        # account 9, nonces 0-1 so its addresses are deterministic regardless
+        # of DeployLocal's shape): the OZ v5.5.0 ERC2771Forwarder + the
+        # ERC-2771 probe target kind:5098 relays to.
+        if forge script script/DeployLocal.s.sol:DeployLocalScript \
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation \
+           && forge script /sandbox-extras/DeploySandboxExtras.s.sol:DeploySandboxExtrasScript \
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation; then
+          echo "Anvil ready with contracts deployed!"
+        else
+          echo "============================================================"
+          echo "CONTRACT DEPLOY FAILED. This anvil is serving an EMPTY or"
+          echo "PARTIAL chain; it will never pass its healthcheck and nothing"
+          echo "that settles can start against it. The forge output above is"
+          echo "the reason."
+          echo "============================================================"
+        fi
+
+        wait $$ANVIL_PID
+    volumes:
+      # The connector SIBLING checkout is required (documented in README.md).
+      - ../../connector/packages/contracts:/contracts
+      # Sandbox-owned extras script, mounted OUTSIDE the project so docker
+      # never creates a mountpoint file in the connector checkout (forge's
+      # out/cache/broadcast writes there happen either way, as documented).
+      - ./contracts:/sandbox-extras:ro
+    ports:
+      - '8545:8545'
+    restart: unless-stopped
+    logging: *chain-logging
+    # Healthy means THE FULL DEPLOY LANDED, not merely that the RPC answers:
+    # everything downstream (connectors, seed-toon-evm, gas-station) would
+    # otherwise race the deploy. Gated on the registry (DeployLocal) AND the
+    # ERC-2771 probe (DeploySandboxExtras — deployed last, so code there means
+    # the forwarder landed too). cast code returns 0x until a deploy lands and
+    # empty output on RPC failure, hence the -n checks.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' || exit 1"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  # Fake Arweave node. Frozen upstream (repo archived) but still what the
+  # ecosystem uses locally. Serves as the gateway's "trusted node" (envoy
+  # upstreams, tx-anchor lookups) — the gateway's SYNC pipeline must never
+  # point at it (core's block importer crashes on ArLocal's minimal genesis;
+  # that is why gateway.conf sets START_WRITERS=false).
+  arlocal:
+    image: textury/arlocal:v1.1.66
+    restart: unless-stopped
+    ports:
+      - '1984:1984'
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Init jobs (one-shot; each is idempotent)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Seeds the validator so ArNS buys work: airdrop SOL, create a local "ARIO"
+  # SPL mint, treasury + buyer ATAs, mint ARIO to the buyer, then
+  # ario_arns::initialize + ario_core::initialize (signer = the programs'
+  # upgrade authority). Exits 0 immediately if the ArnsConfig PDA already
+  # exists. Note: the validator runs with --reset, so a *restart* of that
+  # container wipes chain state — `docker compose up -d` re-runs this job
+  # and reseeds (see README "Restarting the validator").
+  seed-solana:
+    build: .
+    restart: 'no'
+    environment:
+      RPC_URL: http://solana-validator:8899
+      WS_URL: ws://solana-validator:8900
+    volumes:
+      - ./keys:/app/keys:ro
+    command: ['node', 'scripts/seed-solana.mjs']
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+
+  # Seeds one fake head block (height 1) into core's SQLite. Required by the
+  # Turbo upload service, which resolves the current block height via the
+  # gateway's GraphQL to compute receipt deadlineHeight — on a chainless
+  # gateway every upload would 503 ("Unable to sign receipt... Failed to
+  # fetch block info"). Runs the core image itself (it ships node +
+  # better-sqlite3) against the shared sqlite bind mount. Idempotent
+  # (INSERT OR REPLACE of the same row).
+  seed-gateway-block:
+    image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
+    restart: 'no'
+    entrypoint: ['/bin/sh', '/seed/seed-head-block.sh']
+    volumes:
+      - ./data/gateway/sqlite:/app/data/sqlite
+      - ./scripts/seed-head-block.sh:/seed/seed-head-block.sh:ro
+    depends_on:
+      core:
+        condition: service_healthy
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # AR.IO gateway stack (vendored from ar-io-node r83 docker-compose.yaml)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Deviation from the prototypes: the observer service is dropped entirely
+  # (it only crash-looped there — no observer wallet, RUN_OBSERVER=false).
+  # Envoy's observer cluster points at `core` instead; /ar-io/observer
+  # routes 503, which nothing in the sandbox uses.
+
+  envoy:
+    image: ghcr.io/ar-io/ar-io-envoy:a487df83812f30d8753d89d28f45200606c64678
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      - LOG_LEVEL=info
+      - TVAL_AR_IO_HOST=core
+      - TVAL_AR_IO_PORT=4000
+      - TVAL_OBSERVER_HOST=core # observer not run in the sandbox (see above)
+      - TVAL_OBSERVER_PORT=5050
+      - TVAL_TRUSTED_NODE_HOST=arlocal # cut mainnet: default is arweave.net
+      - TVAL_TRUSTED_NODE_PORT=1984
+      - TVAL_FALLBACK_NODE_HOST=arlocal # default is peers.arweave.xyz
+      - TVAL_FALLBACK_NODE_PORT=1984
+      - TVAL_GRAPHQL_HOST=core
+      - TVAL_GRAPHQL_PORT=4000
+      - TVAL_GRAPHQL_HOST_HEADER=
+      - TVAL_DATASETS_HOST=core
+      - TVAL_DATASETS_PORT=4000
+      - TVAL_ARNS_ROOT_HOST=ar.localhost # enables the ArNS subdomain vhost
+      - TVAL_ARWEAVE_POST_DRY_RUN=true
+      - TVAL_ENABLE_ARWEAVE_PEER_EDS=false # stop envoy's mainnet peer discovery
+      - TVAL_ARWEAVE_PEER_DNS_RECORDS=arlocal
+      - TVAL_ARWEAVE_PEER_DNS_PORT=1984
+      - TVAL_ARIO_GATEWAY_UPSTREAM_IDLE_TIMEOUT=55s
+      - TVAL_ARIO_GATEWAY_MAX_CONNECTIONS=16384
+      - TVAL_ARIO_GATEWAY_MAX_PENDING_REQUESTS=16384
+      - TVAL_ARIO_GATEWAY_MAX_REQUESTS=16384
+      - TVAL_ARIO_GATEWAY_RETRY_BUDGET_PERCENT=20
+    volumes:
+      - envoy-eds-data:/data/envoy-eds
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      - core
+
+  core:
+    image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
+    restart: unless-stopped
+    ports:
+      # Host 3004 (host 4000 is commonly taken by sibling stacks). Envoy
+      # derives its upstream port from the container port, so the remap must
+      # stay on the host side only.
+      - '3004:4000'
+    volumes:
+      - ./data/gateway/chunks:/app/data/chunks
+      - ./data/gateway/contiguous:/app/data/contiguous
+      - ./data/gateway/headers:/app/data/headers
+      - ./data/gateway/sqlite:/app/data/sqlite
+      - ./data/gateway/duckdb:/app/data/duckdb
+      - ./data/gateway/tmp:/app/data/tmp
+      - ./data/gateway/lmdb:/app/data/lmdb
+      - ./data/gateway/parquet:/app/data/parquet
+      - ./data/gateway/datasets:/app/data/datasets
+      - ./data/gateway/etl-staging:/app/data/etl/staging
+      - ./data/gateway/cdb64-root-tx-index:/app/data/cdb64-root-tx-index
+      - ./data/gateway/keys:/app/data/keys
+      - envoy-eds-data:/app/data/envoy-eds
+    env_file:
+      - conf/gateway.conf
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # The image ships its own HEALTHCHECK (GET /ar-io/healthcheck) with a 30s
+    # interval; tighten it so dependents gate faster.
+    healthcheck:
+      test: ['CMD', '/bin/sh', 'healthcheck.sh']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    depends_on:
+      redis:
+        condition: service_started
+      arlocal:
+        condition: service_started
+      # Boot-time ArNS name-list hydration targets a live RPC.
+      solana-validator:
+        condition: service_healthy
+
+  redis:
+    image: redis:7
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save "" --appendonly no
+    restart: unless-stopped
+    volumes:
+      - ./data/redis:/data
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Turbo bundler stack (vendored from ar-io-node r83
+  # docker-compose.bundler.yaml)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Reached through the gateway: turbo-sdk -> http://localhost:3000/bundler
+  # (envoy proxies /bundler to upload-service:5100 — the service NAME is
+  # load-bearing, envoy's cluster targets it by DNS).
+
+  upload-service:
+    image: ghcr.io/ardriveapp/turbo-upload-service:fd1032e3012c0179577b08bbfe932f4ad7d805cd
+    restart: on-failure
+    env_file:
+      - conf/bundler.conf
+    environment:
+      ARWEAVE_GATEWAY: http://envoy:3000
+      PORT: '5100'
+      DB_HOST: upload-service-pg
+      DB_PORT: '5432'
+      DB_PASSWORD: postgres
+      MAX_DATA_ITEM_SIZE: '10737418240'
+      SQS_PREPARE_BUNDLE_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/prepare-bundle-queue
+      SQS_FINALIZE_UPLOAD_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/finalize-multipart-queue
+      SQS_OPTICAL_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/optical-post-queue
+      SQS_NEW_DATA_ITEM_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/batch-insert-new-data-items-queue
+      SQS_UNBUNDLE_BDI_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/bdi-unbundle-queue
+      OPTICAL_BRIDGING_ENABLED: 'true'
+      LOG_LEVEL: info
+      MIGRATE_ON_STARTUP: 'true'
+    ports:
+      - '5100:5100'
+    volumes:
+      - ./data/upload-service:/temp
+    depends_on:
+      upload-service-pg:
+        condition: service_started
+      fulfillment-service:
+        condition: service_started
+      # Receipt signing needs the fake head block (GraphQL block height).
+      seed-gateway-block:
+        condition: service_completed_successfully
+
+  fulfillment-service:
+    image: ghcr.io/ardriveapp/turbo-upload-service-fulfillment:6299f5497f5de479a1fb17ec86b764a4bf018f7b
+    restart: on-failure
+    env_file:
+      - conf/bundler.conf
+    environment:
+      ARWEAVE_GATEWAY: http://envoy:3000 # bundles POST to the local gateway (dry-run there)
+      DB_HOST: upload-service-pg
+      DB_PORT: '5432'
+      DB_PASSWORD: postgres
+      PORT: '4401'
+      SQS_PREPARE_BUNDLE_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/prepare-bundle-queue
+      SQS_POST_BUNDLE_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/post-bundle-queue
+      SQS_SEED_BUNDLE_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/seed-bundle-queue
+      SQS_FINALIZE_UPLOAD_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/finalize-multipart-queue
+      SQS_OPTICAL_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/optical-post-queue
+      SQS_NEW_DATA_ITEM_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/batch-insert-new-data-items-queue
+      SQS_UNBUNDLE_BDI_URL: http://sqs.us-east-1.localstack.localstack.cloud:4566/000000000000/bdi-unbundle-queue
+      PLAN_BUNDLE_ENABLED: 'true'
+      # Deviation from the prototypes (which kept the default true): with no
+      # real chain the bundle can never confirm, so verification errors once
+      # a minute forever. Off = same behavior minus the log noise.
+      VERIFY_BUNDLE_ENABLED: 'false'
+      OPTICAL_BRIDGING_ENABLED: 'true'
+      OPTICAL_BRIDGE_URL: http://envoy:3000/ar-io/admin/queue-data-item
+      OVERDUE_DATA_ITEM_THRESHOLD_MS: '0' # plan all data items into bundles immediately
+    depends_on:
+      localstack:
+        condition: service_healthy
+      upload-service-pg:
+        condition: service_started
+      seed-gateway-block:
+        condition: service_completed_successfully
+
+  upload-service-pg:
+    image: postgres:13.8
+    restart: on-failure
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./data/upload-service-pg:/var/lib/postgresql/data
+
+  localstack:
+    image: ghcr.io/ardriveapp/turbo-upload-service-localstack:6299f5497f5de479a1fb17ec86b764a4bf018f7b
+    restart: on-failure
+    ports:
+      - '4566:4566'
+    env_file:
+      # Provides ARWEAVE_WALLET / TURBO_OPTICAL_KEY (the bundler identity,
+      # loaded into localstack's secretsmanager by its init) and
+      # DATA_ITEM_BUCKET.
+      - conf/bundler.conf
+    environment:
+      - SERVICES=s3,sqs,secretsmanager
+      - DEBUG=0
+      - PERSIST_DEFAULT=1
+    volumes:
+      - ./data/localstack:/var/lib/localstack
+      - ./data/localstack:/persisted-data
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -f http://localhost:4566/_localstack/health || exit 1
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 15s
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # TOON payment layer: three connectors + relay + store + gas-station
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Topology (peering = the connector repo's CI-proven static config-file
+  # mechanism, local/two-hop + local/mixed-chain there; ADR 0060/0028/0042):
+  #
+  #   client ──POST /ilp──▶ relay-connector (hub, :3200)
+  #             g.toon.relay            ──▶ relay:3100/write         (paid)
+  #             g.toon.store            ──peering──▶ store-connector ──▶ store:3300/store
+  #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
+  #   any client ──ws──▶ relay:7100 (free reads, host :7100)
+  #
+  # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
+  # (EVM mock USDC), while BOTH peering legs settle on the LOCAL VALIDATOR —
+  # real payment_channel-program channels in the Solana mock USDC mint. Both
+  # mocks are 6-decimal USDC, so amounts cross the boundary unconverted
+  # (conversion/FX is explicitly unsupported). The Solana channels are opened
+  # AFTER the hub boots by the open-toon-solana-channels init job, through
+  # the hub's own operator surface — the repo's only InitializeChannel
+  # submitter (connector/local/mixed-chain is the upstream proof of this
+  # exact shape). Every connector still runs both settlement backends;
+  # Solana startup submits a real ATA-create and simulates an
+  # InitializeChannel against the genesis-loaded payment_channel program.
+  #
+  # Key material under keys/toon/ is committed valueless throwaway (see
+  # scripts/gen-toon-keys.sh); configs under conf/connector-*.toml. The
+  # connector image runs as uid 10001: key dirs are bind-mounted READ-ONLY
+  # (world-readable files suffice), state dirs are NAMED VOLUMES (a fresh
+  # named volume inherits the image's uid-10001 /app/state ownership; a bind
+  # mount arrives root-owned and the connector refuses to start).
+
+  # One-shot: mock USDC mint + SOL/USDC for every settlement key (Solana leg).
+  seed-toon-solana:
+    build: .
+    restart: 'no'
+    environment:
+      RPC_URL: http://solana-validator:8899
+      WS_URL: ws://solana-validator:8900
+    volumes:
+      - ./keys:/app/keys:ro
+    command: ['node', 'scripts/seed-toon-solana.mjs']
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+
+  # One-shot: ETH + USDC for every settlement key (EVM leg — the client
+  # channel the smoke opens against the hub lives on anvil).
+  seed-toon-evm:
+    image: ghcr.io/foundry-rs/foundry:v1.8.1
+    restart: 'no'
+    entrypoint: ['/bin/sh', '/seed/seed-toon-evm.sh']
+    environment:
+      RPC_URL: http://anvil:8545
+      KEYS_DIR: /keys
+    volumes:
+      - ./scripts/seed-toon-evm.sh:/seed/seed-toon-evm.sh:ro
+      - ./keys/toon:/keys:ro
+    depends_on:
+      anvil:
+        condition: service_healthy
+
+  # One-shot, POST-BOOT: opens + collateralises the two SOLANA peering
+  # channels through the HUB's operator surface (the payer node is the only
+  # possible submitter — InitializeChannel is a positional account list no
+  # chain CLI can build, and the program's Deposit credits strictly by
+  # signer). Vendored connector/local/open-solana-channel.py; refuses success
+  # unless the chain's own account layout agrees with the committed configs.
+  open-toon-solana-channels:
+    image: python:3.12-slim
+    restart: 'no'
+    entrypoint: ['/bin/sh', '/seed/seed-toon-solana-channels.sh']
+    environment:
+      RPC_URL: http://solana-validator:8899
+      HUB_OPERATOR_URL: http://relay-connector:3000
+      KEYS_DIR: /keys
+    volumes:
+      - ./scripts/seed-toon-solana-channels.sh:/seed/seed-toon-solana-channels.sh:ro
+      - ./scripts/open-solana-channel.py:/seed/open-solana-channel.py:ro
+      - ./keys/toon:/keys:ro
+    depends_on:
+      relay-connector:
+        condition: service_healthy
+
+  # ── The apps ─────────────────────────────────────────────────────────────
+
+  # Nostr relay. Write port 3100 is deliberately UNPUBLISHED — the only route
+  # to it is a paid packet through relay-connector (the relay skips schnorr
+  # verification for paid ephemeral kinds on exactly that guarantee). Reads
+  # (7100) are free NIP-01 over WebSocket.
+  relay:
+    image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
+    env_file:
+      - conf/relay.conf
+    volumes:
+      - relay-data:/data
+    expose:
+      - '3100' # writes — PRIVATE, only relay-connector dials this
+    ports:
+      - '7100:7100' # free NIP-01 reads
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Paid Arweave blob store (kind:5094 blob upload + kind:5095 ArNS: op=prepare
+  # ANT-spawn composition and op=buy brokered name purchase). Handler port 3300
+  # is UNPUBLISHED for the same reason as the relay's write port; the free
+  # health/describe surface (BLS, container port 3400) is published at host
+  # 3300. Uploads aim straight at the LOCAL Turbo upload service and the
+  # kind:5095 buy at the LOCAL validator via the STORE_TURBO_UPLOAD_URL /
+  # ARNS_SOLANA_*_URL env overrides (conf/store.conf) — which is why the image
+  # is BUILT from the store sibling checkout carrying that change
+  # (feat/local-endpoint-overrides) instead of pulled: the pinned upstream
+  # release predates the overrides and can only reach upload.ardrive.io.
+  # Once upstream ships them, the pin works again:
+  #   image: ghcr.io/toon-protocol/store@sha256:564323255704529e0cad7ed9b3c00b6d6716ebcb887117de04c0f4937f80cfec # :release, 2026-09 (pre-override)
+  store:
+    build:
+      # The store sibling checkout (documented in README prerequisites; `make
+      # setup` preflights it). Relative so the compose file stays portable.
+      context: ../../store-gaps-worktree
+      dockerfile: Dockerfile.store
+    env_file:
+      - conf/store.conf
+    expose:
+      - '3300' # paid job handler — PRIVATE, only store-connector dials this
+    ports:
+      - '3300:3400' # free health surface
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3400/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      # Same gate the retired turbo-tls shim had: uploads target this service.
+      upload-service:
+        condition: service_started
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # Gas station: kind:5096 (Solana — pays gas out of its fee-payer float) AND
+  # kind:5098 (EVM — relays a client-signed ERC-2771 forward request through
+  # the sandbox-deployed ERC2771Forwarder on anvil and pays the gas; see
+  # contracts/DeploySandboxExtras.s.sol and conf/gas-station.conf). Handler
+  # port 3300 UNPUBLISHED; free /describe + /health surface at host 3400.
+  gas-station:
+    image: ghcr.io/toon-protocol/gas-station@sha256:93429c3ad170dac358a58e0692037f2bd0071d5d53619c312afa80d359869cf4 # :release, 2026-09
+    env_file:
+      - conf/gas-station.conf
+    expose:
+      - '3300' # paid job handler — PRIVATE, only gas-connector dials this
+    ports:
+      - '3400:3400' # free /describe + /health
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3400/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+      # kind:5098 transacts on anvil; healthy = forwarder + probe deployed.
+      anvil:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # ── The connectors ───────────────────────────────────────────────────────
+  # Stock image on the same immutable pin the relay/store/gas-station deploy
+  # bundles carry (rust-2026.08.28.1). No environment layer — every value
+  # comes from the mounted toml; startup is FAIL-CLOSED. The healthcheck's
+  # GET /ilp/identity answers 200 only once the config loaded AND both
+  # settlement backends connected (127.0.0.1, never localhost: the listener
+  # binds IPv4 only and busybox wget resolves ::1 first).
+
+  store-connector:
+    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-store.toml:/app/config/connector.toml:ro
+      - ./keys/toon/store-connector:/app/data:ro
+      - store-connector-state:/app/state
+    ports:
+      - '3210:3000'
+    healthcheck: &connector-healthcheck
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      store:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  gas-connector:
+    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-gas.toml:/app/config/connector.toml:ro
+      - ./keys/toon/gas-connector:/app/data:ro
+      - gas-connector-state:/app/state
+    ports:
+      - '3220:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      gas-station:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The hub. Starts after both accepting peers are healthy (it dials them; a
+  # peering whose far side is not serving answers T01 rather than failing
+  # loudly, so bring-up order matters for a deterministic first smoke).
+  relay-connector:
+    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-relay.toml:/app/config/connector.toml:ro
+      - ./keys/toon/relay-connector:/app/data:ro
+      - relay-connector-state:/app/state
+    ports:
+      - '3200:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      relay:
+        condition: service_healthy
+      store-connector:
+        condition: service_healthy
+      gas-connector:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+volumes:
+  envoy-eds-data:
+  relay-data:
+  relay-connector-state:
+  store-connector-state:
+  gas-connector-state:
