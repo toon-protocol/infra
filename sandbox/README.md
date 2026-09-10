@@ -14,9 +14,8 @@ for local development:
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
-| `store` | paid Arweave blob store, kind:5094/5095 (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
+| `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — **built from the store sibling checkout**, see "TOON layer" (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
-| `turbo-tls` | TLS shim aliasing `upload.ardrive.io` onto the local Turbo bundler (see "TOON layer") | — |
 | `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm`, `open-toon-solana-channels` | one-shot idempotent init jobs | — |
 
 The proven end-to-end flows (what `make smoke` exercises):
@@ -26,7 +25,13 @@ The proven end-to-end flows (what `make smoke` exercises):
 2. **TOON payment layer — cross-chain, same-asset**: a real client
    (`@toon-protocol/client`) opens a payment channel on ANVIL against the
    hub, then a PAID Nostr write to `g.toon.relay`, a PAID kind:5094 blob to
-   `g.toon.store`, a PAID kind:5096 gas quote and a PAID kind:5098 EVM
+   `g.toon.store`, the BROKERED ArNS buy — the three-party kind:5095/5096
+   ceremony: a SOL-less owner keypair gets an ANT spawned for it (store
+   composes via paid `op=prepare`, client signs, gas station pays rent + fee
+   and broadcasts via paid kind:5096 quote/execute), then a paid `op=buy`
+   makes the store's DVM wallet purchase a fresh ArNS name on the local
+   validator for that ANT, and the local gateway resolves the name — plus a
+   PAID kind:5096 gas quote and a PAID kind:5098 EVM
    meta-tx relay (quote + execute — an unfunded wallet's EIP-712-signed
    ERC-2771 forward request is relayed on anvil and `_msgSender()` is read
    back as the client) to `g.toon.gastation` all
@@ -56,6 +61,16 @@ shipped), so no ar-io-node checkout is needed.
   service bind-mounts its Foundry project (`packages/contracts`) and deploys
   the settlement contracts in-container on every start (the connector repo's
   own proven pattern; submodules self-heal if the clone wasn't `--recursive`)
+- The **store sibling checkout** at `../../store-gaps-worktree` — the `store`
+  image is BUILT from it (`docker compose` build context), because the
+  sandbox needs the local-endpoint-override change that checkout carries
+  (branch `feat/local-endpoint-overrides`: `STORE_TURBO_UPLOAD_URL`,
+  `ARNS_SOLANA_RPC_URL`/`ARNS_SOLANA_WS_URL`) and the pinned upstream image
+  predates it. `make setup` preflights this and says how to repoint the
+  context (Makefile `STORE_CONTEXT` + the `store` service in
+  `docker-compose.yml`) if your checkout lives elsewhere; once upstream
+  ships the change, the commented image pin in `docker-compose.yml` works
+  again
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
   3210, 3220, 3300, 3400, 7100
 - `*.localhost` resolving to loopback (default on modern Linux/macOS
@@ -240,8 +255,11 @@ committed configs), the gas station's dedicated kind:5098 relayer
 `gas-evm-relayer.key` (mnemonic index 27; also embedded 0x-prefixed in
 `conf/gas-station.conf`'s `EVM_GAS_STATION_CONFIG_JSON`, ETH-funded by
 `seed-toon-evm`), operator credentials, the connector repo's own
-deterministic mock-USDC mint keypairs, and the two app keypairs whose public
-halves are embedded in `conf/*.conf`. `scripts/gen-toon-keys.sh` documents
+deterministic mock-USDC mint keypairs, and the app keypairs whose values are
+embedded in `conf/*.conf` (the gas station's Solana fee payer, the store's
+Turbo signer, and the store's kind:5095 ArNS DVM payer `arns-dvm.json` —
+seeded with SOL + 10,000 local ARIO by `seed-solana.mjs`).
+`scripts/gen-toon-keys.sh` documents
 and regenerates the lot. The connector image runs as uid 10001 and mounts
 key dirs read-only (world-readable files suffice — nothing here is written
 by root); its `/app/state` claim journals are **named volumes** so they
@@ -268,20 +286,33 @@ regenerates it. The validator loads it at genesis with plain `--bpf-program`
 under the bare id `HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR` (no init
 gate — same id the connector's own local tooling shares).
 
-### Store upload path (the turbo-tls shim)
+### Store endpoints (built from the sibling checkout)
 
-The store has **no env override for the Turbo upload-service URL** — its
-turbo-sdk client always aims at the production `https://upload.ardrive.io`
-(the only knobs are the Solana signing key / network / RPC gateway; verified
-against `store/src/entrypoint-store.ts` + `turbo-funding.ts`). To keep
-uploads fully local without patching the store repo, the `turbo-tls` service
-carries `upload.ardrive.io` as a compose network **alias**, terminates TLS
-with a committed throwaway certificate (`conf/turbo-tls/`), and proxies to
-the local `upload-service:5100`; the store trusts the shim CA via
-`NODE_EXTRA_CA_CERTS`. Paid Turbo top-ups stay off
-(`STORE_TURBO_MAX_ARIO_PER_UPLOAD` unset), so the store serves the free tier
-(data items ≤ 107,520 bytes) — enough for the smoke proof, and the local
-bundler skips balance checks anyway.
+The `store` image is **built from `../../store-gaps-worktree`** (see
+Prerequisites) because that checkout carries the local-endpoint overrides the
+sandbox stands on — the released image has no such knobs and always aims at
+the production endpoints:
+
+- `STORE_TURBO_UPLOAD_URL=http://upload-service:5100` points turbo-sdk's
+  uploads at the LOCAL Turbo upload service, plain http inside the compose
+  network — the same upstream the retired `turbo-tls` shim proxied
+  `https://upload.ardrive.io` to (the shim, its committed throwaway CA and
+  the `NODE_EXTRA_CA_CERTS` trust are gone). `STORE_TURBO_PAYMENT_URL` stays
+  unset: the keyless free-tier path never talks to a payment service (the
+  shim answered `payment.ardrive.io` with a 503 and everything passed).
+- `ARNS_SOLANA_RPC_URL` / `ARNS_SOLANA_WS_URL` point the kind:5095 `op=buy`
+  path at the local validator (8899/8900). Program ids still follow
+  `ARNS_NETWORK=devnet` = the SDK's `DEVNET_PROGRAM_IDS` = exactly what the
+  validator loads at genesis. The DVM payer wallet is the committed
+  throwaway `keys/toon/arns-dvm.json` (`ARNS_DVM_SOLANA_SECRET_KEY` in
+  `conf/store.conf` is its hex form), funded with SOL + 10,000 local ARIO by
+  `seed-solana.mjs`.
+
+Paid Turbo top-ups stay off (`STORE_TURBO_MAX_ARIO_PER_UPLOAD` unset), so the
+store serves the free tier (data items ≤ 107,520 bytes). That ceiling is the
+STORE's own gate on the keyless path — it applied under the shim and applies
+identically now; it is all the smoke needs, and the local bundler skips
+balance checks anyway.
 
 ### Driving the TOON layer by hand
 
@@ -304,8 +335,15 @@ assertions over the operator surface with the committed bearer tokens).
 
 ### TOON layer: known gaps
 
-- **Store upload URL override** (above): wired via the turbo-tls shim; the
-  clean fix is an upstream store env var for `uploadServiceConfig.url`.
+- ~~Store upload URL override~~ **closed**: the store now takes
+  `STORE_TURBO_UPLOAD_URL` (plus `STORE_TURBO_PAYMENT_URL` and the
+  `ARNS_SOLANA_*_URL` pair) from the sibling checkout's
+  `feat/local-endpoint-overrides` change; the turbo-tls DNS/CA shim is
+  removed entirely. What remains true: the sandbox must BUILD the store
+  image from that checkout until upstream releases the change (the
+  commented image pin in `docker-compose.yml` then works again), and the
+  free-tier size ceiling (≤ 107,520 bytes) still applies — it is the
+  store's own keyless-path gate, unrelated to the shim.
 - ~~kind:5098 (EVM gas) unconfigured~~ **closed**: the sandbox now deploys
   its own OZ v5.5.0 `ERC2771Forwarder` on anvil
   (`contracts/DeploySandboxExtras.s.sol` — sandbox-owned, overlaid into the
@@ -319,10 +357,22 @@ assertions over the operator surface with the committed bearer tokens).
   never accept meta-transactions; a from-scratch deploy that passes the
   forwarder to the registry before `createTokenNetwork` would close that
   residue upstream.
-- **kind:5095 `op=buy` (brokered ArNS) unconfigured**: `ARNS_DVM_SOLANA_SECRET_KEY`
-  is unset, and the store's ArNS SDK has no RPC override pointed at the
-  local validator; direct ArNS buys against the local validator are already
-  proven by the AR.IO smoke.
+- ~~kind:5095 `op=buy` (brokered ArNS) unconfigured~~ **closed**: the store
+  runs with `ARNS_DVM_SOLANA_SECRET_KEY` (the committed throwaway
+  `keys/toon/arns-dvm.json`, seeded with SOL + 10,000 local ARIO),
+  `ARNS_NETWORK=devnet` and the `ARNS_SOLANA_*_URL` overrides at the local
+  validator. The smoke proves the FULL three-party ceremony through the hub
+  (`buyArnsNameWithNewAnt`): paid `op=prepare` composes the ANT spawn, the
+  SOL-less client signs it, paid kind:5096 quote/execute has the gas
+  station pay and broadcast it, paid `op=buy` has the DVM purchase a fresh
+  name for that client-owned ANT — and the local gateway resolves the name.
+  What remains true: the spawned ANT is not ACL-bootstrapped (the gas
+  station's documented per-job ceiling), and the DVM's best-effort
+  `syncAttributes` after the non-holder buy fails benignly (locally:
+  AnchorError 2006 `ConstraintSeeds` on `ant_authority` — the DVM is not
+  the holder; receipt carries `syncAttributesTxId: null`, the store logs
+  it non-fatal) — both upstream properties of the ceremony, not sandbox
+  residue.
 - ~~Solana-settled peerings~~ **closed**: both peerings now settle on
   SOLANA payment_channel accounts (the client leg stays EVM — that split is
   the cross-chain design, not a gap). What remains true: conversion/FX is

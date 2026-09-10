@@ -15,6 +15,13 @@
 //      the HUB's edge, routes over the relay-store peering to the store,
 //      which uploads via the LOCAL Turbo path and answers a real tx id —
 //      then the local AR.IO gateway serves the blob at /raw/<txId>
+//   3b. the BROKERED ArNS buy (kind:5095), the three-party flagship: an
+//      owner keypair that never holds SOL spawns an ANT (store composes the
+//      transaction via PAID op=prepare, the client signs it, the gas station
+//      pays rent + fees and broadcasts it via PAID kind:5096 quote/execute),
+//      then a PAID op=buy makes the store's DVM wallet purchase a fresh ArNS
+//      name on the LOCAL validator, associated with that client-owned ANT —
+//      and the LOCAL gateway resolves the name afterwards
 //   4. a PAID kind:5096 gas job (quote phase) addressed to g.toon.gastation
 //      routes over the relay-gas peering to the gas station, which answers
 //      its Solana fee payer
@@ -38,7 +45,10 @@
 import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ToonClient, sendJob, buildJobEvent } from '@toon-protocol/client';
+import {
+  ToonClient, sendJob, buildJobEvent,
+  buyArnsNameWithNewAnt, generateSolanaKeypair,
+} from '@toon-protocol/client';
 import { buildBlobStorageRequest } from '@toon-protocol/core';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import {
@@ -283,8 +293,8 @@ if (!storeAnswer.accepted) {
   const txId = storeAnswer.receipt?.txId ?? storeAnswer.receipt?.result?.txId;
   assert(typeof txId === 'string' && txId.length === 43, `the store answered a real Arweave tx id: ${txId}`);
   if (typeof txId === 'string') {
-    // The upload went through the LOCAL Turbo path (turbo-tls shim ->
-    // upload-service), so the LOCAL gateway serves it optically.
+    // The upload went through the LOCAL Turbo path (STORE_TURBO_UPLOAD_URL
+    // -> upload-service), so the LOCAL gateway serves it optically.
     let served = false;
     for (let i = 0; i < 15 && !served; i++) {
       const res = await fetch(`${GATEWAY}/raw/${txId}`);
@@ -293,6 +303,51 @@ if (!storeAnswer.accepted) {
     }
     assert(served, `the LOCAL gateway serves the stored blob at ${GATEWAY}/raw/${txId}`);
   }
+}
+
+// ── 3b. the BROKERED ArNS buy: kind:5095 prepare + 5096 gas + 5095 buy ───
+// The three-party ceremony end to end, every leg PAID through the hub:
+//   - the OWNER keypair below never holds a lamport — the client's only
+//     asset is ILP credit on the channel from step 1
+//   - the STORE composes the ANT-spawn transaction (op=prepare) and later
+//     spends its own ARIO float on the name (op=buy, the DVM wallet funded
+//     by seed-solana.mjs)
+//   - the GAS STATION pays the spawn's rent + fee out of its Solana float
+//     and broadcasts (kind:5096 quote/execute)
+// and the name must then resolve through the LOCAL gateway.
+step('3b. BROKERED ArNS buy (kind:5095): SOL-less owner -> paid prepare/gas/buy -> name resolves');
+const arnsOwner = generateSolanaKeypair(); // never funded, ever
+const arnsName = `toon-paid-${Math.random().toString(36).slice(2, 8)}`;
+const arnsOutcome = await buyArnsNameWithNewAnt({
+  store: { client, destination: 'g.toon.store', sealTo: STORE_EDGE, timeoutMs: 120_000 },
+  gas: { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 120_000 },
+  owner: arnsOwner,
+  name: arnsName,
+  type: 'lease',
+  years: 1,
+});
+if (!arnsOutcome.bought) {
+  bad(`brokered ArNS buy failed at step ${arnsOutcome.step}: ${arnsOutcome.reason} — ${arnsOutcome.detail}`);
+} else {
+  const { ant, receipt } = arnsOutcome;
+  ok(`ANT spawned by the ceremony: ${ant.processId} (gas fee payer ${ant.feePayer}, tx ${ant.signature})`);
+  assert(ant.owner === arnsOwner.address,
+    `the ANT owner is the unfunded client keypair ${arnsOwner.address}`);
+  assert(receipt.name === arnsName && receipt.processId === ant.processId,
+    `op=buy bought "${receipt.name}" for the client's ANT (registry tx ${receipt.registryTxId})`);
+  assert(typeof receipt.registryTxId === 'string' && receipt.registryTxId.length > 0,
+    `the DVM paid ${receipt.quotedMario} mARIO on the LOCAL validator (network ${receipt.network})`);
+  // The proof the name is real: the LOCAL gateway's resolver answers for it
+  // (the gateway hydrates its base-name list from the validator; the
+  // miss-refresh interval is 5s here, so poll).
+  let resolved = null;
+  for (let i = 0; i < 30 && !resolved; i++) {
+    const res = await fetch(`${GATEWAY}/ar-io/resolver/${arnsName}`);
+    if (res.status === 200) resolved = await res.json();
+    else await sleep(3000);
+  }
+  assert(resolved !== null && typeof resolved.txId === 'string',
+    `the LOCAL gateway resolves ${arnsName} (${GATEWAY}/ar-io/resolver/${arnsName} -> ${resolved?.txId})`);
 }
 
 // ── 4. paid gas quote THROUGH THE PEERING ────────────────────────────────
@@ -458,19 +513,21 @@ if (evmQuote) {
 step('5. the connectors’ own books say everything was PAID — per settlement leg');
 // Claims are journaled on the far side of the same round trip; poll briefly.
 let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore;
-for (let i = 0; i < 20 && (hubAfter - hubBefore < 4401n || storeAfter <= storeBefore || gasAfter - gasBefore < 3000n); i++) {
+for (let i = 0; i < 20 && (hubAfter - hubBefore < 9901n || storeAfter - storeBefore < 3000n || gasAfter - gasBefore < 6000n); i++) {
   await sleep(500);
   hubRows = await claims('relay-connector');
   hubAfter = clientBookTotal(hubRows);
   storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
   gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
 }
-// Client leg (EVM): five paid packets entered the hub's client edge — relay
-// write (1), store blob (>= 1100), 5096 quote (1100), 5098 quote (1100),
-// 5098 execute (1100) — and every client-book claim rides the EVM channel
-// opened on anvil in step 1.
-assert(hubAfter - hubBefore >= 1n + 1100n + 3n * 1100n,
-  `hub client book advanced by ${hubAfter - hubBefore} (>= 4401, the five packets' prices)`);
+// Client leg (EVM): ten paid packets entered the hub's client edge — relay
+// write (1), store blob (>= 1100), the brokered ArNS ceremony's five
+// (kind:5096 fee-payer quote, kind:5095 op=prepare, kind:5096 quote with
+// draft, kind:5096 execute, kind:5095 op=buy — >= 1100 each), 5096 quote
+// (1100), 5098 quote (1100), 5098 execute (1100) — and every client-book
+// claim rides the EVM channel opened on anvil in step 1.
+assert(hubAfter - hubBefore >= 1n + 9n * 1100n,
+  `hub client book advanced by ${hubAfter - hubBefore} (>= 9901, the ten packets' prices)`);
 // The hub's book keys a client channel as `evm:0x<64 hex>` — the chain
 // family prefix plus the anvil channel id.
 const clientChannels = [...new Set(hubRows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
@@ -480,12 +537,12 @@ assert(clientChannels.some((c) => c.replace(/^evm:/, '').toLowerCase() === Strin
   `and include the channel the client opened in step 1 (${opened.channelId})`);
 // Peer legs (SOLANA): the payees' watermarks advanced ON the Solana channel
 // accounts — the totals above were already restricted to exactly those ids.
-assert(storeAfter - storeBefore >= 1000n,
-  `store peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} (>= 1000)`);
-assert(gasAfter - gasBefore >= 3000n,
-  `gas peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} (>= 3000: 5096 quote + 5098 quote + 5098 execute)`);
+assert(storeAfter - storeBefore >= 3000n,
+  `store peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
+assert(gasAfter - gasBefore >= 6000n,
+  `gas peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
 
 console.log(failures === 0
-  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store and gas station (Solana quote + EVM ERC-2771 relay) — client leg settled on EVM, both peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
+  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store and gas station (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay) — client leg settled on EVM, both peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
   : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
 process.exit(failures === 0 ? 0 : 1);

@@ -24,8 +24,11 @@
 #     usdc-mint.json usdc-authority.json — the deterministic local mock-USDC
 #     mint H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H and its authority
 #   GENERATED ONCE, random (their public halves are embedded in conf/*.conf):
-#     gas-fee-payer.json store-turbo-signer.json  — see conf/gas-station.conf
-#     and conf/store.conf; regenerate those env values together with these.
+#     gas-fee-payer.json store-turbo-signer.json arns-dvm.json — see
+#     conf/gas-station.conf and conf/store.conf; regenerate those env values
+#     together with these (arns-dvm.json is the store's kind:5095 brokered-buy
+#     payer: its hex form is ARNS_DVM_SOLANA_SECRET_KEY in conf/store.conf and
+#     scripts/seed-solana.mjs funds its address with SOL + ARIO).
 #
 # After changing settlement keys: recompute the two channel ids
 #   keccak(abi.encodePacked(min(a,b), max(a,b), uint256(0)))

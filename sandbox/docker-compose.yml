@@ -594,16 +594,26 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
-  # Paid Arweave blob store (kind:5094). Handler port 3300 is UNPUBLISHED for
-  # the same reason as the relay's write port; the free health/describe
-  # surface (BLS, container port 3400) is published at host 3300. Uploads go
-  # through the LOCAL Turbo bundler via the turbo-tls shim (see that service).
+  # Paid Arweave blob store (kind:5094 blob upload + kind:5095 ArNS: op=prepare
+  # ANT-spawn composition and op=buy brokered name purchase). Handler port 3300
+  # is UNPUBLISHED for the same reason as the relay's write port; the free
+  # health/describe surface (BLS, container port 3400) is published at host
+  # 3300. Uploads aim straight at the LOCAL Turbo upload service and the
+  # kind:5095 buy at the LOCAL validator via the STORE_TURBO_UPLOAD_URL /
+  # ARNS_SOLANA_*_URL env overrides (conf/store.conf) — which is why the image
+  # is BUILT from the store sibling checkout carrying that change
+  # (feat/local-endpoint-overrides) instead of pulled: the pinned upstream
+  # release predates the overrides and can only reach upload.ardrive.io.
+  # Once upstream ships them, the pin works again:
+  #   image: ghcr.io/toon-protocol/store@sha256:564323255704529e0cad7ed9b3c00b6d6716ebcb887117de04c0f4937f80cfec # :release, 2026-09 (pre-override)
   store:
-    image: ghcr.io/toon-protocol/store@sha256:564323255704529e0cad7ed9b3c00b6d6716ebcb887117de04c0f4937f80cfec # :release, 2026-09
+    build:
+      # The store sibling checkout (documented in README prerequisites; `make
+      # setup` preflights it). Relative so the compose file stays portable.
+      context: ../../store-gaps-worktree
+      dockerfile: Dockerfile.store
     env_file:
       - conf/store.conf
-    volumes:
-      - ./conf/turbo-tls/ca.pem:/turbo-tls/ca.pem:ro
     expose:
       - '3300' # paid job handler — PRIVATE, only store-connector dials this
     ports:
@@ -615,32 +625,11 @@ services:
       retries: 12
       start_period: 10s
     depends_on:
-      turbo-tls:
-        condition: service_started
-    restart: unless-stopped
-    logging: *chain-logging
-
-  # TLS shim that makes turbo-sdk's hardwired https://upload.ardrive.io land
-  # on the LOCAL Turbo upload service: the store has NO env override for the
-  # upload URL (documented gap, README "TOON layer"), so this service carries
-  # the hostname as a network alias, terminates TLS with a committed
-  # throwaway cert, and proxies to upload-service:5100. The store trusts the
-  # shim CA via NODE_EXTRA_CA_CERTS.
-  turbo-tls:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./conf/turbo-tls/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./conf/turbo-tls:/etc/turbo-tls:ro
-    networks:
-      default:
-        aliases:
-          - upload.ardrive.io
-          - payment.ardrive.io
-          - turbo.ardrive.io
-    depends_on:
+      # Same gate the retired turbo-tls shim had: uploads target this service.
       upload-service:
         condition: service_started
     restart: unless-stopped
+    logging: *chain-logging
 
   # Gas station: kind:5096 (Solana — pays gas out of its fee-payer float) AND
   # kind:5098 (EVM — relays a client-signed ERC-2771 forward request through

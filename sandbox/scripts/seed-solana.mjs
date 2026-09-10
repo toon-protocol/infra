@@ -4,7 +4,9 @@
 //   1. airdrop SOL to the admin (upgrade authority) + treasury owner
 //   2. create a local "ARIO" SPL mint (6 decimals, mint authority = admin)
 //   3. create the treasury ATA (owner: keys/treasury.json) + admin's buyer ATA
-//   4. mint 10M ARIO to the admin's ATA (the buyer wallet)
+//   4. mint 10M ARIO to the admin's ATA (the buyer wallet), and fund the
+//      store's kind:5095 ArNS DVM payer (keys/toon/arns-dvm.json) with SOL +
+//      10,000 ARIO so brokered `op=buy` jobs can spend
 //   5. ario_arns::initialize (config + demand factor) — signer MUST be the
 //      programs' upgrade authority (ProgramData gate), which is why the
 //      compose file loads programs with --upgradeable-program <id> <so> <admin>
@@ -173,6 +175,34 @@ const mintToIx = {
   })(),
 };
 await sendIxs([mintToIx], `mint ${AMOUNT} mARIO to buyer ATA`);
+
+// ── 4b. fund the store's kind:5095 ArNS DVM payer ───────────────────────
+// The store's brokered-buy wallet (conf/store.conf ARNS_DVM_SOLANA_SECRET_KEY
+// = keys/toon/arns-dvm.json): SOL for fees and ample ARIO to buy names on
+// clients' behalf (~240 ARIO for an 11-char 1y lease; 10,000 gives headroom).
+// Same idempotency story as the rest of this script: the ArnsConfig guard at
+// the top means this only runs on a freshly wiped chain, where the mint and
+// every balance are re-created together.
+const DVM_ARIO = 10_000_000_000n; // 10,000 ARIO in mARIO (6dp)
+const dvm = await createKeyPairSignerFromBytes(new Uint8Array(JSON.parse(readFileSync(`${KEYS_DIR}/toon/arns-dvm.json`))));
+await airdrop({ commitment: 'confirmed', lamports: lamports(100_000_000_000n), recipientAddress: dvm.address });
+console.log(`[airdrop] arns-dvm (store kind:5095 payer): 100 SOL -> ${dvm.address}`);
+const dvmAta = await ata(dvm.address);
+const dvmMintToIx = {
+  programAddress: TOKEN,
+  accounts: [
+    { address: mint.address, role: AccountRole.WRITABLE },
+    { address: dvmAta, role: AccountRole.WRITABLE },
+    { address: admin.address, role: AccountRole.READONLY_SIGNER, signer: admin },
+  ],
+  data: (() => {
+    const b = Buffer.alloc(9);
+    b[0] = 7; // MintTo
+    b.writeBigUInt64LE(DVM_ARIO, 1);
+    return new Uint8Array(b);
+  })(),
+};
+await sendIxs([createAtaIx(dvmAta, dvm.address), dvmMintToIx], `arns-dvm: ATA + ${DVM_ARIO} mARIO (${dvm.address})`);
 
 // ── 5. ario_arns::initialize ────────────────────────────────────────────
 // NOTE: @ar.io/solana-contracts' codama builders default to the MAINNET

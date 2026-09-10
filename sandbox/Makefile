@@ -9,8 +9,24 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up down clean smoke smoke-ario smoke-toon logs ps
 
+# The store image is BUILT from the store sibling checkout carrying the
+# local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
+# the pinned upstream image predates it. See docker-compose.yml (store) and
+# README "Prerequisites".
+STORE_CONTEXT := ../../store-gaps-worktree
+
 ## one-time: install the script deps (needed by `make smoke` on the host)
 setup:
+	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
+		echo "ERROR: store checkout not found at $(STORE_CONTEXT)"; \
+		echo "The sandbox builds the store image from a sibling checkout of the"; \
+		echo "store repo that contains the local-endpoint-override change"; \
+		echo "(branch feat/local-endpoint-overrides — STORE_TURBO_UPLOAD_URL,"; \
+		echo "ARNS_SOLANA_RPC_URL/ARNS_SOLANA_WS_URL). Clone/see it there, or"; \
+		echo "update STORE_CONTEXT in the Makefile + the store build context in"; \
+		echo "docker-compose.yml to where your checkout lives."; \
+		exit 1; \
+	fi
 	npm ci
 
 ## start everything (chains + init jobs + gateway + bundler + TOON layer)
@@ -37,8 +53,9 @@ clean:
 
 ## end-to-end proof: AR.IO flow (upload -> buy name -> serve) + TOON flow
 ## (contracts/program live -> paid write -> paid store blob via peering ->
-## paid gas jobs via peering: Solana quote + EVM ERC-2771 meta-tx relay,
-## with claim journals asserted)
+## brokered ArNS buy: paid 5095 prepare + 5096 gas spawn + 5095 buy, name
+## resolves -> paid gas jobs via peering: Solana quote + EVM ERC-2771
+## meta-tx relay, with claim journals asserted per settlement leg)
 smoke: smoke-ario smoke-toon
 
 smoke-ario:
