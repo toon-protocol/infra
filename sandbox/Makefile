@@ -2,7 +2,7 @@
 
 # Every service in docker-compose.yml carries a profile, so a profile is always
 # selected here (see the "Profiles" block at the top of that file).
-#   full      the whole 21-service stack — the sandbox's default
+#   full      the whole stack, every service — the sandbox's default
 #   payments  chains + hub + seed/open jobs only, no store checkout needed
 # Recursively expanded (`=`, not `:=`) so the payments targets can override
 # COMPOSE_PROFILE for their own recipes.
@@ -16,13 +16,20 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments down clean smoke smoke-ario smoke-toon \
-        smoke-payments logs ps require-store-context
+        smoke-payments logs ps require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
 # the pinned upstream image predates it. See docker-compose.yml (store) and
 # README "Prerequisites".
 STORE_CONTEXT := ../../store-gaps-worktree
+
+# The claim-minter image is BUILT from the anytoon sibling checkout (there is
+# no published image for it). Exported, so docker-compose.yml's build context
+# `${ANYTOON_CONTEXT:-../../anytoon}/claim-minter` picks it up — repoint it
+# here (or in your environment) if your checkout lives elsewhere. Keep the
+# default RELATIVE: the compose file has to stay portable.
+export ANYTOON_CONTEXT ?= ../../anytoon
 
 # Hard gate for the paths that BUILD the store image — i.e. `make up` alone.
 # The payments profile never renders the `store` service, so nothing on that
@@ -41,11 +48,26 @@ require-store-context:
 		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
 		exit 1; \
 	fi
+# Hard gate for the paths that BUILD the claim-minter image — `make up` alone,
+# like the store gate above. The payments profile never renders it.
+require-anytoon-context:
+	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
+		echo "ERROR: anytoon checkout not found at $(ANYTOON_CONTEXT)"; \
+		echo "The sandbox builds the claim-minter image from a sibling checkout"; \
+		echo "of the anytoon repo (it publishes no image). Clone it there, or"; \
+		echo "set ANYTOON_CONTEXT to where your checkout lives:"; \
+		echo "    make up ANYTOON_CONTEXT=/path/to/anytoon"; \
+		echo; \
+		echo "Only the FULL stack needs it. If you are working on the payment"; \
+		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
+		exit 1; \
+	fi
 
 ## one-time: install the script deps (needed by `make smoke` on the host).
-## Deliberately does NOT require the store checkout — a payments-only
-## developer must be able to run setup, up-payments and smoke-payments with no
-## sibling checkout at all; `make up` is where that requirement is enforced.
+## Deliberately does NOT require the store or anytoon checkouts — a
+## payments-only developer must be able to run setup, up-payments and
+## smoke-payments with no sibling checkout at all; `make up` is where those
+## requirements are enforced.
 setup:
 	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
 		echo "NOTE: no store checkout at $(STORE_CONTEXT)."; \
@@ -53,10 +75,16 @@ setup:
 		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
 		echo; \
 	fi
+	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
+		echo "NOTE: no anytoon checkout at $(ANYTOON_CONTEXT)."; \
+		echo "      Fine for \`make up-payments\` / \`make smoke-payments\`;"; \
+		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
+		echo; \
+	fi
 	npm ci
 
 ## start everything (chains + init jobs + gateway + bundler + TOON layer)
-up: require-store-context
+up: require-store-context require-anytoon-context
 	$(COMPOSE) up -d --build
 
 ## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +

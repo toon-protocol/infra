@@ -1,6 +1,7 @@
 # =============================================================================
 # relay-connector — the HUB. Terminates the relay's paid write routes and
-# FORWARDS g.toon.store / g.toon.gastation over two ILP-over-HTTP peerings.
+# FORWARDS g.toon.store / g.toon.gastation / g.anyone.credentials over three
+# ILP-over-HTTP peerings.
 # =============================================================================
 # Shape copied from the connector repo's proven multi-node topologies
 # (connector/local/two-hop + local/mixed-chain — the repo's own CI-exercised
@@ -24,7 +25,7 @@ client_edge_addr = "0.0.0.0:3000"
 # owned by uid 10001, which a fresh named volume inherits and a bind does not).
 state_dir = "/app/state"
 
-# The two peerings below dial plain http:// inside the compose network. A peer
+# The three peerings below dial plain http:// inside the compose network. A peer
 # endpoint is wss/https-only unless a node says otherwise; local dev says so.
 peer_allow_plaintext_endpoints = true
 
@@ -67,6 +68,35 @@ prefix = "g.toon.gastation"
 peer_id = "relay-gas"
 price = 1100
 
+# ── Forwarded: the Anyone credentials issuer, over the relay-anytoon peering ─
+# Same ADR 0028 arithmetic. anytoon-connector terminates g.anyone.credentials
+# at 10000 (= conf/anytoon.conf's BUNDLE_PRICE 0.01 x 10^6, the mock USDC
+# decimals); 10100 - fee 100 == 10000 exactly, with no slack.
+#
+# 10000 rather than the 1000-ish prices above because this route buys a real
+# thing: one bundle of blind-signed credentials at 0.01 USDC. See
+# conf/anytoon.conf — that decimal is the single source of truth and this base
+# unit figure is its only hand-kept derivation.
+[[routes]]
+prefix = "g.anyone.credentials"
+peer_id = "relay-anytoon"
+price = 10100
+
+# The key document, forwarded. It is FREE at the anytoon node (price 0 there),
+# so by the same arithmetic the hub's price is 0 + fee = 100: the hub carries
+# it for the cost of the hop and nothing more.
+#
+# THIS ROW IS NOT OPTIONAL and must not be "simplified" to price = 0. Prefix
+# matching is longest-wins, so without it a packet to g.anyone.credentials.keys
+# would fall onto the priced row above and cost 10100 to read a public key. And
+# with it set to 0 the hub would charge nothing while still subtracting its fee
+# from the packet's carried amount — R01 Insufficient Source Amount on every
+# request that carried 0, which is every honest one.
+[[routes]]
+prefix = "g.anyone.credentials.keys"
+peer_id = "relay-anytoon"
+price = 100
+
 # ── The peerings ─────────────────────────────────────────────────────────────
 # Only the dialing side has an endpoint; http:// scheme selects ILP-over-HTTP
 # carriage, and on HTTP the dialer is structurally the payer.
@@ -80,12 +110,17 @@ id = "relay-gas"
 endpoint = "http://gas-connector:3000/ilp"
 fee = 100
 
+[[peers]]
+id = "relay-anytoon"
+endpoint = "http://anytoon-connector:3000/ilp"
+fee = 100
+
 # One on-chain channel per peering, in two roles (the deployed shape): the
 # peer role for claims that arrive, the client role (pay_channels) for the
 # cover-forward claims this node signs BEFORE each forwarded PREPARE leaves
 # (ADR 0042 item 2 — required since connector#1145).
 #
-# BOTH PEERINGS SETTLE ON SOLANA (the client edge stays EVM — that is the
+# ALL THREE PEERINGS SETTLE ON SOLANA (the client edge stays EVM — that is the
 # cross-chain, same-asset shape this sandbox proves; both mock USDCs are
 # 6-decimal, so amounts pass through unconverted). The Solana row shape is
 # the connector repo's own (local/mixed-chain, issue #759/#1146): a
@@ -123,6 +158,16 @@ counterparty_key = "5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q" # gas-connecto
 peer_id = "relay-gas"
 channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
 client_edge_url = "http://gas-connector:3000/ilp"
+
+[[peer_channels]]
+peer_id = "relay-anytoon"
+channel_account = "3ZA8DPi18Jkjn8pCQkX1ZFezSmYW7RZfdhkQVeyVPwez"
+counterparty_key = "GyLJJtQ2nwLecKYFBe9JBiUg17SifxYHvbqBkarSUs6H" # anytoon-connector Solana settlement
+
+[[pay_channels]]
+peer_id = "relay-anytoon"
+channel_account = "3ZA8DPi18Jkjn8pCQkX1ZFezSmYW7RZfdhkQVeyVPwez"
+client_edge_url = "http://anytoon-connector:3000/ilp"
 
 # ── Settlement ───────────────────────────────────────────────────────────────
 # contract_address is the TokenNetworkRegistry (getTokenNetwork is resolved

@@ -13,8 +13,10 @@
 #   DERIVED from anvil's public test mnemonic (rewritten every run; their
 #   ADDRESSES are committed in conf/connector-*.toml as counterparty_key and
 #   feed the committed channel ids, so they must be identical everywhere):
-#     <node>/settlement.key        EVM secp256k1, indices 24/25/26
-#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34/35/36
+#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28
+#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34/35/36/37
+#       (28/37 are the anytoon-connector's; 27 was already spent on the gas
+#        relayer below, which is why the EVM index skips it)
 #     gas-evm-relayer.key          EVM secp256k1, index 27 — the gas station's
 #                                  DEDICATED kind:5098 relayer; its 0x-prefixed
 #                                  value is embedded in conf/gas-station.conf
@@ -30,9 +32,20 @@
 #     payer: its hex form is ARNS_DVM_SOLANA_SECRET_KEY in conf/store.conf and
 #     scripts/seed-solana.mjs funds its address with SOL + ARIO).
 #
-# After changing settlement keys: recompute the two channel ids
-#   keccak(abi.encodePacked(min(a,b), max(a,b), uint256(0)))
-# and update conf/connector-*.toml + scripts/seed-toon-evm.sh; the operator
+# NOT GENERATED HERE: the Anyone issuer's epoch keyring and the claim minter's
+# Ed25519 proxy pair (keyring.json / proxy.pem / proxy.key.pem / proxy.pub.pem).
+# Those are made at bring-up by the `issuer-keys` one-shot service, running the
+# UPSTREAM ISSUER IMAGE'S OWN generator (`bun run keys:dev`) into the
+# `anytoon-keys` named volume — the keyring is root-signed and openssl cannot
+# produce it, and an epoch key committed to git would silently expire 30 days
+# after the commit. Nothing about them feeds a committed config, so nothing
+# here has to know their values. See docker-compose.yml (`issuer-keys`).
+#
+# After changing settlement keys: recompute the three channel accounts
+#   find_program_address(["channel", min(a,b), max(a,b), mint])   (Solana)
+#   keccak(abi.encodePacked(min(a,b), max(a,b), uint256(0)))      (EVM)
+# and update conf/connector-*.toml + scripts/seed-toon-evm.sh +
+# scripts/seed-toon-solana-channels.sh; the operator
 # allowlists (<node>/operator-write.keys) must be re-derived with
 #   docker run --rm -v <dir>:/w:ro ghcr.io/toon-protocol/connector:rust-2026.08.28.1 \
 #     send --operator-key /w/operator-send.key --print-keyid
@@ -49,7 +62,7 @@ CAST="docker run --rm --entrypoint cast ghcr.io/foundry-rs/foundry:v1.8.1"
 CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.08.28.1
 
 i=0
-for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36; do
+for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37; do
   IFS=: read -r node ei si <<<"$pair"
   mkdir -p "$KEYS/$node"
   for k in signer.key operator-send.key operator-bearer.token; do

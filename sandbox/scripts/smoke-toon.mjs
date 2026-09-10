@@ -32,6 +32,17 @@
 //   4. a PAID kind:5096 gas job (quote phase) addressed to g.toon.gastation
 //      routes over the relay-gas peering to the gas station, which answers
 //      its Solana fee payer
+//   4c. the ANYONE CREDENTIALS ISSUER, the first app here that refuses to
+//      serve at the APP layer (it blind-signs nothing without a signed
+//      X-Payment-Claim): the epoch key document is FREE at the issuing node
+//      with no channel at all; every escape off that free route toward the
+//      issuer's root (`../bundles`, `/v1/bundles`, `%2e%2e/bundles`) is
+//      refused by the CONNECTOR, so no free class exists over /v1/bundles;
+//      an unpaid request to the paid route is refused; and one PAID request
+//      routed hub -> peering -> anytoon buys a real bundle of blind
+//      signatures. The price triple (route price, minter BUNDLE_PRICE,
+//      issuer BUNDLE_PRICE) is re-derived from conf/anytoon.conf in step 0c
+//      and asserted against what the nodes advertise.
 //   4b. the EVM leg of the gas station (kind:5098): /describe advertises the
 //      kind with chains ["evm:31337"]; a PAID quote returns the forwarder +
 //      target + nonce; an UNFUNDED throwaway wallet EIP-712-signs an
@@ -43,7 +54,9 @@
 //      LEG, because this sandbox's topology is cross-chain same-asset:
 //        - the client leg settles on an EVM channel on anvil (the hub's
 //          client-book claims ride the 0x… channel opened in step 1)
-//        - both peer legs settle on SOLANA payment_channel accounts
+//        - all three downstream legs settle on SOLANA payment_channel
+//          accounts (the anytoon one is booked as a CLIENT claim there
+//          rather than a peer claim — see conf/connector-anytoon.toml)
 //          (asserted live on the validator first — owner, participants,
 //          mint, Opened, the hub's collateral — then the payees' watermarks
 //          on exactly those channel accounts)
@@ -74,6 +87,7 @@ const PAYMENTS_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_SMOKE_PAYMENTS_ONL
 const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
 const GAS_EDGE = process.env.GAS_EDGE_URL ?? 'http://localhost:3220';
+const ANYTOON_EDGE = process.env.ANYTOON_EDGE_URL ?? 'http://localhost:3230';
 const RELAY_WS = process.env.RELAY_WS ?? 'ws://localhost:7100';
 const GATEWAY = process.env.GATEWAY_URL ?? 'http://localhost:3000';
 const ANVIL_URL = process.env.ANVIL_URL ?? 'http://localhost:8545';
@@ -95,8 +109,34 @@ const HUB_SOL = '9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx';
 const SOLANA_CHANNELS = {
   'relay-store': { account: '4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7', peer: '8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe' },
   'relay-gas': { account: '4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T', peer: '5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q' },
+  'relay-anytoon': { account: '3ZA8DPi18Jkjn8pCQkX1ZFezSmYW7RZfdhkQVeyVPwez', peer: 'GyLJJtQ2nwLecKYFBe9JBiUg17SifxYHvbqBkarSUs6H' },
 };
 const HUB_CHANNEL_DEPOSIT = 100_000_000n; // what the open job puts behind each peering
+
+// ── THE PRICE TRIPLE, re-derived from its single source of truth ──────────
+// conf/anytoon.conf is the `env_file` of BOTH the issuer and the claim minter,
+// so their two BUNDLE_PRICEs are one value and cannot drift. The connector's
+// route price is the third site and cannot read an env var (the connector has
+// no environment layer), so it is that decimal in BASE UNITS — and THAT is the
+// derivation asserted below against what the nodes actually advertise. A drift
+// otherwise surfaces as a 402 CLAIM_INVALID on every paid request, with
+// nothing naming the cause.
+const USDC_DECIMALS = 6;
+const PEER_FEE = 100n; // conf/connector-relay.toml, [[peers]] fee — the same for all three peerings
+function decimalToBaseUnits(decimal, decimals) {
+  const [whole, frac = ''] = String(decimal).trim().split('.');
+  if (!/^\d+$/.test(whole) || !/^\d*$/.test(frac)) throw new Error(`not a decimal: ${decimal}`);
+  if (frac.length > decimals) throw new Error(`${decimal} has more than ${decimals} decimal places`);
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0') || '0');
+}
+const BUNDLE_PRICE_DECIMAL = (() => {
+  const conf = readFileSync(join(ROOT, 'conf', 'anytoon.conf'), 'utf8');
+  const m = conf.match(/^\s*BUNDLE_PRICE\s*=\s*(\S+)\s*$/m);
+  if (!m) throw new Error('conf/anytoon.conf has no BUNDLE_PRICE line');
+  return m[1];
+})();
+const BUNDLE_PRICE_UNITS = decimalToBaseUnits(BUNDLE_PRICE_DECIMAL, USDC_DECIMALS);
+const BUNDLE_PRICE_HUB = BUNDLE_PRICE_UNITS + PEER_FEE;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jstr = (o) => JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
@@ -108,7 +148,10 @@ const assert = (cond, msg) => (cond ? ok(msg) : bad(msg));
 const fatal = (msg) => { console.error(`\nTOON SMOKE FAILED: ${msg}`); process.exit(1); };
 
 const bearer = (node) => readFileSync(join(ROOT, 'keys', 'toon', node, 'operator-bearer.token'), 'utf8').trim();
-const edgeOf = { 'relay-connector': HUB, 'store-connector': STORE_EDGE, 'gas-connector': GAS_EDGE };
+const edgeOf = {
+  'relay-connector': HUB, 'store-connector': STORE_EDGE,
+  'gas-connector': GAS_EDGE, 'anytoon-connector': ANYTOON_EDGE,
+};
 async function claims(node) {
   const res = await fetch(`${edgeOf[node]}/claims`, { headers: { authorization: `Bearer ${bearer(node)}` } });
   if (!res.ok) throw new Error(`${node} GET /claims -> ${res.status}`);
@@ -137,6 +180,22 @@ function peerBookTotal(rows, onChannel) {
     if (a > (per.get(r.channel_id) ?? 0n)) per.set(r.channel_id, a);
   }
   return [...per.values()].reduce((s, a) => s + a, 0n);
+}
+// The anytoon node's takings from the hub, which land in its CLIENT book
+// rather than its peer book: it declares that channel in [[client_channels]]
+// so the delivery carries an X-TOON-Payer for the claim minter (see
+// conf/connector-anytoon.toml's header for why that is forced). The client
+// book chain-namespaces its channel ids; the peer book does not.
+function clientBookOnChannel(rows, channelAccount) {
+  const key = `solana:${channelAccount}`;
+  let top = 0n;
+  for (const r of rows) {
+    if (r.direction !== 'inbound' || r.book !== 'client') continue;
+    if (r.channel_id !== key) continue;
+    const a = BigInt(r.cumulative_amount ?? 0);
+    if (a > top) top = a;
+  }
+  return top;
 }
 
 // ── Solana payment-channel account layout ─────────────────────────────────
@@ -191,15 +250,39 @@ step('0. payment infrastructure is live');
   if (!result?.value?.executable) fatal(`payment_channel ${PAYMENT_CHANNEL_PROGRAM} is not an executable account on the validator`);
   ok(`payment_channel is loaded and executable on the validator (owner ${result.value.owner})`);
 }
+const advertised = {}; // node -> { prefix: BigInt(price) }, from each node's own GET /ilp
 const EDGES = PAYMENTS_ONLY
   ? [['relay-connector (hub)', HUB]] // the peer edges are not running
-  : [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE]];
+  : [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE], ['anytoon-connector', ANYTOON_EDGE]];
 for (const [name, url] of EDGES) {
   const res = await fetch(`${url}/ilp`).catch((e) => fatal(`${name} unreachable at ${url}: ${e.message}`));
   if (!res.ok) fatal(`${name} GET /ilp -> ${res.status}`);
   const desc = await res.json();
   const routes = (desc.routes ?? []).map((r) => `${r.prefix}@${JSON.stringify(r.price)}`).join(', ');
+  advertised[name] = Object.fromEntries((desc.routes ?? []).map((r) => [r.prefix, BigInt(r.price)]));
   ok(`${name}: ${desc.ilpAddresses?.join(',') ?? '(no addresses)'} — routes: ${routes}`);
+}
+
+// ── 0c. THE PRICE TRIPLE agrees, by derivation from one file ─────────────
+// This is the guard on the subsystem's sharpest hazard. The issuer verifies
+// the amount inside the minter's signed claim against its own BUNDLE_PRICE;
+// both read conf/anytoon.conf, so those two are one number. The connector's
+// route price is that number in base units, and the hub's is that plus the
+// peering fee — neither of which any code enforces. Asserted here, against
+// what the nodes actually SERVE, so a drift fails by name. An anytoon-
+// subsystem concern, so skipped under the payments profile (the anytoon
+// edge is not running there to be read).
+if (!PAYMENTS_ONLY) {
+  step('0c. the BUNDLE_PRICE triple agrees (conf/anytoon.conf is the single source of truth)');
+  console.log(`  conf/anytoon.conf: BUNDLE_PRICE=${BUNDLE_PRICE_DECIMAL} -> ${BUNDLE_PRICE_UNITS} base units at ${USDC_DECIMALS}dp`);
+  assert(advertised['anytoon-connector']?.['g.anyone.credentials'] === BUNDLE_PRICE_UNITS,
+    `anytoon-connector prices g.anyone.credentials at ${advertised['anytoon-connector']?.['g.anyone.credentials']} = BUNDLE_PRICE x 10^${USDC_DECIMALS} (${BUNDLE_PRICE_UNITS})`);
+  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials'] === BUNDLE_PRICE_HUB,
+    `the hub forwards it at ${advertised['relay-connector (hub)']?.['g.anyone.credentials']} = downstream ${BUNDLE_PRICE_UNITS} + fee ${PEER_FEE} (${BUNDLE_PRICE_HUB})`);
+  assert(advertised['anytoon-connector']?.['g.anyone.credentials.keys'] === 0n,
+    'anytoon-connector prices the key document at 0 — free at the issuing node');
+  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials.keys'] === PEER_FEE,
+    `the hub forwards the key document at ${advertised['relay-connector (hub)']?.['g.anyone.credentials.keys']} = downstream 0 + fee ${PEER_FEE} (not 0: a hub that charged nothing would still subtract its fee and R01 every request)`);
 }
 
 // ── 0b. the SOLANA peering channels are live on chain ────────────────────
@@ -212,7 +295,7 @@ for (const [name, url] of EDGES) {
 // Asserted under the `payments` profile too: the hub is the sole submitter and
 // signs against the peers' committed PUBLIC keys, so the accounts land whether
 // or not the counterparty connectors are running.
-step('0b. the two SOLANA peering channels are open and collateralised on the validator');
+step('0b. the three SOLANA peering channels are open and collateralised on the validator');
 for (const [label, { account, peer }] of Object.entries(SOLANA_CHANNELS)) {
   let ch = null;
   for (let i = 0; i < 45 && !ch; i++) {
@@ -255,9 +338,11 @@ const storeBefore = PAYMENTS_ONLY ? 0n
   : peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
 const gasBefore = PAYMENTS_ONLY ? 0n
   : peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+const anytoonBefore = PAYMENTS_ONLY ? 0n
+  : clientBookOnChannel(await claims('anytoon-connector'), SOLANA_CHANNELS['relay-anytoon'].account);
 console.log(PAYMENTS_ONLY
   ? `  books before: hub client=${hubBefore}`
-  : `  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}`);
+  : `  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}, anytoon client=${anytoonBefore}`);
 
 // ── 2. paid relay write + free read ──────────────────────────────────────
 step('2. a PAID write reaches the relay; a FREE read returns it');
@@ -555,20 +640,130 @@ if (evmQuote) {
   }
 }
 
+// ── 4c. the Anyone credentials issuer: routed purchase + route scoping ───
+// The first app in this sandbox that REFUSES TO SERVE at the app layer: the
+// issuer blind-signs nothing without an Ed25519-signed X-Payment-Claim from
+// the claim minter. Four properties, in order:
+//   (i)   the key document is FREE at the issuing node — no channel, no claim
+//   (ii)  the issuer ROOT is not reachable at price zero: the free route's
+//         handler_url is scoped to /v1/keys/, so an escape off it is refused
+//         by the CONNECTOR before the issuer is touched
+//   (iii) an UNPAID request to the paid route is refused, not served
+//   (iv)  a PAID request routed hub -> peering -> anytoon buys a real bundle
+step('4c. Anyone credentials: free key document, scoped free route, unpaid refusal, PAID routed purchase');
+
+// A second client with NO CHANNEL AT ALL, pointed straight at the anytoon
+// node's own edge. It can only ever exercise free routes — which is exactly
+// what makes (i) and (iii) mean something: nothing here can pay.
+const freeClient = await ToonClient.create({
+  connector: ANYTOON_EDGE,
+  mnemonic: MNEMONIC,
+  chain: 'evm',
+  rpcUrl: ANVIL_URL,
+  channelStore: join(ROOT, '.toon-client', 'anytoon-free.json'),
+  deposit: 0n,
+  timeoutMs: 30_000,
+}).catch((e) => { bad(`could not create the channel-less anytoon client: ${e.message}`); return null; });
+
+let epoch = null;
+if (freeClient) {
+  // (i) FREE: a price-0 route needs no claim, so a client that has never
+  //     opened a channel still gets the epoch key. Charging for this would
+  //     make the protocol undiscoverable — a buyer needs the key BEFORE it
+  //     can blind anything.
+  const keys = await freeClient.send('g.anyone.credentials.keys', { method: 'GET', target: 'current' });
+  if (!keys.fulfilled) {
+    bad(`the free key document was refused: ${keys.code} (refusedBy ${keys.refusedBy})`);
+  } else {
+    assert(keys.status === 200, `the key document served FREE with no channel and no claim (${keys.status})`);
+    assert(keys.claim === undefined, 'and no payment claim was spent on it');
+    const doc = keys.status === 200 ? keys.json() : null;
+    epoch = doc?.epoch_id ?? null;
+    assert(typeof epoch === 'string' && typeof doc?.pubkey === 'string',
+      `the issuer published epoch ${epoch} (alg ${doc?.alg})`);
+  }
+
+  // (ii) THE SCOPING, which is the whole reason the free route points at
+  //      /v1/keys/ and not at the issuer root. A target resolves BENEATH the
+  //      handler path, so a root-scoped free route would put POST /v1/bundles
+  //      at price zero. Every escape must die at the connector (F00), never
+  //      reach the issuer, and cost nothing.
+  for (const [label, target] of [
+    ['a relative escape (../bundles)', '../bundles'],
+    ['an absolute path (/v1/bundles)', '/v1/bundles'],
+    ['a percent-encoded escape (%2e%2e/bundles)', '%2e%2e/bundles'],
+  ]) {
+    const escaped = await freeClient.send('g.anyone.credentials.keys', {
+      method: 'POST', target, body: { epoch: epoch ?? '0', blinded_blanks: [] },
+    });
+    assert(escaped.fulfilled === false,
+      `the issuer root is NOT free: ${label} off the free route is refused (${escaped.code ?? `fulfilled ${escaped.status}`})`);
+  }
+
+  // (iii) UNPAID on the PAID route: the channel-less client is greeted with a
+  //       price, not served.
+  const unpaid = await freeClient.send('g.anyone.credentials', {
+    method: 'POST', target: 'v1/bundles', body: { epoch: epoch ?? '0', blinded_blanks: [] },
+  });
+  assert(unpaid.fulfilled === false,
+    `an UNPAID request to g.anyone.credentials is refused (${unpaid.code ?? `fulfilled ${unpaid.status}`})`);
+}
+
+// (iv) THE ROUTED PURCHASE. One client, one channel — the EVM channel opened
+//      against the HUB in step 1 — buying from a node it has no channel with,
+//      over the relay-anytoon peering. Sealed to the anytoon node because that
+//      is where the envelope is opened; paid at the hub, which forwards
+//      price - fee onward.
+const credPrice = await client.price('g.anyone.credentials');
+assert(credPrice !== null, `the hub prices g.anyone.credentials (${jstr(credPrice)})`);
+if (epoch !== null) {
+  // 10 blanks of 256 bytes, the issuer's configured bundle size and blank
+  // size. The leading zero byte is load-bearing: RFC 9474 requires a blinded
+  // message to be less than the RSA modulus, and a uniformly random 256-byte
+  // value exceeds a 2048-bit modulus about half the time. These are
+  // structurally valid blinded messages rather than genuinely blinded ones —
+  // the issuer signs them either way, and what is being proved here is the
+  // PAID PATH, not RSABSSA (which the issuer's own tests cover).
+  const blank = () => { const b = Buffer.from(randomBytes(256)); b[0] = 0; return b.toString('base64'); };
+  const bought = await client.send('g.anyone.credentials', {
+    method: 'POST',
+    target: 'v1/bundles',
+    headers: { 'idempotency-key': `${unique}-bundle` },
+    body: { epoch, blinded_blanks: Array.from({ length: 10 }, blank) },
+  }, { sealTo: ANYTOON_EDGE });
+  if (!bought.fulfilled) {
+    bad(`the credentials purchase was refused: ${bought.code} (refusedBy ${bought.refusedBy}, accumulatedCost ${bought.accumulatedCost})`);
+  } else if (bought.status !== 201 && bought.status !== 200) {
+    bad(`the credentials purchase was PAID but answered ${bought.status}: ${bought.text().slice(0, 400)}`);
+  } else {
+    const bundle = bought.json();
+    assert(bundle.epoch === epoch, `the issuer signed a bundle under epoch ${bundle.epoch}`);
+    assert(Array.isArray(bundle.blind_signatures) && bundle.blind_signatures.length === 10,
+      `and returned ${bundle.blind_signatures?.length} blind signatures`);
+    assert(BigInt(bought.claim?.amount ?? 0) === BUNDLE_PRICE_HUB,
+      `the client paid the hub ${bought.claim?.amount} for it (= ${BUNDLE_PRICE_UNITS} + fee ${PEER_FEE})`);
+  }
+} else {
+  bad('no epoch from the key document — skipping the routed purchase');
+}
+
 // ── 5. the money, PER LEG ────────────────────────────────────────────────
 // Cross-chain, same-asset: the client leg settles on the anvil (EVM)
-// channel the client opened in step 1; both peer legs settle on the SOLANA
+// channel the client opened in step 1; all three downstream legs settle on the SOLANA
 // channel accounts asserted on-chain in step 0b. Amounts are the same
 // 6-decimal USDC unit end to end — no conversion anywhere.
 step('5. the connectors’ own books say everything was PAID — per settlement leg');
 // Claims are journaled on the far side of the same round trip; poll briefly.
-let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore;
-for (let i = 0; i < 20 && (hubAfter - hubBefore < 9901n || storeAfter - storeBefore < 3000n || gasAfter - gasBefore < 6000n); i++) {
+let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore, anytoonAfter = anytoonBefore;
+const HUB_EXPECTED = 1n + 9n * 1100n + BUNDLE_PRICE_HUB;
+for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED || storeAfter - storeBefore < 3000n
+    || gasAfter - gasBefore < 6000n || anytoonAfter - anytoonBefore < BUNDLE_PRICE_UNITS); i++) {
   await sleep(500);
   hubRows = await claims('relay-connector');
   hubAfter = clientBookTotal(hubRows);
   storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
   gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+  anytoonAfter = clientBookOnChannel(await claims('anytoon-connector'), SOLANA_CHANNELS['relay-anytoon'].account);
 }
 // Client leg (EVM): ten paid packets entered the hub's client edge — relay
 // write (1), store blob (>= 1100), the brokered ArNS ceremony's five
@@ -576,8 +771,9 @@ for (let i = 0; i < 20 && (hubAfter - hubBefore < 9901n || storeAfter - storeBef
 // draft, kind:5096 execute, kind:5095 op=buy — >= 1100 each), 5096 quote
 // (1100), 5098 quote (1100), 5098 execute (1100) — and every client-book
 // claim rides the EVM channel opened on anvil in step 1.
-assert(hubAfter - hubBefore >= 1n + 9n * 1100n,
-  `hub client book advanced by ${hubAfter - hubBefore} (>= 9901, the ten packets' prices)`);
+// …plus the credentials bundle (10100 = 10000 + fee), for eleven in all.
+assert(hubAfter - hubBefore >= HUB_EXPECTED,
+  `hub client book advanced by ${hubAfter - hubBefore} (>= ${HUB_EXPECTED}, the eleven packets' prices)`);
 // The hub's book keys a client channel as `evm:0x<64 hex>` — the chain
 // family prefix plus the anvil channel id.
 const clientChannels = [...new Set(hubRows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
@@ -591,8 +787,14 @@ assert(storeAfter - storeBefore >= 3000n,
   `store peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
 assert(gasAfter - gasBefore >= 6000n,
   `gas peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
+// The credentials hop, both legs of the one purchase: the client paid the hub
+// 10100 (asserted in step 4c off the claim the client itself holds), and the
+// hub paid the anytoon node 10000 of it — the fee is the hub's, and the
+// downstream's own price is what lands.
+assert(anytoonAfter - anytoonBefore >= BUNDLE_PRICE_UNITS,
+  `anytoon leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-anytoon'].account} advanced by ${anytoonAfter - anytoonBefore} (>= ${BUNDLE_PRICE_UNITS}: one credentials bundle at hub price ${BUNDLE_PRICE_HUB} minus fee ${PEER_FEE})`);
 
 console.log(failures === 0
-  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store and gas station (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay) — client leg settled on EVM, both peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
+  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store, gas station and the Anyone credentials issuer (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay, blind-signed credentials bundle) — client leg settled on EVM, all three peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
   : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
 process.exit(failures === 0 ? 0 : 1);
