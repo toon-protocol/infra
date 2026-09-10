@@ -15,7 +15,7 @@ for local development:
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094/5095 (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
-| `gas-station` | pays Solana gas, kind:5096 (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
+| `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
 | `turbo-tls` | TLS shim aliasing `upload.ardrive.io` onto the local Turbo bundler (see "TOON layer") | — |
 | `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm`, `open-toon-solana-channels` | one-shot idempotent init jobs | — |
 
@@ -26,7 +26,10 @@ The proven end-to-end flows (what `make smoke` exercises):
 2. **TOON payment layer — cross-chain, same-asset**: a real client
    (`@toon-protocol/client`) opens a payment channel on ANVIL against the
    hub, then a PAID Nostr write to `g.toon.relay`, a PAID kind:5094 blob to
-   `g.toon.store` and a PAID kind:5096 gas quote to `g.toon.gastation` all
+   `g.toon.store`, a PAID kind:5096 gas quote and a PAID kind:5098 EVM
+   meta-tx relay (quote + execute — an unfunded wallet's EIP-712-signed
+   ERC-2771 forward request is relayed on anvil and `_msgSender()` is read
+   back as the client) to `g.toon.gastation` all
    enter at the HUB's edge (:3200); the store and gas packets route over
    real, collateralised peerings that settle on SOLANA payment_channel
    accounts (asserted live on the validator), the blob lands in the LOCAL
@@ -102,7 +105,13 @@ make clean   # stop + wipe ALL state; next `make up` is a cold start again
 - **EVM**: anvil at `http://localhost:8545` (chain-id 31337, 10 funded
   accounts) with the connector's settlement contracts auto-deployed at their
   deterministic addresses (MockERC20 USDC `0x5FbD…0aa3`, TokenNetworkRegistry
-  `0xe7f1…0512`, TokenNetwork `0xCafa…052c`).
+  `0xe7f1…0512`, TokenNetwork `0xCafa…052c`), plus the sandbox's own
+  kind:5098 extras (`contracts/DeploySandboxExtras.s.sol`, anvil account 9
+  nonces 0/1 so they are deterministic independent of `DeployLocal.s.sol`):
+  OZ v5.5.0 `ERC2771Forwarder("ToonSandboxForwarder")` at
+  `0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35` and the ERC-2771-aware
+  `SandboxTokenNetworkProbe` at
+  `0xA15BB66138824a1c7167f5E85b957d04Dd34E468`.
 - **TOON payments**: hand a paid ILP packet to the hub at
   `http://localhost:3200` — see "TOON layer" below and
   `scripts/smoke-toon.mjs` for a complete client example.
@@ -164,7 +173,7 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    ├─ g.toon.store ──[peering relay-store]──▶ store-connector :3210
    │        (settles on SOLANA)                 └─▶ store:3300/store (kind:5094/5095)
    └─ g.toon.gastation ──[peering relay-gas]──▶ gas-connector :3220
-            (settles on SOLANA)                 └─▶ gas-station:3300/gas (kind:5096)
+            (settles on SOLANA)                 └─▶ gas-station:3300/gas (kind:5096 + 5098)
 ```
 
 Cross-chain, same-asset: the CLIENT leg settles on anvil (EVM mock USDC, the
@@ -227,7 +236,10 @@ Everything under `keys/toon/` is a **valueless committed throwaway** (like
 `keys/` itself): per-connector `signer.key` (random ILP identity),
 `settlement.key` / `settlement-solana.key` (derived from anvil's public test
 mnemonic at fixed indices 24-26 / 34-36, because their addresses appear in
-committed configs), operator credentials, the connector repo's own
+committed configs), the gas station's dedicated kind:5098 relayer
+`gas-evm-relayer.key` (mnemonic index 27; also embedded 0x-prefixed in
+`conf/gas-station.conf`'s `EVM_GAS_STATION_CONFIG_JSON`, ETH-funded by
+`seed-toon-evm`), operator credentials, the connector repo's own
 deterministic mock-USDC mint keypairs, and the two app keypairs whose public
 halves are embedded in `conf/*.conf`. `scripts/gen-toon-keys.sh` documents
 and regenerates the lot. The connector image runs as uid 10001 and mounts
@@ -294,10 +306,19 @@ assertions over the operator surface with the committed bearer tokens).
 
 - **Store upload URL override** (above): wired via the turbo-tls shim; the
   clean fix is an upstream store env var for `uploadServiceConfig.url`.
-- **kind:5098 (EVM gas) unconfigured**: it needs an ERC-2771 forwarder
-  contract that `DeployLocal.s.sol` does not deploy locally; the gas station
-  deliberately leaves the kind unregistered when its env is absent. The
-  smoke proves kind:5096 (Solana) instead, quote phase included.
+- ~~kind:5098 (EVM gas) unconfigured~~ **closed**: the sandbox now deploys
+  its own OZ v5.5.0 `ERC2771Forwarder` on anvil
+  (`contracts/DeploySandboxExtras.s.sol` — sandbox-owned, overlaid into the
+  anvil container after `DeployLocal.s.sol`; the connector repo is not
+  touched) and configures the gas station's EVM leg against it
+  (`conf/gas-station.conf`). The smoke runs the full quote → sign → execute
+  ceremony and reads `_msgSender()` back off anvil. What remains true: the
+  whitelisted target is the sandbox's `SandboxTokenNetworkProbe`, NOT the
+  real TokenNetwork — `DeployLocal.s.sol` created that one with
+  `trustedForwarder = address(0)` (an ERC2771Context immutable), so it can
+  never accept meta-transactions; a from-scratch deploy that passes the
+  forwarder to the registry before `createTokenNetwork` would close that
+  residue upstream.
 - **kind:5095 `op=buy` (brokered ArNS) unconfigured**: `ARNS_DVM_SOLANA_SECRET_KEY`
   is unset, and the store's ArNS SDK has no RPC override pointed at the
   local validator; direct ArNS buys against the local validator are already

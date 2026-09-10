@@ -37,7 +37,8 @@ clean:
 
 ## end-to-end proof: AR.IO flow (upload -> buy name -> serve) + TOON flow
 ## (contracts/program live -> paid write -> paid store blob via peering ->
-## paid gas quote via peering, with claim journals asserted)
+## paid gas jobs via peering: Solana quote + EVM ERC-2771 meta-tx relay,
+## with claim journals asserted)
 smoke: smoke-ario smoke-toon
 
 smoke-ario:

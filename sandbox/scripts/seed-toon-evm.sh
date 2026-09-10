@@ -47,4 +47,20 @@ fund relay-connector relay-connector
 fund store-connector store-connector
 fund gas-connector gas-connector
 
+# The kind:5098 relayer (the gas station's DEDICATED EVM wallet — it holds
+# native gas only and pays for relayed ERC-2771 forward requests). The anvil
+# healthcheck already gates on the forwarder/probe deploy; assert it anyway so
+# a broken extras deploy fails HERE with a name, not downstream.
+FORWARDER=0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35
+PROBE=0xA15BB66138824a1c7167f5E85b957d04Dd34E468
+for c in "$FORWARDER" "$PROBE"; do
+  if [ "$(cast code "$c" --rpc-url "$RPC" 2>/dev/null)" = "0x" ]; then
+    echo "FATAL: no contract at $c on $RPC — DeploySandboxExtras.s.sol did not land." >&2
+    exit 1
+  fi
+done
+RELAYER_ADDR="$(cast wallet address --private-key "0x$(cat "$KEYS/gas-evm-relayer.key")")"
+cast send --rpc-url "$RPC" --private-key "$FUNDER_KEY" --value 100ether "$RELAYER_ADDR" >/dev/null
+echo "gas-evm-relayer: funded $RELAYER_ADDR with 100 ETH (kind:5098 float)"
+
 echo "[seed-toon-evm] done."

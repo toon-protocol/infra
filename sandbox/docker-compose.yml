@@ -174,14 +174,24 @@ services:
           OpenZeppelin/openzeppelin-contracts@rev=fcbae5394ae8ad52d8e580a3477db99814b9d565 \
           lib/openzeppelin-contracts/contracts/access/Ownable.sol
 
+        # DeployLocal (the connector's own script, account 0) and then the
+        # SANDBOX-OWNED extras (contracts/DeploySandboxExtras.s.sol, mounted
+        # read-only at /sandbox-extras — forge accepts an out-of-root script
+        # path, so nothing is ever created inside the connector checkout;
+        # account 9, nonces 0-1 so its addresses are deterministic regardless
+        # of DeployLocal's shape): the OZ v5.5.0 ERC2771Forwarder + the
+        # ERC-2771 probe target kind:5098 relays to.
         if forge script script/DeployLocal.s.sol:DeployLocalScript \
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation \
+           && forge script /sandbox-extras/DeploySandboxExtras.s.sol:DeploySandboxExtrasScript \
              --rpc-url http://localhost:8545 --broadcast --skip-simulation; then
           echo "Anvil ready with contracts deployed!"
         else
           echo "============================================================"
-          echo "CONTRACT DEPLOY FAILED. This anvil is serving an EMPTY chain;"
-          echo "it will never pass its healthcheck and nothing that settles"
-          echo "can start against it. The forge output above is the reason."
+          echo "CONTRACT DEPLOY FAILED. This anvil is serving an EMPTY or"
+          echo "PARTIAL chain; it will never pass its healthcheck and nothing"
+          echo "that settles can start against it. The forge output above is"
+          echo "the reason."
           echo "============================================================"
         fi
 
@@ -189,18 +199,24 @@ services:
     volumes:
       # The connector SIBLING checkout is required (documented in README.md).
       - ../../connector/packages/contracts:/contracts
+      # Sandbox-owned extras script, mounted OUTSIDE the project so docker
+      # never creates a mountpoint file in the connector checkout (forge's
+      # out/cache/broadcast writes there happen either way, as documented).
+      - ./contracts:/sandbox-extras:ro
     ports:
       - '8545:8545'
     restart: unless-stopped
     logging: *chain-logging
-    # Healthy means THE SETTLEMENT TOPOLOGY IS DEPLOYED, not merely that the
-    # RPC answers: everything downstream (connectors, seed-toon-evm) would
-    # otherwise race the deploy. cast code on the registry returns 0x until
-    # the deploy lands.
+    # Healthy means THE FULL DEPLOY LANDED, not merely that the RPC answers:
+    # everything downstream (connectors, seed-toon-evm, gas-station) would
+    # otherwise race the deploy. Gated on the registry (DeployLocal) AND the
+    # ERC-2771 probe (DeploySandboxExtras — deployed last, so code there means
+    # the forwarder landed too). cast code returns 0x until a deploy lands and
+    # empty output on RPC failure, hence the -n checks.
     healthcheck:
       test:
         - CMD-SHELL
-        - "test \"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\" != '0x' || exit 1"
+        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' || exit 1"
       interval: 5s
       timeout: 5s
       retries: 30
@@ -626,10 +642,11 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Gas station (kind:5096, Solana — pays gas out of its fee-payer float).
-  # kind:5098 (EVM) is deliberately unconfigured: no ERC-2771 forwarder is
-  # deployed locally (README "TOON layer: known gaps"). Handler port 3300
-  # UNPUBLISHED; free /describe + /health surface published at host 3400.
+  # Gas station: kind:5096 (Solana — pays gas out of its fee-payer float) AND
+  # kind:5098 (EVM — relays a client-signed ERC-2771 forward request through
+  # the sandbox-deployed ERC2771Forwarder on anvil and pays the gas; see
+  # contracts/DeploySandboxExtras.s.sol and conf/gas-station.conf). Handler
+  # port 3300 UNPUBLISHED; free /describe + /health surface at host 3400.
   gas-station:
     image: ghcr.io/toon-protocol/gas-station@sha256:93429c3ad170dac358a58e0692037f2bd0071d5d53619c312afa80d359869cf4 # :release, 2026-09
     env_file:
@@ -646,6 +663,9 @@ services:
       start_period: 10s
     depends_on:
       solana-validator:
+        condition: service_healthy
+      # kind:5098 transacts on anvil; healthy = forwarder + probe deployed.
+      anvil:
         condition: service_healthy
     restart: unless-stopped
     logging: *chain-logging
