@@ -2,10 +2,14 @@
 
 # Every service in docker-compose.yml carries a profile, so a profile is always
 # selected here (see the "Profiles" block at the top of that file).
-#   full      the whole stack, every service — the sandbox's default
-#   payments  chains + hub + seed/open jobs only, no store checkout needed
-#   hs        `full` PLUS the anon daemon, its forwarder and the buyer's SOCKS
-#             proxy — OPT-IN (`make up-hs`), never part of `up`/`smoke`
+#   full         the whole stack, every service — the sandbox's default
+#   payments     chains + hub + seed/open jobs only, no sibling app checkout
+#                needed beyond the connector's
+#   credentials  `payments` PLUS the Anyone credentials issuer path and the
+#                swap driver — the denomination boundary without the permaweb
+#                half. Needs the anytoon checkout, NOT the store one
+#   hs           `full` PLUS the anon daemon, its forwarder and the buyer's
+#                SOCKS proxy — OPT-IN (`make up-hs`), never part of `up`/`smoke`
 # Recursively expanded (`=`, not `:=`) so the payments targets can override
 # COMPOSE_PROFILE for their own recipes.
 COMPOSE_PROFILE ?= full
@@ -21,7 +25,7 @@ COMPOSE_HS = docker compose --profile full --profile hs
 
 # down/clean must sweep EVERY profile's containers, whichever one brought them
 # up — otherwise `make up-hs && make down` leaves three daemons running.
-COMPOSE_ALL = docker compose --profile full --profile payments --profile hs
+COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs
 
 # The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
 # own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
@@ -41,8 +45,8 @@ HS_CONNECTOR_CONF = ./conf/.rendered/connector-anytoon.toml
 export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
-.PHONY: setup up up-payments up-hs down clean smoke smoke-ario smoke-toon \
-        smoke-payments smoke-hs hs-address logs ps \
+.PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
+        smoke-toon smoke-payments smoke-credentials smoke-hs hs-address logs ps \
         require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -72,11 +76,14 @@ require-store-context:
 		echo "docker-compose.yml to where your checkout lives."; \
 		echo; \
 		echo "Only the FULL stack needs it. If you are working on the payment"; \
-		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
+		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead;"; \
+		echo "if you are buying Anyone credential bundles, \`make up-credentials\`"; \
+		echo "+ \`make smoke-credentials\` need the anytoon checkout but not this one."; \
 		exit 1; \
 	fi
-# Hard gate for the paths that BUILD the claim-minter image — `make up` alone,
-# like the store gate above. The payments profile never renders it.
+# Hard gate for the paths that BUILD the claim-minter image — `make up` and
+# `make up-credentials`, like the store gate above. The payments profile never
+# renders it.
 require-anytoon-context:
 	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
 		echo "ERROR: anytoon checkout not found at $(ANYTOON_CONTEXT)"; \
@@ -85,8 +92,9 @@ require-anytoon-context:
 		echo "set ANYTOON_CONTEXT to where your checkout lives:"; \
 		echo "    make up ANYTOON_CONTEXT=/path/to/anytoon"; \
 		echo; \
-		echo "Only the FULL stack needs it. If you are working on the payment"; \
-		echo "layer, use \`make up-payments\` + \`make smoke-payments\` instead."; \
+		echo "Only \`make up\` (full stack) and \`make up-credentials\` need it."; \
+		echo "If you are working on the payment layer alone, use"; \
+		echo "\`make up-payments\` + \`make smoke-payments\` instead."; \
 		exit 1; \
 	fi
 
@@ -98,14 +106,15 @@ require-anytoon-context:
 setup:
 	@if [ ! -f "$(STORE_CONTEXT)/Dockerfile.store" ]; then \
 		echo "NOTE: no store checkout at $(STORE_CONTEXT)."; \
-		echo "      Fine for \`make up-payments\` / \`make smoke-payments\`;"; \
+		echo "      Fine for \`make up-payments\` and \`make up-credentials\`;"; \
 		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
 		echo; \
 	fi
 	@if [ ! -f "$(ANYTOON_CONTEXT)/claim-minter/Dockerfile" ]; then \
 		echo "NOTE: no anytoon checkout at $(ANYTOON_CONTEXT)."; \
 		echo "      Fine for \`make up-payments\` / \`make smoke-payments\`;"; \
-		echo "      \`make up\` (full stack) will stop and explain until it exists."; \
+		echo "      \`make up\` (full stack) and \`make up-credentials\` will stop"; \
+		echo "      and explain until it exists."; \
 		echo; \
 	fi
 	npm ci
@@ -119,6 +128,16 @@ up: require-store-context require-anytoon-context
 ## no bundler, no store, no gas station — and no store sibling checkout.
 up-payments: COMPOSE_PROFILE = payments
 up-payments:
+	$(COMPOSE) up -d --build
+
+## start the CREDENTIALS slice: the payment layer PLUS the paid side of the
+## denomination boundary — the issuer path (issuer + minter + datastores + key
+## job), the anytoon connector, and the swap driver that keeps the ANYONE TWAP
+## fresh (without it the crossing refuses T00 within minutes). 15 services.
+## Needs the anytoon sibling checkout (claim-minter builds from it) but NOT
+## the store checkout — the whole point of the profile.
+up-credentials: COMPOSE_PROFILE = credentials
+up-credentials: require-anytoon-context
 	$(COMPOSE) up -d --build
 
 ## OPT-IN, and it takes a THIRD-PARTY DEPENDENCY: `full` plus the hidden-service
@@ -237,6 +256,16 @@ smoke-toon:
 ## advanced on that channel. No store, gateway or bundler assertions.
 smoke-payments:
 	TOON_SMOKE_PAYMENTS_ONLY=1 node scripts/smoke-toon.mjs
+
+## credentials proof for `make up-credentials`: the payments assertions PLUS
+## the denomination boundary end to end — the price triple asserted, the
+## ANYONE rate live off the swap driver's market, the free key document, the
+## scoped free route, the unpaid refusal, and one PAID hub-routed bundle
+## purchase converted uUSDC -> ANYONE at the live TWAP, with both sides'
+## books asserted in their own units and the rate required to have MOVED.
+## No store, gateway, bundler or gas-station assertions.
+smoke-credentials:
+	TOON_SMOKE_CREDENTIALS_ONLY=1 node scripts/smoke-toon.mjs
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,

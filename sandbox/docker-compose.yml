@@ -45,12 +45,38 @@ name: toon-sandbox
 #               open-toon-solana-channels  opens the hub's Solana channels
 #             Everything else — the AR.IO gateway + Turbo bundler, the store,
 #             gas-station and Anyone credentials-issuer subsystems and their
-#             three peering connectors — is `full` only. The hub still LOADS
-#             all three peerings under `payments`; a peering whose far side is
-#             not serving simply answers T01, which is why relay-connector's
-#             depends_on marks those peers `required: false` (a required
-#             dependency that is disabled by profile is a hard config error,
-#             not a warning).
+#             three peering connectors — stays out (the `credentials` profile
+#             below adds back exactly the issuer path and the market; the rest
+#             is `full` only). The hub still LOADS all three peerings under
+#             `payments`; a peering whose far side is not serving simply
+#             answers T01, which is why relay-connector's depends_on marks
+#             those peers `required: false` (a required dependency that is
+#             disabled by profile is a hard config error, not a warning).
+#   credentials
+#             `payments` PLUS the paid side of the DENOMINATION BOUNDARY, for
+#             someone writing a TOON client that buys Anyone credentials —
+#             the group `payments` helps least, because the peer it needs is
+#             precisely the one `payments` leaves out. Adds:
+#               issuer-keys, issuer-migrate, issuer,
+#               issuer-postgres, issuer-redis  the paid counterparty
+#               claim-minter               turns the connector's statement of
+#                                          who paid into the issuer's claim
+#               anytoon-connector          terminates g.anyone.credentials in
+#                                          ANYONE; the far side of the boundary
+#               swap-driver                keeps the TWAP fresh — without it
+#                                          nothing trades, the ANYONE rate
+#                                          goes stale in minutes, the crossing
+#                                          refuses T00 and no bundle can be
+#                                          bought at all
+#             Needs the anytoon sibling checkout (claim-minter builds from it)
+#             but NOT the store checkout — the point of the profile: under
+#             `full` the boundary is reachable only with both on disk. Entry
+#             points `make up-credentials` + `make smoke-credentials`. A
+#             deliberate `docker compose stop swap-driver` here is the cheap
+#             way to exercise the T00 stale-rate refusal on a route that HAS a
+#             live counterparty (T00: retry on a backoff, each attempt spends
+#             its covering claim — vs F02, no rate declared, where config is
+#             immutable for the process lifetime and retrying never works).
 #   hs        THREE EXTRA SERVICES ON TOP OF `full`, never on their own and
 #             never part of it: the `anon` daemon that publishes a `.anyone`
 #             hidden service in front of the anytoon issuer path, the
@@ -64,8 +90,8 @@ name: toon-sandbox
 #             smoke-hs`; `make up` and `make smoke` never render it. See the
 #             "The hidden-service ingress" section at the bottom of this file.
 #
-# `make up` / `make up-payments` / `make up-hs` are the supported entry points;
-# see Makefile.
+# `make up` / `make up-payments` / `make up-credentials` / `make up-hs` are the
+# supported entry points; see Makefile.
 
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
@@ -103,7 +129,7 @@ services:
   #    2026-07-06; agave 4.1.1 at this digest). Fallback if it ever breaks:
   #    a tiny Dockerfile over Anza release binaries.
   solana-validator:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
     security_opt:
       - seccomp=unconfined
@@ -184,7 +210,7 @@ services:
   # exported by the Makefile) with HOME=/tmp (an arbitrary uid has no
   # /etc/passwd entry; forge needs a writable home for ~/.svm).
   anvil:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
     environment:
@@ -615,7 +641,7 @@ services:
 
   # One-shot: mock USDC mint + SOL/USDC for every settlement key (Solana leg).
   seed-toon-solana:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     build: .
     restart: 'no'
     environment:
@@ -632,7 +658,7 @@ services:
   # EVM payment channel in this sandbox — the relay-anytoon peering, settled in
   # ANYONE. (The client leg and the other two peerings settle on Solana.)
   seed-toon-evm:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-evm.sh']
@@ -654,11 +680,12 @@ services:
   # signer). Vendored connector/local/open-solana-channel.py; refuses success
   # unless the chain's own account layout agrees with the committed configs.
   open-toon-solana-channels:
-    # In the `payments` profile the two counterparty connectors are not
-    # running, but nothing here talks to them: the channels are opened by the
-    # HUB against the peers' committed Solana settlement PUBLIC keys, so both
-    # accounts still land on chain and the Solana leg is still proven.
-    profiles: ['payments', 'full']
+    # In the `payments` and `credentials` profiles the two counterparty
+    # connectors are not running, but nothing here talks to them: the channels
+    # are opened by the HUB against the peers' committed Solana settlement
+    # PUBLIC keys, so both accounts still land on chain and the Solana leg is
+    # still proven.
+    profiles: ['payments', 'credentials', 'full']
     image: python:3.12-slim
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-toon-solana-channels.sh']
@@ -682,14 +709,21 @@ services:
   # `ttl_secs` later. It steers ANYONE/WETH as a bounded triangle wave and pins
   # WETH/USDC; see scripts/swap-driver.sh and conf/amm-topology.conf.
   #
-  # `full` ONLY, on purpose. The payments profile proves the payment layer, and
+  # NEVER on `payments`, on purpose. That profile proves the payment layer, and
   # its one converting route (g.anyone.credentials) has no anytoon node to
   # reach there anyway — so it gets the pools (anvil builds them either way,
   # because the hub cannot boot without ANYONE's TokenNetwork) but not the
   # market. The hub will log a stale ANYONE pair a couple of minutes into a
   # payments run; nothing on that profile's path reads it.
+  #
+  # On `credentials` it is LOAD-BEARING, not a nicety: that profile exists to
+  # buy bundles across the boundary, the crossing converts at this market's
+  # TWAP, and with nothing trading the rate goes stale one ttl_secs after the
+  # last block — the hub then refuses every purchase T00. (Stopping this
+  # service deliberately is how that refusal path is exercised; see the
+  # Profiles block at the top.)
   swap-driver:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: unless-stopped
     entrypoint: ['/bin/sh', '/seed/swap-driver.sh']
@@ -713,7 +747,7 @@ services:
     # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
     # this is the one destination a paid packet can reach with no peer running
     # — i.e. what makes "a paid request against the hub settles" testable.
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
     env_file:
       - conf/relay.conf
@@ -844,7 +878,7 @@ services:
   # could not read the original. DEV KEY MATERIAL, valueless, like everything
   # else under keys/ here.
   issuer-keys:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     restart: 'no'
     entrypoint:
@@ -865,7 +899,7 @@ services:
   # The upstream issuer, UNMODIFIED. Pinned by digest (the `latest` tag is
   # mutable and this stack's env names track the image's config loader).
   issuer:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     env_file:
       # BUNDLE_PRICE — shared verbatim with claim-minter. See the header above.
@@ -913,7 +947,7 @@ services:
   # Runs the schema migrations exactly once, then exits, so no issuer ever
   # races another to migrate.
   issuer-migrate:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     restart: 'no'
     entrypoint: ['bun', 'run', 'migration:run']
@@ -929,7 +963,7 @@ services:
         condition: service_healthy
 
   issuer-postgres:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: app
@@ -956,7 +990,7 @@ services:
     logging: *chain-logging
 
   issuer-redis:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: redis:7-alpine
     volumes:
       - issuer-redis-data:/data
@@ -978,7 +1012,7 @@ services:
   # (exported by the Makefile) if your checkout lives elsewhere. There is no
   # published image for it.
   claim-minter:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     build:
       context: ${ANYTOON_CONTEXT:-../../anytoon}/claim-minter
     env_file:
@@ -1070,7 +1104,7 @@ services:
     logging: *chain-logging
 
   anytoon-connector:
-    profiles: ['full']
+    profiles: ['credentials', 'full']
     image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
@@ -1121,7 +1155,7 @@ services:
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
   relay-connector:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'credentials', 'full']
     image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
@@ -1142,11 +1176,12 @@ services:
         condition: service_completed_successfully
       relay:
         condition: service_healthy
-      # `required: false` ONLY so the `payments` profile renders: a depends_on
-      # naming a service the active profiles disable is a hard config error
-      # ("depends on undefined service"), and required:false downgrades that to
-      # a warning. Under `full` both peers exist, so the wait is unchanged —
-      # the hub still starts only after both accepting peers are healthy.
+      # `required: false` ONLY so the `payments` and `credentials` profiles
+      # render: a depends_on naming a service the active profiles disable is a
+      # hard config error ("depends on undefined service"), and required:false
+      # downgrades that to a warning. A peer that IS enabled still gates as
+      # written — under `full` the hub starts only after all three accepting
+      # peers are healthy, under `credentials` only after anytoon-connector is.
       store-connector:
         condition: service_healthy
         required: false

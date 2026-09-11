@@ -9,6 +9,15 @@
 // so steps 3/3b/4/4b and the peer-leg book assertions are skipped rather than
 // duplicated into a second script.
 //
+// TOON_SMOKE_CREDENTIALS_ONLY=1 (what `make smoke-credentials` sets, after
+// `make up-credentials`) runs the payment layer PLUS the DENOMINATION
+// BOUNDARY — steps 0, 0c, 0d, 0b, 1, 2, 4c, the hub/anytoon halves of step 5
+// and all of step 6. And 0d is STRICT there, unlike under payments: the swap
+// driver runs on that profile, so a stale ANYONE pair is a failure, not an
+// allowance. The store, the gas station, their two peering connectors and the
+// whole AR.IO/Turbo half are not running under `credentials`, so steps
+// 3/3b/4/4b and the store/gas book assertions are skipped.
+//
 //   0. payment infrastructure is live:
 //        - TokenNetworkRegistry has code on anvil (the forge deploy landed)
 //        - payment_channel is an EXECUTABLE account on the validator
@@ -88,9 +97,18 @@ import {
 } from 'ethers';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // sandbox/
-// Set by `make smoke-payments`; see the header. Everything it gates is a
-// store/gas-station assertion, never a payment-layer one.
+// Set by `make smoke-payments` / `make smoke-credentials`; see the header.
+// Everything they gate is an assertion about a service the profile does not
+// run, never a payment-layer one.
 const PAYMENTS_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_SMOKE_PAYMENTS_ONLY ?? '');
+const CREDENTIALS_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_SMOKE_CREDENTIALS_ONLY ?? '');
+if (PAYMENTS_ONLY && CREDENTIALS_ONLY) {
+  console.error('TOON_SMOKE_PAYMENTS_ONLY and TOON_SMOKE_CREDENTIALS_ONLY are mutually exclusive — pick the one matching the profile you brought up.');
+  process.exit(1);
+}
+// The one distinction that survives past the payments early-exit: does this
+// run have the store, the gas station and the permaweb half behind them?
+const STORE_GAS = !PAYMENTS_ONLY && !CREDENTIALS_ONLY;
 const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
 const GAS_EDGE = process.env.GAS_EDGE_URL ?? 'http://localhost:3220';
@@ -351,7 +369,9 @@ step('0. payment infrastructure is live');
 const advertised = {}; // node -> { prefix: BigInt(price) }, from each node's own GET /ilp
 const EDGES = PAYMENTS_ONLY
   ? [['relay-connector (hub)', HUB]] // the peer edges are not running
-  : [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE], ['anytoon-connector', ANYTOON_EDGE]];
+  : CREDENTIALS_ONLY
+    ? [['relay-connector (hub)', HUB], ['anytoon-connector', ANYTOON_EDGE]] // the store/gas edges are not running
+    : [['relay-connector (hub)', HUB], ['store-connector', STORE_EDGE], ['gas-connector', GAS_EDGE], ['anytoon-connector', ANYTOON_EDGE]];
 for (const [name, url] of EDGES) {
   const res = await fetch(`${url}/ilp`).catch((e) => fatal(`${name} unreachable at ${url}: ${e.message}`));
   if (!res.ok) fatal(`${name} GET /ilp -> ${res.status}`);
@@ -401,6 +421,8 @@ if (!PAYMENTS_ONLY) {
 // the profile's own choice, so a STALE ANYONE pair is tolerated there — but
 // only after it has been observed at least once, which is the half of the
 // quote path that can actually be broken by a bad pool or a short window.
+// The `credentials` profile runs the driver and gets NO allowance: stale is a
+// failure there, exactly as under `full` — a purchase would refuse T00.
 step('0d. the hub prices ANYONE off a LIVE Uniswap v3 TWAP');
 let ratesBefore = [];
 let dealtBefore = null;
@@ -545,15 +567,15 @@ const opened = await client.channel.open({ deposit: 10_000_000n });
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 
 const hubBefore = clientBookTotal(await claims('relay-connector'));
-const storeBefore = PAYMENTS_ONLY ? 0n
-  : peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
-const gasBefore = PAYMENTS_ONLY ? 0n
-  : peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+const storeBefore = STORE_GAS
+  ? peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account) : 0n;
+const gasBefore = STORE_GAS
+  ? peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account) : 0n;
 const anytoonBefore = PAYMENTS_ONLY ? 0n
   : clientBookOnChannel(await claims('anytoon-connector'), `evm:${ANYONE_CHANNEL}`);
-console.log(PAYMENTS_ONLY
-  ? `  books before: hub client=${hubBefore}`
-  : `  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}, anytoon client=${anytoonBefore}`);
+console.log(`  books before: hub client=${hubBefore}`
+  + (STORE_GAS ? `, store peer=${storeBefore}, gas peer=${gasBefore}` : '')
+  + (PAYMENTS_ONLY ? '' : `, anytoon client=${anytoonBefore}`));
 
 // ── 2. paid relay write + free read ──────────────────────────────────────
 step('2. a PAID write reaches the relay; a FREE read returns it');
@@ -591,13 +613,12 @@ if (read) {
 }
 
 // ── the `payments` profile ends here ─────────────────────────────────────
-// Everything below drives the store and the gas station over the two
-// peerings, and neither app (nor its connector) runs under that profile. The
-// money is still asserted, on the one leg this profile has: the client's EVM
-// channel against the hub. g.toon.relay is priced at 1 base unit (conf/
-// connector-relay.toml), so one paid write is exactly +1 on the hub's client
-// book — small, but it is a real signed claim on the anvil channel opened in
-// step 1, which is the whole point.
+// Everything below needs at least one peer with somebody behind it, and the
+// `payments` profile runs none. The money is still asserted, on the one leg
+// that profile has: the client's Solana channel against the hub. g.toon.relay
+// is priced at 1 base unit (conf/connector-relay.toml), so one paid write is
+// exactly +1 on the hub's client book — small, but it is a real signed claim
+// on the channel opened in step 1, which is the whole point.
 if (PAYMENTS_ONLY) {
   step('5. the hub’s own book says the write was PAID — client leg, on SOLANA');
   let rows = [];
@@ -620,232 +641,239 @@ if (PAYMENTS_ONLY) {
   process.exit(failures === 0 ? 0 : 1);
 }
 
-// ── 3. paid store blob THROUGH THE PEERING ───────────────────────────────
-step('3. a PAID kind:5094 blob to g.toon.store routes hub -> peering -> store');
-const blobText = `hello from the TOON sandbox paid store path\nunique: ${unique}\n`;
-const blobEvent = buildBlobStorageRequest(
-  { blobData: Buffer.from(blobText), contentType: 'text/plain', bid: '1000000' },
-  generateSecretKey(),
-);
-const storePrice = await client.price('g.toon.store');
-assert(storePrice !== null, `the hub prices g.toon.store (${jstr(storePrice)})`);
-const storeAnswer = await sendJob(
-  { client, destination: 'g.toon.store', sealTo: STORE_EDGE, timeoutMs: 90_000 },
-  blobEvent,
-);
-if (!storeAnswer.accepted) {
-  bad(`store job refused/rejected: ${storeAnswer.code ?? ''} ${storeAnswer.message ?? ''} ${JSON.stringify(storeAnswer.refusal ?? {})}`);
-} else {
-  const txId = storeAnswer.receipt?.txId ?? storeAnswer.receipt?.result?.txId;
-  assert(typeof txId === 'string' && txId.length === 43, `the store answered a real Arweave tx id: ${txId}`);
-  if (typeof txId === 'string') {
-    // The upload went through the LOCAL Turbo path (STORE_TURBO_UPLOAD_URL
-    // -> upload-service), so the LOCAL gateway serves it optically.
-    let served = false;
-    for (let i = 0; i < 15 && !served; i++) {
-      const res = await fetch(`${GATEWAY}/raw/${txId}`);
-      if (res.status === 200 && (await res.text()).includes(unique)) served = true;
-      else await sleep(2000);
+// ── the `credentials` profile skips the permaweb half ────────────────────
+// Steps 3/3b/4/4b drive the store and the gas station over their peerings;
+// under the `credentials` compose profile neither app runs, nor its
+// connector, nor the gateway/bundler stack the store uploads through. The
+// boundary steps — 4c, the hub/anytoon halves of 5, and 6 — run on both.
+if (STORE_GAS) {
+  // ── 3. paid store blob THROUGH THE PEERING ───────────────────────────────
+  step('3. a PAID kind:5094 blob to g.toon.store routes hub -> peering -> store');
+  const blobText = `hello from the TOON sandbox paid store path\nunique: ${unique}\n`;
+  const blobEvent = buildBlobStorageRequest(
+    { blobData: Buffer.from(blobText), contentType: 'text/plain', bid: '1000000' },
+    generateSecretKey(),
+  );
+  const storePrice = await client.price('g.toon.store');
+  assert(storePrice !== null, `the hub prices g.toon.store (${jstr(storePrice)})`);
+  const storeAnswer = await sendJob(
+    { client, destination: 'g.toon.store', sealTo: STORE_EDGE, timeoutMs: 90_000 },
+    blobEvent,
+  );
+  if (!storeAnswer.accepted) {
+    bad(`store job refused/rejected: ${storeAnswer.code ?? ''} ${storeAnswer.message ?? ''} ${JSON.stringify(storeAnswer.refusal ?? {})}`);
+  } else {
+    const txId = storeAnswer.receipt?.txId ?? storeAnswer.receipt?.result?.txId;
+    assert(typeof txId === 'string' && txId.length === 43, `the store answered a real Arweave tx id: ${txId}`);
+    if (typeof txId === 'string') {
+      // The upload went through the LOCAL Turbo path (STORE_TURBO_UPLOAD_URL
+      // -> upload-service), so the LOCAL gateway serves it optically.
+      let served = false;
+      for (let i = 0; i < 15 && !served; i++) {
+        const res = await fetch(`${GATEWAY}/raw/${txId}`);
+        if (res.status === 200 && (await res.text()).includes(unique)) served = true;
+        else await sleep(2000);
+      }
+      assert(served, `the LOCAL gateway serves the stored blob at ${GATEWAY}/raw/${txId}`);
     }
-    assert(served, `the LOCAL gateway serves the stored blob at ${GATEWAY}/raw/${txId}`);
   }
-}
 
-// ── 3b. the BROKERED ArNS buy: kind:5095 prepare + 5096 gas + 5095 buy ───
-// The three-party ceremony end to end, every leg PAID through the hub:
-//   - the OWNER keypair below never holds a lamport — the client's only
-//     asset is ILP credit on the channel from step 1
-//   - the STORE composes the ANT-spawn transaction (op=prepare) and later
-//     spends its own ARIO float on the name (op=buy, the DVM wallet funded
-//     by seed-solana.mjs)
-//   - the GAS STATION pays the spawn's rent + fee out of its Solana float
-//     and broadcasts (kind:5096 quote/execute)
-// and the name must then resolve through the LOCAL gateway.
-step('3b. BROKERED ArNS buy (kind:5095): SOL-less owner -> paid prepare/gas/buy -> name resolves');
-const arnsOwner = generateSolanaKeypair(); // never funded, ever
-const arnsName = `toon-paid-${Math.random().toString(36).slice(2, 8)}`;
-const arnsOutcome = await buyArnsNameWithNewAnt({
-  store: { client, destination: 'g.toon.store', sealTo: STORE_EDGE, timeoutMs: 120_000 },
-  gas: { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 120_000 },
-  owner: arnsOwner,
-  name: arnsName,
-  type: 'lease',
-  years: 1,
-});
-if (!arnsOutcome.bought) {
-  bad(`brokered ArNS buy failed at step ${arnsOutcome.step}: ${arnsOutcome.reason} — ${arnsOutcome.detail}`);
-} else {
-  const { ant, receipt } = arnsOutcome;
-  ok(`ANT spawned by the ceremony: ${ant.processId} (gas fee payer ${ant.feePayer}, tx ${ant.signature})`);
-  assert(ant.owner === arnsOwner.address,
-    `the ANT owner is the unfunded client keypair ${arnsOwner.address}`);
-  assert(receipt.name === arnsName && receipt.processId === ant.processId,
-    `op=buy bought "${receipt.name}" for the client's ANT (registry tx ${receipt.registryTxId})`);
-  assert(typeof receipt.registryTxId === 'string' && receipt.registryTxId.length > 0,
-    `the DVM paid ${receipt.quotedMario} mARIO on the LOCAL validator (network ${receipt.network})`);
-  // The proof the name is real: the LOCAL gateway's resolver answers for it
-  // (the gateway hydrates its base-name list from the validator; the
-  // miss-refresh interval is 5s here, so poll).
-  let resolved = null;
-  for (let i = 0; i < 30 && !resolved; i++) {
-    const res = await fetch(`${GATEWAY}/ar-io/resolver/${arnsName}`);
-    if (res.status === 200) resolved = await res.json();
-    else await sleep(3000);
-  }
-  assert(resolved !== null && typeof resolved.txId === 'string',
-    `the LOCAL gateway resolves ${arnsName} (${GATEWAY}/ar-io/resolver/${arnsName} -> ${resolved?.txId})`);
-}
-
-// ── 4. paid gas quote THROUGH THE PEERING ────────────────────────────────
-step('4. a PAID kind:5096 quote to g.toon.gastation routes hub -> peering -> gas station');
-const gasPrice = await client.price('g.toon.gastation');
-assert(gasPrice !== null, `the hub prices g.toon.gastation (${jstr(gasPrice)})`);
-const gasEvent = buildJobEvent({ kind: 5096, params: { phase: 'quote' } });
-const gasAnswer = await sendJob(
-  { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 60_000 },
-  gasEvent,
-);
-if (!gasAnswer.accepted) {
-  bad(`gas quote refused/rejected: ${gasAnswer.code ?? ''} ${gasAnswer.message ?? ''} ${JSON.stringify(gasAnswer.refusal ?? {})}`);
-} else {
-  const receipt = gasAnswer.receipt ?? {};
-  const feePayer = receipt.feePayer ?? receipt.result?.feePayer;
-  assert(typeof feePayer === 'string' && feePayer.length >= 32,
-    `the gas station quoted its Solana fee payer: ${feePayer}`);
-}
-
-// ── 4b. paid kind:5098 EVM meta-tx relay THROUGH THE PEERING ─────────────
-// The whole ERC-2771 ceremony against the sandbox's own forwarder on anvil:
-// a throwaway wallet that NEVER holds a wei authors a call, the gas station's
-// dedicated relayer pays for it, and the target still sees the author as
-// _msgSender(). The target is the SandboxTokenNetworkProbe (the real
-// TokenNetwork was deployed forwarder-less, so the sandbox whitelists the
-// probe instead — same setTotalDeposit selector, records what it saw).
-step('4b. a PAID kind:5098 EVM meta-tx: quote, client-signed ERC-2771 relay, on-chain _msgSender() proof');
-{
-  // The free /describe surface only advertises 5098 when the EVM env is
-  // configured — this is the "gap closed" assertion.
-  const describe = await fetch(`${GAS_BLS}/describe`).then((r) => r.json())
-    .catch((e) => { bad(`gas station /describe unreachable at ${GAS_BLS}: ${e.message}`); return null; });
-  const evmJob = (describe?.jobs ?? []).find((j) => j.kind === 5098);
-  assert(evmJob !== undefined, '/describe advertises kind:5098 (evm-gas-station)');
-  assert(Array.isArray(evmJob?.chains) && evmJob.chains.includes('evm:31337'),
-    `kind:5098 chains include evm:31337 (${JSON.stringify(evmJob?.chains ?? [])})`);
-}
-// The author of the relayed call — DELIBERATELY unfunded, forever.
-const evmAuthor = EthersWallet.createRandom();
-let evmQuote = null;
-{
-  const quoteEvent = buildJobEvent({
-    kind: 5098,
-    params: { phase: 'quote', chainId: '31337', from: evmAuthor.address },
+  // ── 3b. the BROKERED ArNS buy: kind:5095 prepare + 5096 gas + 5095 buy ───
+  // The three-party ceremony end to end, every leg PAID through the hub:
+  //   - the OWNER keypair below never holds a lamport — the client's only
+  //     asset is ILP credit on the channel from step 1
+  //   - the STORE composes the ANT-spawn transaction (op=prepare) and later
+  //     spends its own ARIO float on the name (op=buy, the DVM wallet funded
+  //     by seed-solana.mjs)
+  //   - the GAS STATION pays the spawn's rent + fee out of its Solana float
+  //     and broadcasts (kind:5096 quote/execute)
+  // and the name must then resolve through the LOCAL gateway.
+  step('3b. BROKERED ArNS buy (kind:5095): SOL-less owner -> paid prepare/gas/buy -> name resolves');
+  const arnsOwner = generateSolanaKeypair(); // never funded, ever
+  const arnsName = `toon-paid-${Math.random().toString(36).slice(2, 8)}`;
+  const arnsOutcome = await buyArnsNameWithNewAnt({
+    store: { client, destination: 'g.toon.store', sealTo: STORE_EDGE, timeoutMs: 120_000 },
+    gas: { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 120_000 },
+    owner: arnsOwner,
+    name: arnsName,
+    type: 'lease',
+    years: 1,
   });
-  const answer = await sendJob(
+  if (!arnsOutcome.bought) {
+    bad(`brokered ArNS buy failed at step ${arnsOutcome.step}: ${arnsOutcome.reason} — ${arnsOutcome.detail}`);
+  } else {
+    const { ant, receipt } = arnsOutcome;
+    ok(`ANT spawned by the ceremony: ${ant.processId} (gas fee payer ${ant.feePayer}, tx ${ant.signature})`);
+    assert(ant.owner === arnsOwner.address,
+      `the ANT owner is the unfunded client keypair ${arnsOwner.address}`);
+    assert(receipt.name === arnsName && receipt.processId === ant.processId,
+      `op=buy bought "${receipt.name}" for the client's ANT (registry tx ${receipt.registryTxId})`);
+    assert(typeof receipt.registryTxId === 'string' && receipt.registryTxId.length > 0,
+      `the DVM paid ${receipt.quotedMario} mARIO on the LOCAL validator (network ${receipt.network})`);
+    // The proof the name is real: the LOCAL gateway's resolver answers for it
+    // (the gateway hydrates its base-name list from the validator; the
+    // miss-refresh interval is 5s here, so poll).
+    let resolved = null;
+    for (let i = 0; i < 30 && !resolved; i++) {
+      const res = await fetch(`${GATEWAY}/ar-io/resolver/${arnsName}`);
+      if (res.status === 200) resolved = await res.json();
+      else await sleep(3000);
+    }
+    assert(resolved !== null && typeof resolved.txId === 'string',
+      `the LOCAL gateway resolves ${arnsName} (${GATEWAY}/ar-io/resolver/${arnsName} -> ${resolved?.txId})`);
+  }
+
+  // ── 4. paid gas quote THROUGH THE PEERING ────────────────────────────────
+  step('4. a PAID kind:5096 quote to g.toon.gastation routes hub -> peering -> gas station');
+  const gasPrice = await client.price('g.toon.gastation');
+  assert(gasPrice !== null, `the hub prices g.toon.gastation (${jstr(gasPrice)})`);
+  const gasEvent = buildJobEvent({ kind: 5096, params: { phase: 'quote' } });
+  const gasAnswer = await sendJob(
     { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 60_000 },
-    quoteEvent,
+    gasEvent,
   );
-  if (!answer.accepted) {
-    bad(`5098 quote refused/rejected: ${answer.code ?? ''} ${answer.message ?? ''} ${JSON.stringify(answer.refusal ?? {})}`);
+  if (!gasAnswer.accepted) {
+    bad(`gas quote refused/rejected: ${gasAnswer.code ?? ''} ${gasAnswer.message ?? ''} ${JSON.stringify(gasAnswer.refusal ?? {})}`);
   } else {
-    const r = answer.receipt?.quoteId ? answer.receipt : answer.receipt?.result ?? answer.receipt ?? {};
-    if (r.status !== 'ok') {
-      bad(`5098 quote failed: ${r.reason ?? '?'} — ${r.detail ?? jstr(r)}`);
+    const receipt = gasAnswer.receipt ?? {};
+    const feePayer = receipt.feePayer ?? receipt.result?.feePayer;
+    assert(typeof feePayer === 'string' && feePayer.length >= 32,
+      `the gas station quoted its Solana fee payer: ${feePayer}`);
+  }
+
+  // ── 4b. paid kind:5098 EVM meta-tx relay THROUGH THE PEERING ─────────────
+  // The whole ERC-2771 ceremony against the sandbox's own forwarder on anvil:
+  // a throwaway wallet that NEVER holds a wei authors a call, the gas station's
+  // dedicated relayer pays for it, and the target still sees the author as
+  // _msgSender(). The target is the SandboxTokenNetworkProbe (the real
+  // TokenNetwork was deployed forwarder-less, so the sandbox whitelists the
+  // probe instead — same setTotalDeposit selector, records what it saw).
+  step('4b. a PAID kind:5098 EVM meta-tx: quote, client-signed ERC-2771 relay, on-chain _msgSender() proof');
+  {
+    // The free /describe surface only advertises 5098 when the EVM env is
+    // configured — this is the "gap closed" assertion.
+    const describe = await fetch(`${GAS_BLS}/describe`).then((r) => r.json())
+      .catch((e) => { bad(`gas station /describe unreachable at ${GAS_BLS}: ${e.message}`); return null; });
+    const evmJob = (describe?.jobs ?? []).find((j) => j.kind === 5098);
+    assert(evmJob !== undefined, '/describe advertises kind:5098 (evm-gas-station)');
+    assert(Array.isArray(evmJob?.chains) && evmJob.chains.includes('evm:31337'),
+      `kind:5098 chains include evm:31337 (${JSON.stringify(evmJob?.chains ?? [])})`);
+  }
+  // The author of the relayed call — DELIBERATELY unfunded, forever.
+  const evmAuthor = EthersWallet.createRandom();
+  let evmQuote = null;
+  {
+    const quoteEvent = buildJobEvent({
+      kind: 5098,
+      params: { phase: 'quote', chainId: '31337', from: evmAuthor.address },
+    });
+    const answer = await sendJob(
+      { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 60_000 },
+      quoteEvent,
+    );
+    if (!answer.accepted) {
+      bad(`5098 quote refused/rejected: ${answer.code ?? ''} ${answer.message ?? ''} ${JSON.stringify(answer.refusal ?? {})}`);
     } else {
-      evmQuote = r;
-      ok(`quote ${r.quoteId} for signer ${evmAuthor.address} (relayer ${r.relayer}, nonce ${r.forwarderNonce})`);
-      assert(String(r.forwarder).toLowerCase() === FORWARDER.toLowerCase(),
-        `the quoted forwarder is the sandbox ERC2771Forwarder ${FORWARDER}`);
-      assert(String(r.tokenNetwork).toLowerCase() === PROBE.toLowerCase(),
-        `the quoted (whitelisted) target is the ERC-2771 probe ${PROBE}`);
+      const r = answer.receipt?.quoteId ? answer.receipt : answer.receipt?.result ?? answer.receipt ?? {};
+      if (r.status !== 'ok') {
+        bad(`5098 quote failed: ${r.reason ?? '?'} — ${r.detail ?? jstr(r)}`);
+      } else {
+        evmQuote = r;
+        ok(`quote ${r.quoteId} for signer ${evmAuthor.address} (relayer ${r.relayer}, nonce ${r.forwarderNonce})`);
+        assert(String(r.forwarder).toLowerCase() === FORWARDER.toLowerCase(),
+          `the quoted forwarder is the sandbox ERC2771Forwarder ${FORWARDER}`);
+        assert(String(r.tokenNetwork).toLowerCase() === PROBE.toLowerCase(),
+          `the quoted (whitelisted) target is the ERC-2771 probe ${PROBE}`);
+      }
     }
   }
-}
-if (evmQuote) {
-  // Build + EIP-712-sign the ForwardRequest exactly as OZ v5.5.0's
-  // ERC2771Forwarder verifies it: domain {name:"ToonSandboxForwarder",
-  // version:"1"}, typed struct includes the forwarder nonce; the wire
-  // ForwardRequestData carries the signature instead of the nonce.
-  const iface = new EthersInterface([
-    'function setTotalDeposit(bytes32 channelId, address participant, uint256 totalDeposit)',
-  ]);
-  const channelId = hexlify(randomBytes(32));
-  const totalDeposit = 5098n;
-  const data = iface.encodeFunctionData('setTotalDeposit', [channelId, evmAuthor.address, totalDeposit]);
-  const req = {
-    from: evmAuthor.address,
-    to: evmQuote.tokenNetwork,
-    value: '0',
-    gas: '200000', // well under the station's 300k cap
-    deadline: evmQuote.recommendedDeadline,
-    data,
-  };
-  const signature = await evmAuthor.signTypedData(
-    { name: 'ToonSandboxForwarder', version: '1', chainId: 31337, verifyingContract: evmQuote.forwarder },
-    {
-      ForwardRequest: [
-        { name: 'from', type: 'address' },
-        { name: 'to', type: 'address' },
-        { name: 'value', type: 'uint256' },
-        { name: 'gas', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'deadline', type: 'uint48' },
-        { name: 'data', type: 'bytes' },
-      ],
-    },
-    { ...req, value: 0n, gas: 200000n, nonce: BigInt(evmQuote.forwarderNonce) },
-  );
-  const executeEvent = buildJobEvent({
-    kind: 5098,
-    params: {
-      phase: 'execute',
-      chainId: '31337',
-      request: Buffer.from(JSON.stringify({ ...req, signature })).toString('base64'),
-      quoteId: evmQuote.quoteId,
-      idempotencyKey: `${unique}-5098`,
-    },
-  });
-  const answer = await sendJob(
-    { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 90_000 },
-    executeEvent,
-  );
-  if (!answer.accepted) {
-    bad(`5098 execute refused/rejected: ${answer.code ?? ''} ${answer.message ?? ''} ${JSON.stringify(answer.refusal ?? {})}`);
-  } else {
-    const r = answer.receipt?.txHash ? answer.receipt : answer.receipt?.result ?? answer.receipt ?? {};
-    if (r.status !== 'ok') {
-      bad(`5098 execute failed: ${r.reason ?? '?'} — ${r.detail ?? jstr(r)}`);
+  if (evmQuote) {
+    // Build + EIP-712-sign the ForwardRequest exactly as OZ v5.5.0's
+    // ERC2771Forwarder verifies it: domain {name:"ToonSandboxForwarder",
+    // version:"1"}, typed struct includes the forwarder nonce; the wire
+    // ForwardRequestData carries the signature instead of the nonce.
+    const iface = new EthersInterface([
+      'function setTotalDeposit(bytes32 channelId, address participant, uint256 totalDeposit)',
+    ]);
+    const channelId = hexlify(randomBytes(32));
+    const totalDeposit = 5098n;
+    const data = iface.encodeFunctionData('setTotalDeposit', [channelId, evmAuthor.address, totalDeposit]);
+    const req = {
+      from: evmAuthor.address,
+      to: evmQuote.tokenNetwork,
+      value: '0',
+      gas: '200000', // well under the station's 300k cap
+      deadline: evmQuote.recommendedDeadline,
+      data,
+    };
+    const signature = await evmAuthor.signTypedData(
+      { name: 'ToonSandboxForwarder', version: '1', chainId: 31337, verifyingContract: evmQuote.forwarder },
+      {
+        ForwardRequest: [
+          { name: 'from', type: 'address' },
+          { name: 'to', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'gas', type: 'uint256' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'deadline', type: 'uint48' },
+          { name: 'data', type: 'bytes' },
+        ],
+      },
+      { ...req, value: 0n, gas: 200000n, nonce: BigInt(evmQuote.forwarderNonce) },
+    );
+    const executeEvent = buildJobEvent({
+      kind: 5098,
+      params: {
+        phase: 'execute',
+        chainId: '31337',
+        request: Buffer.from(JSON.stringify({ ...req, signature })).toString('base64'),
+        quoteId: evmQuote.quoteId,
+        idempotencyKey: `${unique}-5098`,
+      },
+    });
+    const answer = await sendJob(
+      { client, destination: 'g.toon.gastation', sealTo: GAS_EDGE, timeoutMs: 90_000 },
+      executeEvent,
+    );
+    if (!answer.accepted) {
+      bad(`5098 execute refused/rejected: ${answer.code ?? ''} ${answer.message ?? ''} ${JSON.stringify(answer.refusal ?? {})}`);
     } else {
-      assert(/^0x[0-9a-fA-F]{64}$/.test(r.txHash),
-        `the relayer landed the forward request: tx ${r.txHash} (block ${r.blockNumber}, gasUsed ${r.gasUsed})`);
-      // The point of ERC-2771, read back off the chain itself: the probe
-      // resolved _msgSender() through the forwarder to the AUTHOR.
-      const provider = new JsonRpcProvider(ANVIL_URL);
-      try {
-        const probe = new EthersContract(PROBE, [
-          'function lastSender() view returns (address)',
-          'function lastChannelId() view returns (bytes32)',
-          'function lastTotalDeposit() view returns (uint256)',
-        ], provider);
-        const [lastSender, lastChannelId, lastTotalDeposit, authorBalance, tx] = await Promise.all([
-          probe.lastSender(),
-          probe.lastChannelId(),
-          probe.lastTotalDeposit(),
-          provider.getBalance(evmAuthor.address),
-          provider.getTransaction(r.txHash),
-        ]);
-        assert(lastSender.toLowerCase() === evmAuthor.address.toLowerCase(),
-          `ERC-2771 PROOF: the target's _msgSender() is the CLIENT author ${lastSender}`);
-        assert(lastSender.toLowerCase() !== String(evmQuote.relayer).toLowerCase(),
-          `…and NOT the relayer ${evmQuote.relayer}, which merely paid`);
-        assert(lastChannelId === channelId && lastTotalDeposit === totalDeposit,
-          'the recorded call args are exactly the ones the client signed');
-        assert(authorBalance === 0n,
-          'the author wallet still holds 0 ETH — the gas was entirely the relayer\'s');
-        assert(tx !== null && tx.from.toLowerCase() === String(evmQuote.relayer).toLowerCase()
-          && String(tx.to).toLowerCase() === FORWARDER.toLowerCase(),
-          `the on-chain tx was sent by the relayer to the forwarder (${tx?.from} -> ${tx?.to})`);
-      } finally {
-        provider.destroy();
+      const r = answer.receipt?.txHash ? answer.receipt : answer.receipt?.result ?? answer.receipt ?? {};
+      if (r.status !== 'ok') {
+        bad(`5098 execute failed: ${r.reason ?? '?'} — ${r.detail ?? jstr(r)}`);
+      } else {
+        assert(/^0x[0-9a-fA-F]{64}$/.test(r.txHash),
+          `the relayer landed the forward request: tx ${r.txHash} (block ${r.blockNumber}, gasUsed ${r.gasUsed})`);
+        // The point of ERC-2771, read back off the chain itself: the probe
+        // resolved _msgSender() through the forwarder to the AUTHOR.
+        const provider = new JsonRpcProvider(ANVIL_URL);
+        try {
+          const probe = new EthersContract(PROBE, [
+            'function lastSender() view returns (address)',
+            'function lastChannelId() view returns (bytes32)',
+            'function lastTotalDeposit() view returns (uint256)',
+          ], provider);
+          const [lastSender, lastChannelId, lastTotalDeposit, authorBalance, tx] = await Promise.all([
+            probe.lastSender(),
+            probe.lastChannelId(),
+            probe.lastTotalDeposit(),
+            provider.getBalance(evmAuthor.address),
+            provider.getTransaction(r.txHash),
+          ]);
+          assert(lastSender.toLowerCase() === evmAuthor.address.toLowerCase(),
+            `ERC-2771 PROOF: the target's _msgSender() is the CLIENT author ${lastSender}`);
+          assert(lastSender.toLowerCase() !== String(evmQuote.relayer).toLowerCase(),
+            `…and NOT the relayer ${evmQuote.relayer}, which merely paid`);
+          assert(lastChannelId === channelId && lastTotalDeposit === totalDeposit,
+            'the recorded call args are exactly the ones the client signed');
+          assert(authorBalance === 0n,
+            'the author wallet still holds 0 ETH — the gas was entirely the relayer\'s');
+          assert(tx !== null && tx.from.toLowerCase() === String(evmQuote.relayer).toLowerCase()
+            && String(tx.to).toLowerCase() === FORWARDER.toLowerCase(),
+            `the on-chain tx was sent by the relayer to the forwarder (${tx?.from} -> ${tx?.to})`);
+        } finally {
+          provider.destroy();
+        }
       }
     }
   }
@@ -976,14 +1004,23 @@ if (epoch !== null) {
 step('5. the connectors’ own books say everything was PAID — per settlement leg, in each leg’s own unit');
 // Claims are journaled on the far side of the same round trip; poll briefly.
 let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore, anytoonAfter = anytoonBefore;
-const HUB_EXPECTED = 1n + 9n * 1100n + HUB_CREDENTIALS_PRICE;
-for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED || storeAfter - storeBefore < 3000n
-    || gasAfter - gasBefore < 6000n || anytoonAfter - anytoonBefore < BUNDLE_PRICE_UNITS); i++) {
+// Under the `credentials` profile only two paid packets entered the hub's
+// client edge: the relay write (1) and the bundle (11000, the static
+// cross-asset quote). The full run adds the nine store/gas-bound packets
+// itemised below.
+const HUB_EXPECTED = STORE_GAS
+  ? 1n + 9n * 1100n + HUB_CREDENTIALS_PRICE
+  : 1n + HUB_CREDENTIALS_PRICE;
+for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED
+    || (STORE_GAS && (storeAfter - storeBefore < 3000n || gasAfter - gasBefore < 6000n))
+    || anytoonAfter - anytoonBefore < BUNDLE_PRICE_UNITS); i++) {
   await sleep(500);
   hubRows = await claims('relay-connector');
   hubAfter = clientBookTotal(hubRows);
-  storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
-  gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+  if (STORE_GAS) {
+    storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
+    gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
+  }
   anytoonAfter = clientBookOnChannel(await claims('anytoon-connector'), `evm:${ANYONE_CHANNEL}`);
 }
 // Client leg (SOLANA, uUSDC): eleven paid packets entered the hub's client
@@ -993,7 +1030,7 @@ for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED || storeAfter - s
 // (1100), 5098 quote (1100), 5098 execute (1100), and the credentials bundle
 // (11000, the hub's static cross-asset quote).
 assert(hubAfter - hubBefore >= HUB_EXPECTED,
-  `hub client book advanced by ${hubAfter - hubBefore} uUSDC (>= ${HUB_EXPECTED}, the eleven packets' prices)`);
+  `hub client book advanced by ${hubAfter - hubBefore} uUSDC (>= ${HUB_EXPECTED}, the ${STORE_GAS ? 'eleven' : 'two'} packets' prices)`);
 // The hub's book keys a client channel by chain namespace, and THAT is the
 // assertion: a `solana:` key is the buyer paying in mock USDC. An `evm:` key
 // here would mean the buyer had opened an ANYONE channel by accident and been
@@ -1005,10 +1042,14 @@ assert(clientChannels.some((c) => c === `solana:${opened.channelId}`),
   `and include the channel the client opened in step 1 (${opened.channelId})`);
 // Store and gas legs (SOLANA, uUSDC): at par, so these are the same integers
 // that entered the hub less its flat fee — no conversion anywhere on them.
-assert(storeAfter - storeBefore >= 3000n,
-  `store peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} uUSDC (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
-assert(gasAfter - gasBefore >= 6000n,
-  `gas peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} uUSDC (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
+// (Under `credentials` neither peering has anybody behind it and nothing was
+// sent down them; the boundary leg below is asserted on both profiles.)
+if (STORE_GAS) {
+  assert(storeAfter - storeBefore >= 3000n,
+    `store peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} uUSDC (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
+  assert(gasAfter - gasBefore >= 6000n,
+    `gas peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} uUSDC (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
+}
 
 // ── the crossing itself ─────────────────────────────────────────────────
 // The one purchase, seen from both sides of the boundary. The client paid the
@@ -1080,6 +1121,8 @@ step('6. the ANYONE rate MOVED while this test ran — a live TWAP, not a decora
 }
 
 console.log(failures === 0
-  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store, gas station and the Anyone credentials issuer (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay, blind-signed credentials bundle) — buyer paid mock USDC on a SOLANA channel, store and gas legs settled at par on Solana, and the credentials leg CROSSED A DENOMINATION BOUNDARY into ANYONE on anvil at a live Uniswap v3 TWAP.\x1b[0m'
+  ? (CREDENTIALS_ONLY
+    ? '\n\x1b[32mTOON CREDENTIALS SMOKE OK: the payment layer live, a Solana USDC channel opened against the hub, a paid relay write journaled — and the DENOMINATION BOUNDARY end to end: free key document, scoped free route, unpaid refusal, and one PAID hub-routed purchase of a blind-signed bundle, with the buyer\'s uUSDC converted at a live Uniswap v3 TWAP into ANYONE on anvil, both sides\' books agreeing in their own units, and the rate MOVED during the run.\x1b[0m'
+    : '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store, gas station and the Anyone credentials issuer (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay, blind-signed credentials bundle) — buyer paid mock USDC on a SOLANA channel, store and gas legs settled at par on Solana, and the credentials leg CROSSED A DENOMINATION BOUNDARY into ANYONE on anvil at a live Uniswap v3 TWAP.\x1b[0m')
   : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
 process.exit(failures === 0 ? 0 : 1);
