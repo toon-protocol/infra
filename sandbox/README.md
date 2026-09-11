@@ -130,16 +130,17 @@ hold the detailed findings).
   ships the change, the commented image pin in `docker-compose.yml` works
   again. The `payments` profile below never builds the store, so it needs
   none of this
-- **Full stack only** — the **anytoon sibling checkout** at `../../anytoon`:
-  the `claim-minter` image is BUILT from it (`claim-minter/`), because that
-  component publishes no image. Override with `ANYTOON_CONTEXT` if your
-  checkout lives elsewhere: `make up ANYTOON_CONTEXT=/path/to/anytoon`;
-  `make up` preflights it (`make setup` only prints a note). Only
+- **Full stack and `credentials` profile** — the **anytoon sibling checkout**
+  at `../../anytoon`: the `claim-minter` image is BUILT from it
+  (`claim-minter/`), because that component publishes no image. Override with
+  `ANYTOON_CONTEXT` if your checkout lives elsewhere:
+  `make up ANYTOON_CONTEXT=/path/to/anytoon`; `make up` and
+  `make up-credentials` preflight it (`make setup` only prints a note). Only
   `claim-minter/` is used — the issuer itself is the upstream image, pulled
   and run unmodified. The `payments` profile never builds it
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
   3210, 3220, 3230, 3300, 3400, 7100 — the `payments` profile only needs
-  8545, 8899, 8900, 3200 and 7100
+  8545, 8899, 8900, 3200 and 7100; `credentials` needs those five plus 3230
 - **Full stack only** — `*.localhost` resolving to loopback (default on
   modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
 
@@ -216,6 +217,60 @@ are still built (the hub cannot resolve its own ANYONE `TokenNetwork`
 otherwise) and the smoke still requires that they priced at least once.
 
 `make down`, `make clean`, `make logs` and `make ps` work the same either way.
+
+### Buying credential bundles without the permaweb (the `credentials` profile)
+
+If you are writing a TOON **client that buys Anyone credentials** — no app, no
+route, no price of your own, just a channel against the hub and a real paid
+counterparty on the far side of the **denomination boundary** (§6.7) — the
+`payments` profile helps least: the peer it leaves out is precisely the one
+you need. The `credentials` profile is `payments` plus that peer:
+
+```bash
+cd sandbox
+make setup             # npm ci; fine with no store checkout
+make up-credentials    # docker compose --profile credentials up -d --build
+make smoke-credentials # payment layer + the denomination boundary
+```
+
+Fifteen services: the `payments` seven (above) plus
+
+| added | why |
+|---|---|
+| `issuer-keys`, `issuer-migrate`, `issuer`, `issuer-postgres`, `issuer-redis` | the paid counterparty — the upstream issuer, its key/schema jobs and its datastores (§6.5) |
+| `claim-minter` | turns the connector's statement of **who paid** into the signed payment claim the issuer requires |
+| `anytoon-connector` | terminates `g.anyone.credentials` in ANYONE — the far side of the boundary, client edge on **3230** |
+| `swap-driver` | **keeps the TWAP fresh.** Without it nothing trades, the ANYONE rate goes stale within a couple of minutes, the crossing refuses `T00`, and no bundle can be bought at all |
+
+Still left out: the whole AR.IO/Turbo half (`arlocal`, `envoy`, `core`,
+`redis`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
+`localstack`, `seed-solana`, `seed-gateway-block`) and the store /
+gas-station apps with their two peering connectors.
+
+**The checkout requirement is the real win.** `credentials` needs only the
+**anytoon** sibling checkout (a plain clone at `../../anytoon` —
+`claim-minter` builds from it), not the store checkout, which is a worktree
+of an *unmerged branch*. Under `full`, buying a bundle needs both on disk,
+one of them for an image the flow never renders.
+
+`make smoke-credentials` proves everything `make smoke-payments` proves, plus
+the boundary end to end: the price triple asserted at both edges, the ANYONE
+rate **live** off the driver's market (no stale allowance here, unlike
+`payments`), the free key document, the scoped free route, the unpaid
+refusal, and one PAID hub-routed purchase of a blind-signed bundle — uUSDC on
+the buyer's Solana channel converted at the live TWAP into ANYONE on anvil,
+both sides' books asserted in their own units, and the rate required to have
+**moved** during the run.
+
+**Rehearsing the stale-rate refusal is a feature of this profile.**
+`docker compose --profile credentials stop swap-driver`, wait ~2 minutes
+(`ttl_secs`), and every purchase refuses `T00` on a route that *has* a live
+counterparty — which `payments` cannot stage (nothing to buy) and `full`
+makes expensive. Useful for client code that must tell `T00` (transient:
+retry on a backoff, and each attempt still spends its covering claim) from
+`F02` (no rate declared: config is immutable for the process lifetime, so
+retrying never helps). `docker compose --profile credentials start
+swap-driver` brings the market back within one poll (~40s).
 
 ### Hidden-service ingress (the `hs` profile) — opt-in, and it dials a real network
 
@@ -314,7 +369,7 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `issuer` | the **upstream** `anyone-protocol/credentials-issuer`, unmodified — blind-signs credential bundles, refuses without a signed `X-Payment-Claim` | none (unpublished) |
 | `claim-minter` | turns the connector's `X-TOON-Payer` attribution into that signed claim; proxies `POST /v1/bundles` and nothing else. Built from the anytoon sibling checkout | none (unpublished) |
 | `issuer-postgres`, `issuer-redis` | the issuer's own datastores (issuance records, idempotency, rate limits) | none (unpublished) |
-| `swap-driver` | trades both Uniswap pools every 15s so the hub's ANYONE TWAP is genuinely live and genuinely bounded (§6.7). `full` only | none |
+| `swap-driver` | trades both Uniswap pools every 15s so the hub's ANYONE TWAP is genuinely live and genuinely bounded (§6.7). `full` + `credentials`, never `payments` | none |
 | `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm`, `open-toon-solana-channels`, `issuer-keys`, `issuer-migrate` | one-shot idempotent init jobs | — |
 
 ### Payment topology
@@ -517,7 +572,9 @@ Fastest way to see your app earn money. No new connector, no peering.
 
    Listing `payments` is usually what you want here: your app plus the hub
    and the chains is exactly the `make up-payments` set (§2), and it does not
-   drag in the gateway, the bundler or the store checkout.
+   drag in the gateway, the bundler or the store checkout. (Add
+   `'credentials'` too if your app should also be up under
+   `make up-credentials`.)
 
 2. Add the route to the hub's config, `conf/connector-relay.toml` (next to
    the existing `g.toon.relay` rows):
@@ -1060,7 +1117,7 @@ asset layer in one RPC.
 
 #### The swap driver
 
-`scripts/swap-driver.sh`, `full` profile, every 15 seconds. It exists because a
+`scripts/swap-driver.sh`, `full` and `credentials` profiles, every 15 seconds. It exists because a
 seeded-and-abandoned pool is a frozen constant with a decorated config:
 
 - v3 writes observations in `swap()` and **nowhere else**, so without trades
@@ -1220,7 +1277,9 @@ docker compose --profile full logs -f swap-driver   # one line a minute
 - **Every credentials purchase refuses `T00`**: the ANYONE pair went **stale**
   — nothing is trading, so no blocks are being mined and the observation aged
   past `ttl_secs`. Check `docker compose logs swap-driver`. Expected under the
-  `payments` profile, which runs no driver.
+  `payments` profile, which runs no driver; under `credentials` the driver is
+  part of the profile, so a `T00` there means it stopped — or you stopped it
+  on purpose to rehearse exactly this refusal (§2).
 - **Every crossing refuses `T04` naming a tiny ceiling**: the ANYONE peering
   lost its explicit `max_packet_amount` and fell back to the 1000000 default,
   which is 10^-12 of one token on an 18-decimal leg.
@@ -1232,8 +1291,10 @@ docker compose --profile full logs -f swap-driver   # one line a minute
 - **`make up` stops on the store or anytoon context**: those two images
   build from sibling checkouts — see Prerequisites for repointing
   `STORE_CONTEXT` / `ANYTOON_CONTEXT`, or use `make up-payments`, which
-  never builds either. `make setup` only prints a note about them; the gate
-  lives on `make up`, the one path that builds the images.
+  never builds either (`make up-credentials` builds only the claim-minter,
+  so it needs just the anytoon checkout). `make setup` only prints a note
+  about them; the gates live on `make up` and `make up-credentials`, the
+  paths that build the images.
 - **A bare `docker compose` command does nothing**: it selected no profile —
   see the note at the end of §2.
 - **Every credentials purchase comes back PAID but `402 CLAIM_INVALID`**:
