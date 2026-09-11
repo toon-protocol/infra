@@ -38,7 +38,7 @@
 # cover-forward claim before every forwarded PREPARE leaves (ADR 0042 item 2),
 # so declaring the channel in [[client_channels]] makes this node's own client
 # edge admit that claim — and the delivery then carries a payer that is exactly
-# who paid THIS node: `solana:<channel_account>`, the hub. Per-hub rather than
+# who paid THIS node: `evm:<channel_id>`, the hub. Per-hub rather than
 # per-end-client bucketing is also the right shape for a wholesale hop, and it
 # is the only shape the end client's anonymity permits.
 #
@@ -50,11 +50,34 @@
 # untouched — it keeps [[peers]], the forwarded [[routes]] row, and the
 # [[peer_channels]] + [[pay_channels]] pair, and that asymmetry is legal
 # (the both-namespaces check is per-file). The hub MUST keep its
-# [[peer_channels]] row: a Solana claim's wire `programId` is read from it.
+# [[peer_channels]] row: it is what binds this peering's claims to the ANYONE
+# TokenNetwork's EIP-712 domain on the hub's side.
 #
-# Both ends must agree on [settlement.solana] program_id — the hub binds it
-# into the signed message (ADR 0053) and this node copies its own in when it
-# resolves the [[client_channels]] row. They do, below.
+# Both ends must agree on the channel's settlement contract — the hub binds the
+# TokenNetwork's EIP-712 domain into the signed balance proof (ADR 0024) and
+# this node verifies against the one its own [[client_channels]] row names.
+# They do, below.
+#
+# WHAT CHANGED WHEN THE HUB BECAME A DEALER
+# -----------------------------------------
+# This node's money is now ANYONE, settled on anvil, and that is the whole of
+# the difference from the Phase 1 shape this file used to describe. The hub's
+# client leg stays mock USDC on Solana; the hub converts between them at a live
+# Uniswap v3 TWAP (see conf/connector-relay.toml). Consequences here, in order
+# of how surprising they are:
+#
+#   * `[settlement.solana]` IS GONE. Not tidying: one token per chain per node
+#     is the rule, and a node holding BOTH tables would denominate an arriving
+#     claim by the chain its channel is on — so a client that opened a Solana
+#     channel here would be charged this file's `price` in uUSDC instead of in
+#     ANYONE base units, which is off by a factor of 10^12 in the client's
+#     favour. There is no per-route unit and there should not be one. The
+#     store and gas connectors still hold their Solana tables and still prove
+#     the payment_channel program loads.
+#   * `price` below is in ANYONE BASE UNITS, 18 decimals.
+#   * this node declares NO `[[tokens]]`, because it crosses no boundary: it
+#     terminates everything it is asked for, in the one token it holds. The
+#     dealing happens one hop upstream, which is the right place for it.
 
 client_edge_addr = "0.0.0.0:3000"
 state_dir = "/app/state"
@@ -83,15 +106,24 @@ btp_endpoint = "ws://127.0.0.1:3230/ilp/btp"
 # services, so they cannot drift from each other. (1) cannot be an env var (the
 # connector has no environment layer) and is therefore the derivation:
 #
-#   10000 base units / 10^6 (mock USDC decimals) = 0.01 = conf/anytoon.conf
+#   40000000000000000 base units / 10^18 (ANYONE decimals) = 0.04
 #
+# THE PRICE IS IN ANYONE NOW, and 0.04 ANYONE is 0.01 USDC at the rate this
+# sandbox deals at — the same money the route has always cost, said in the
+# currency this node is actually paid in. What does NOT follow it is the hub's
+# forwarded price: that is quoted in the CLIENT's money and has to carry an FX
+# buffer, so it is no longer this figure plus a fee and is not derivable from
+# this file at all. conf/connector-relay.toml owns that arithmetic.
+#
+# This node's own price stays EXACT, which is the point of putting the boundary
+# upstream: the app layer's three numbers are still one number, still checkable
+# by multiplication, and nothing here has to know a rate exists.
 # scripts/smoke-toon.mjs re-derives it from conf/anytoon.conf on every run and
-# asserts it against what this node ADVERTISES at GET /ilp, so a drift fails by
-# name rather than as an unexplained 402.
+# asserts it against what this node ADVERTISES at GET /ilp.
 [[routes]]
 prefix = "g.anyone.credentials"
 handler_url = "http://claim-minter:8080/"
-price = 10000
+price = 40000000000000000
 
 # The key document is FREE: a buyer needs the epoch key before it can blind
 # anything, and charging for it makes the protocol undiscoverable.
@@ -122,50 +154,56 @@ price = 0
 
 # ── The hub, as a client ─────────────────────────────────────────────────────
 # The same on-chain channel the hub names in its [[peer_channels]] and
-# [[pay_channels]] rows — opened and collateralised post-boot by the
-# open-toon-solana-channels init job, through the hub's own operator surface
-# (the payer side opens and deposits; the program's Deposit credits strictly by
-# signer). Declared HERE as a client channel, for the reason set out at the top
-# of this file.
+# [[pay_channels]] rows — opened and collateralised by the seed-toon-evm init
+# job with two ordinary contract calls from the hub's own settlement key (the
+# payer side opens and deposits). Declared HERE as a client channel, for the
+# reason set out at the top of this file.
 #
-# `counterparty` (singular) is the hub's SOLANA settlement public key — the key
-# whose signature this node accepts on the claim. `program_id` is NOT a field
-# here and writing one is a confusing shape-match failure, not a named error:
-# it is copied in from [settlement.solana] below. A config-declared client
-# channel carries no deposit floor, so nothing on the packet path reads the
-# chain for it.
+# `counterparty` (singular) is the hub's EVM settlement address — the key whose
+# signature this node accepts on the claim, and the channel's on-chain
+# participant, never the signer address a claim declares about itself. The EVM
+# client-channel shape is `channel_id` + `counterparty` + `chain_id` +
+# `token_network_address`; note that last spelling, which is NOT the
+# `token_network` a `[[peer_channels]]` row uses (these tables are untagged
+# unions with deny_unknown_fields, so a near-miss is "matched no variant"
+# rather than a named error). A config-declared client channel carries no
+# deposit floor, so nothing on the packet path reads the chain for it.
 #
-# Phase 1 settles this hop in the sandbox's existing 6-decimal mock USDC,
-# exactly like the relay-store and relay-gas peerings (Phase 2 — an 18-decimal
-# mock ANYONE leg under a USDC client leg — is blocked upstream on
-# toon-protocol/connector#1286 and is NOT attempted here).
+# THIS HOP NOW SETTLES ANYONE ON ANVIL. The channel is the ANYONE TokenNetwork's
+# (registry nonce 2), opened and collateralised by scripts/seed-toon-evm.sh with
+# `cast send` from the hub's own settlement key — the hub is the payer of this
+# peering, as it is of the other two.
 [[client_channels]]
-channel_account = "3ZA8DPi18Jkjn8pCQkX1ZFezSmYW7RZfdhkQVeyVPwez"
-counterparty = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
+channel_id = "0x94ab42f98c210488becb8fab3ccb790d8572fe91d1b50f93d70a30f02321f02f"
+counterparty = "0x61097BA76cD906d2ba4FD106E757f7Eb455fc295" # relay-connector EVM settlement
+chain_id = 31337
+token_network_address = "0x9f1ac54BEF0DD2f6f3462EA0fa94fC62300d3a8e"
 
+# The REAL mainnet ANYONE ERC-20 at its own mainnet address, its runtime
+# bytecode placed on anvil by scripts/seed-toon-evm-amm.sh. `decimals = 18` is
+# checked against the token's own `decimals()` at startup, and the registry
+# must resolve a TokenNetwork for it or this node refuses to start — so a green
+# boot here is itself the proof that the asset layer landed.
 [settlement.evm]
 rpc_url = "http://anvil:8545"
 contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
-token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
-decimals = 6
+token_address = "0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
+decimals = 18
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
-[settlement.solana]
-rpc_url = "http://solana-validator:8899"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
-token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
-decimals = 6
-
-[settlement.solana.key]
-key_file = "/app/data/settlement-solana.key"
+# NO [settlement.solana]. See the header: a second settlement table would give
+# this node a second unit, and an arriving claim is denominated by the chain
+# its channel is on — so a Solana client channel here would be charged this
+# file's ANYONE price as if it were uUSDC. The key file is still mounted and
+# still funded; nothing reads it.
 
 # Kept ON so the smoke test can read this payee's /claims and prove the
 # hub -> anytoon leg was actually paid, from the payee's own book. Because the
 # hub is a client here, its payments land in the CLIENT book, keyed
-# `solana:<channel_account>` (the client book chain-namespaces its channel ids;
-# the peer book does not) — which is what the smoke asserts.
+# `evm:<channel_id>` (the client book chain-namespaces its channel ids; the
+# peer book does not) — which is what the smoke asserts, in ANYONE base units.
 [operator]
 bearer_token_file = "/app/data/operator-bearer.token"
 write_keys_file = "/app/data/operator-write.keys"

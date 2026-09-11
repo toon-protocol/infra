@@ -195,7 +195,19 @@ services:
       - -c
       - |
         echo "Starting Anvil..."
-        anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10 --balance 10000 &
+        # --timestamp STARTS THE CHAIN 900 SECONDS IN THE PAST, and that is
+        # load-bearing rather than cosmetic. anvil's clock runs at wall speed
+        # from whatever genesis it is given, and `evm_increaseTime` shifts that
+        # offset permanently. seed-toon-evm-amm.sh consumes exactly 900s of
+        # increaseTime priming the Uniswap oracles (an observation is only
+        # written when a swap touches a pool, so history has to be walked
+        # forward), which brings the chain back to real time just as the
+        # connectors start. A chain left running EARLY would make every TWAP
+        # look permanently fresh; one left running LATE would make every one
+        # look permanently stale, and the ANYONE pair would refuse T00 from the
+        # first packet. See conf/amm-topology.conf (PRIME_SPAN_SECS).
+        anvil --host 0.0.0.0 --port 8545 --chain-id 31337 --accounts 10 --balance 10000 \
+          --timestamp $$(( $$(date +%s) - 900 )) &
         ANVIL_PID=$$!
 
         until cast client --rpc-url http://localhost:8545 2>/dev/null | grep -q 'anvil'; do
@@ -232,10 +244,18 @@ services:
         # account 9, nonces 0-1 so its addresses are deterministic regardless
         # of DeployLocal's shape): the OZ v5.5.0 ERC2771Forwarder + the
         # ERC-2771 probe target kind:5098 relays to.
+        # Then THE EVM ASSET LAYER, in the same shell and before the
+        # healthcheck can pass: the real mainnet ANYONE and WETH9 bytecode,
+        # ANYONE's TokenNetwork, real Uniswap v3, two seeded pools and 900
+        # seconds of primed oracle history. It runs here rather than as an
+        # init job because the hub and the anytoon node BOTH refuse to start
+        # unless ANYONE resolves a TokenNetwork, and the hub's rate poller has
+        # nothing to read until the pools exist.
         if forge script script/DeployLocal.s.sol:DeployLocalScript \
              --rpc-url http://localhost:8545 --broadcast --skip-simulation \
            && forge script /sandbox-extras/DeploySandboxExtras.s.sol:DeploySandboxExtrasScript \
-             --rpc-url http://localhost:8545 --broadcast --skip-simulation; then
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation \
+           && RPC_URL=http://localhost:8545 sh /sandbox-scripts/seed-toon-evm-amm.sh; then
           echo "Anvil ready with contracts deployed!"
         else
           echo "============================================================"
@@ -250,28 +270,40 @@ services:
     volumes:
       # The connector SIBLING checkout is required (documented in README.md).
       - ../../connector/packages/contracts:/contracts
-      # Sandbox-owned extras script, mounted OUTSIDE the project so docker
+      # Sandbox-owned extras scripts, mounted OUTSIDE the project so docker
       # never creates a mountpoint file in the connector checkout (forge's
       # out/cache/broadcast writes there happen either way, as documented).
       - ./contracts:/sandbox-extras:ro
+      # The EVM asset layer: its shell script, the numbers it builds from, and
+      # the committed mainnet/Uniswap bytecode it places.
+      - ./scripts:/sandbox-scripts:ro
+      - ./conf:/sandbox-conf:ro
+      - ./artifacts/evm:/sandbox-artifacts:ro
     ports:
       - '8545:8545'
     restart: unless-stopped
     logging: *chain-logging
     # Healthy means THE FULL DEPLOY LANDED, not merely that the RPC answers:
     # everything downstream (connectors, seed-toon-evm, gas-station) would
-    # otherwise race the deploy. Gated on the registry (DeployLocal) AND the
-    # ERC-2771 probe (DeploySandboxExtras — deployed last, so code there means
-    # the forwarder landed too). cast code returns 0x until a deploy lands and
-    # empty output on RPC failure, hence the -n checks.
+    # otherwise race the deploy. Three gates, in the order they are produced:
+    # the registry (DeployLocal), the ERC-2771 probe (DeploySandboxExtras), and
+    # — last and strongest — a live `observe()` over the ANYONE/WETH pool's
+    # 300-second TWAP window. That last one is the whole asset layer in one
+    # call: it can only answer if the token bytecode landed, the factory
+    # deployed, the pool was created and initialised, its observation
+    # cardinality was grown and 900 seconds of history were primed. Without it
+    # the hub would boot against a pool that reverts OLD, price NOTHING, and
+    # refuse every credentials purchase F02 with a green stack.
+    # cast code returns 0x until a deploy lands and empty output on RPC
+    # failure, hence the -n checks.
     healthcheck:
       test:
         - CMD-SHELL
-        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' || exit 1"
+        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' && cast call 0x8983f1366e1c0d20647c9a1b0cb46ce4c46e13c7 'observe(uint32[])(int56[],uint160[])' '[300,0]' --rpc-url http://localhost:8545 >/dev/null 2>&1 || exit 1"
       interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 15s
+      timeout: 10s
+      retries: 60
+      start_period: 20s
 
   # Fake Arweave node. Frozen upstream (repo archived) but still what the
   # ecosystem uses locally. Serves as the gateway's "trusted node" (envoy
@@ -596,8 +628,9 @@ services:
       solana-validator:
         condition: service_healthy
 
-  # One-shot: ETH + USDC for every settlement key (EVM leg — the client
-  # channel the smoke opens against the hub lives on anvil).
+  # One-shot: ETH + mock USDC + ANYONE for every settlement key, and the one
+  # EVM payment channel in this sandbox — the relay-anytoon peering, settled in
+  # ANYONE. (The client leg and the other two peerings settle on Solana.)
   seed-toon-evm:
     profiles: ['payments', 'full']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
@@ -608,6 +641,7 @@ services:
       KEYS_DIR: /keys
     volumes:
       - ./scripts/seed-toon-evm.sh:/seed/seed-toon-evm.sh:ro
+      - ./conf/amm-topology.conf:/sandbox-conf/amm-topology.conf:ro
       - ./keys/toon:/keys:ro
     depends_on:
       anvil:
@@ -639,6 +673,35 @@ services:
     depends_on:
       relay-connector:
         condition: service_healthy
+
+  # LONG-LIVED: the only thing in this sandbox that trades. A Uniswap v3 pool
+  # writes an oracle observation in `swap` and nowhere else, and anvil mines a
+  # block only when a transaction arrives — so without this loop the hub's
+  # ANYONE TWAP would be a frozen constant AND its `observed_at` (the head
+  # block's own timestamp) would stop advancing, taking the pair stale one
+  # `ttl_secs` later. It steers ANYONE/WETH as a bounded triangle wave and pins
+  # WETH/USDC; see scripts/swap-driver.sh and conf/amm-topology.conf.
+  #
+  # `full` ONLY, on purpose. The payments profile proves the payment layer, and
+  # its one converting route (g.anyone.credentials) has no anytoon node to
+  # reach there anyway — so it gets the pools (anvil builds them either way,
+  # because the hub cannot boot without ANYONE's TokenNetwork) but not the
+  # market. The hub will log a stale ANYONE pair a couple of minutes into a
+  # payments run; nothing on that profile's path reads it.
+  swap-driver:
+    profiles: ['full']
+    image: ghcr.io/foundry-rs/foundry:v1.8.1
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '/seed/swap-driver.sh']
+    environment:
+      RPC_URL: http://anvil:8545
+    volumes:
+      - ./scripts/swap-driver.sh:/seed/swap-driver.sh:ro
+      - ./conf/amm-topology.conf:/sandbox-conf/amm-topology.conf:ro
+    depends_on:
+      anvil:
+        condition: service_healthy
+    logging: *chain-logging
 
   # ── The apps ─────────────────────────────────────────────────────────────
 
@@ -953,7 +1016,7 @@ services:
 
   store-connector:
     profiles: ['full']
-    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
       - ./conf/connector-store.toml:/app/config/connector.toml:ro
@@ -983,7 +1046,7 @@ services:
 
   gas-connector:
     profiles: ['full']
-    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
       - ./conf/connector-gas.toml:/app/config/connector.toml:ro
@@ -1008,7 +1071,7 @@ services:
 
   anytoon-connector:
     profiles: ['full']
-    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
       # THE CONFIG FILE IS A VARIABLE, and the default is the committed one —
@@ -1059,7 +1122,7 @@ services:
   # loudly, so bring-up order matters for a deterministic first smoke).
   relay-connector:
     profiles: ['payments', 'full']
-    image: ghcr.io/toon-protocol/connector@sha256:2c1769f3ebe3d165d989b2ba185bb43d0bb344bc41844b25e08702cc7b74ade7 # rust-2026.08.28.1
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
     command: ['/app/config/connector.toml']
     volumes:
       - ./conf/connector-relay.toml:/app/config/connector.toml:ro

@@ -15,7 +15,7 @@
 //        - all three connector edges answer GET /ilp
 //   1. a real client (@toon-protocol/client — the proven payer from the
 //      connector repo's local/anyone and the pokerogue devnet) opens a
-//      payment channel on anvil against the relay-connector hub
+//      SOLANA payment channel, in mock USDC, against the relay-connector hub
 //   2. a PAID Nostr write to g.toon.relay reaches the relay through the hub,
 //      and a FREE NIP-01 read at :7100 returns the byte-identical event
 //   3. a PAID kind:5094 blob-store job addressed to g.toon.store, handed to
@@ -51,17 +51,24 @@
 //      CLIENT's address (the ERC-2771 property, read back on-chain)
 //   5. the money is asserted from the connectors' own books, because a
 //      packet's answer cannot tell you it was paid for — and PER SETTLEMENT
-//      LEG, because this sandbox's topology is cross-chain same-asset:
-//        - the client leg settles on an EVM channel on anvil (the hub's
-//          client-book claims ride the 0x… channel opened in step 1)
-//        - all three downstream legs settle on SOLANA payment_channel
-//          accounts (the anytoon one is booked as a CLIENT claim there
-//          rather than a peer claim — see conf/connector-anytoon.toml)
-//          (asserted live on the validator first — owner, participants,
-//          mint, Opened, the hub's collateral — then the payees' watermarks
-//          on exactly those channel accounts)
-//      Amounts are the same 6-decimal mock-USDC unit end to end; there is
-//      no conversion anywhere (FX is explicitly unsupported).
+//      LEG, IN EACH LEG'S OWN UNIT, because this topology is CROSS-ASSET:
+//        - the client leg settles mock USDC on a SOLANA payment_channel
+//          account (the channel the buyer opens in step 1), 6 decimals
+//        - the store and gas peerings settle mock USDC on SOLANA too, at
+//          par: same token, same scale, nothing converted
+//        - the anytoon peering settles ANYONE on an EVM channel on anvil,
+//          18 decimals, and the hub CONVERTS onto it at a live Uniswap v3
+//          TWAP. That leg is booked as a CLIENT claim at the anytoon node
+//          rather than a peer claim — see conf/connector-anytoon.toml
+//      So one number in this file is asserted EXACTLY (what the client paid
+//      the hub: a static configured price) and one is asserted with the
+//      inequality the design actually guarantees (what the hub paid the
+//      anytoon node: at least the downstream price, plus whatever the FX
+//      buffer left over).
+//   6. the rate is LIVE, not merely floating: GET /rates is polled at the
+//      top of the run and again at the bottom, and the ANYONE leg has to
+//      have MOVED between them — a frozen TWAP would pass every other
+//      assertion in this file.
 import { readFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -104,39 +111,90 @@ const FORWARDER = '0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35';
 const PROBE = '0xA15BB66138824a1c7167f5E85b957d04Dd34E468';
 const USDC_MINT = 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H';
 const HUB_SOL = '9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx';
+// The buyer's own Solana identity — SLIP-0010 m/44'/501'/0'/0' of the anvil
+// mnemonic below, which is what ToonClient derives at index 0. Committed here
+// AND in scripts/seed-toon-solana.mjs (which funds it), and asserted against
+// what the client actually derives in step 1: if the library's derivation path
+// ever moves, this fails by name instead of as an unfunded wallet.
+const BUYER_SOL = 'oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96';
 // The two SOLANA peering channels (PDAs the committed connector tomls name;
-// opened post-boot by the open-toon-solana-channels init job).
+// opened post-boot by the open-toon-solana-channels init job). The THIRD
+// peering, relay-anytoon, settles ANYONE on anvil — see ANYONE_CHANNEL.
 const SOLANA_CHANNELS = {
   'relay-store': { account: '4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7', peer: '8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe' },
   'relay-gas': { account: '4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T', peer: '5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q' },
-  'relay-anytoon': { account: '3ZA8DPi18Jkjn8pCQkX1ZFezSmYW7RZfdhkQVeyVPwez', peer: 'GyLJJtQ2nwLecKYFBe9JBiUg17SifxYHvbqBkarSUs6H' },
 };
-const HUB_CHANNEL_DEPOSIT = 100_000_000n; // what the open job puts behind each peering
+const HUB_CHANNEL_DEPOSIT = 100_000_000n; // what the open job puts behind each Solana peering
+// The relay-anytoon peering, on anvil, in ANYONE. keccak256(p1, p2, epoch 0)
+// with the participants sorted (ADR 0059); opened + collateralised by
+// scripts/seed-toon-evm.sh. The connector books it `evm:<channel_id>`.
+const ANYONE_CHANNEL = '0x94ab42f98c210488becb8fab3ccb790d8572fe91d1b50f93d70a30f02321f02f';
+const HUB_EVM = '0x61097BA76cD906d2ba4FD106E757f7Eb455fc295';
+const ANYTOON_EVM = '0x40Fc963A729c542424cD800349a7E4Ecc4896624';
+const ANYONE_CHANNEL_DEPOSIT = 100_000_000_000_000_000_000n; // 100 ANYONE
 
-// ── THE PRICE TRIPLE, re-derived from its single source of truth ──────────
-// conf/anytoon.conf is the `env_file` of BOTH the issuer and the claim minter,
-// so their two BUNDLE_PRICEs are one value and cannot drift. The connector's
-// route price is the third site and cannot read an env var (the connector has
-// no environment layer), so it is that decimal in BASE UNITS — and THAT is the
-// derivation asserted below against what the nodes actually advertise. A drift
-// otherwise surfaces as a 402 CLAIM_INVALID on every paid request, with
-// nothing naming the cause.
-const USDC_DECIMALS = 6;
-const PEER_FEE = 100n; // conf/connector-relay.toml, [[peers]] fee — the same for all three peerings
+// ── THE PRICES, re-derived from their single sources of truth ─────────────
+// There used to be a PRICE TRIPLE here, checkable by one multiplication: the
+// anytoon route price, the minter's BUNDLE_PRICE and the issuer's, all one
+// number in one unit, with the hub's forwarded price a fourth site equal to
+// the third plus a flat fee.
+//
+// THE CROSS-ASSET FLIP BROKE THE FOURTH SITE AND ONLY THE FOURTH. The anytoon
+// node is paid in ANYONE on anvil and its three-way coupling is untouched —
+// still one decimal in conf/anytoon.conf, still multiplied by 10^18, still
+// asserted below against what that node ADVERTISES. What cannot be a committed
+// derivation any more is the HUB's price: it charges its client uUSDC on a
+// Solana channel and pays anytoon in ANYONE, converting at a live Uniswap v3
+// TWAP that no file can know. So the hub quotes a STATIC price with an FX
+// buffer, and what this test asserts about it is the inequality the design
+// actually guarantees — read below, off GET /rates, at the live rate:
+//
+//     floor(hubPrice x liveRate) - peeringFee  >=  BUNDLE_PRICE x 10^18
+//
+// which is exactly the condition for a purchase to clear. It is checked at the
+// top of the run and would fail the same way whether the rate moved, the
+// spread changed, the fee changed or someone edited a price — which is the
+// point of asserting the inequality rather than any one of its terms.
+const ANYONE_DECIMALS = 18;
+// conf/connector-relay.toml's relay-anytoon [[peers]] row. In ANYONE base
+// units, because a fee is charged in the unit of the leg it buys carriage on,
+// and this one buys carriage on an 18-decimal one. (The store and gas peerings
+// still charge a flat 100 uUSDC; nothing here has to know that, because those
+// legs are at par and their figures are asserted as they arrive.)
+const ANYONE_PEER_FEE = 400_000_000_000_000n; // 0.0004 ANYONE
+// conf/connector-relay.toml's two forwarded ANYONE routes, in uUSDC. Static,
+// and deliberately generous: see that file for the headroom arithmetic.
+const HUB_CREDENTIALS_PRICE = 11_000n;
+const HUB_KEYS_PRICE = 110n;
+// conf/connector-relay.toml [rate_guards]
+const SPREAD_NUM = 30n, SPREAD_DEN = 10_000n;
 function decimalToBaseUnits(decimal, decimals) {
   const [whole, frac = ''] = String(decimal).trim().split('.');
   if (!/^\d+$/.test(whole) || !/^\d*$/.test(frac)) throw new Error(`not a decimal: ${decimal}`);
   if (frac.length > decimals) throw new Error(`${decimal} has more than ${decimals} decimal places`);
   return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0') || '0');
 }
-const BUNDLE_PRICE_DECIMAL = (() => {
-  const conf = readFileSync(join(ROOT, 'conf', 'anytoon.conf'), 'utf8');
-  const m = conf.match(/^\s*BUNDLE_PRICE\s*=\s*(\S+)\s*$/m);
-  if (!m) throw new Error('conf/anytoon.conf has no BUNDLE_PRICE line');
+function confValue(file, key) {
+  const conf = readFileSync(join(ROOT, 'conf', file), 'utf8');
+  const m = conf.match(new RegExp(`^\\s*${key}\\s*=\\s*(\\S+)\\s*$`, 'm'));
+  if (!m) throw new Error(`conf/${file} has no ${key} line`);
   return m[1];
-})();
-const BUNDLE_PRICE_UNITS = decimalToBaseUnits(BUNDLE_PRICE_DECIMAL, USDC_DECIMALS);
-const BUNDLE_PRICE_HUB = BUNDLE_PRICE_UNITS + PEER_FEE;
+}
+const BUNDLE_PRICE_DECIMAL = confValue('anytoon.conf', 'BUNDLE_PRICE');
+const BUNDLE_PRICE_UNITS = decimalToBaseUnits(BUNDLE_PRICE_DECIMAL, ANYONE_DECIMALS);
+// conf/amm-topology.conf — the same file the seed script and the swap driver
+// build the market from, so the pools this test reasons about are the pools
+// the connector quotes.
+const AMM = Object.fromEntries(
+  ['ANYONE_TOKEN', 'WETH_TOKEN', 'USDC_TOKEN', 'ANYONE_TOKEN_NETWORK', 'POOL_ANYONE_WETH',
+   'POOL_WETH_USDC', 'SANDBOX_AMM', 'TWAP_WINDOW_SECS', 'OBSERVATION_CARDINALITY',
+   'ANYONE_TARGET_TICK', 'ANYONE_BAND_TICKS', 'SWAP_INTERVAL_SECS']
+    .map((k) => [k, confValue('amm-topology.conf', k)]),
+);
+// GET /rates spells every asset lowercased and chain-namespaced.
+const ASSET_ANYONE = `evm:${AMM.ANYONE_TOKEN.toLowerCase()}`;
+const ASSET_USDC_EVM = `evm:${AMM.USDC_TOKEN.toLowerCase()}`;
+const ASSET_USDC_SOL = `solana:${USDC_MINT}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jstr = (o) => JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
@@ -185,18 +243,54 @@ function peerBookTotal(rows, onChannel) {
 // rather than its peer book: it declares that channel in [[client_channels]]
 // so the delivery carries an X-TOON-Payer for the claim minter (see
 // conf/connector-anytoon.toml's header for why that is forced). The client
-// book chain-namespaces its channel ids; the peer book does not.
-function clientBookOnChannel(rows, channelAccount) {
-  const key = `solana:${channelAccount}`;
+// book chain-namespaces its channel ids; the peer book does not — and that
+// namespace is now the assertion, because this leg moved to EVM: the figures
+// on it are ANYONE base units, not uUSDC.
+function clientBookOnChannel(rows, channelKey) {
   let top = 0n;
   for (const r of rows) {
     if (r.direction !== 'inbound' || r.book !== 'client') continue;
-    if (r.channel_id !== key) continue;
+    if (String(r.channel_id).toLowerCase() !== channelKey.toLowerCase()) continue;
     const a = BigInt(r.cumulative_amount ?? 0);
     if (a > top) top = a;
   }
   return top;
 }
+
+// ── the hub's rate table, as the hub itself reports it ────────────────────
+// GET /rates (bearer-gated, ADR 0071 / connector#1297) is the only surface in
+// the connector that MOVES with a live rate. GET /ilp does not and structurally
+// cannot: a route price is config, read straight out of the route table with
+// the rate table never consulted. So every floating assertion in this file goes
+// through here.
+//
+// Rows are ORDERED PAIRS, and only DECLARED ones: the static
+// solana-USDC -> evm-USDC row and the quoted ANYONE -> numeraire row. The pair
+// the packets actually convert, solana-USDC -> ANYONE, is COMPOSED at lookup
+// and appears nowhere — a composition is derived, and a refusal is not. So this
+// test composes it the same way the connector does (crates/connector-domain
+// rate_table.rs `lookup`): the `to` leg is read BACKWARDS and the spread is
+// applied ONCE, on top, from the composed pair's own guards.
+async function rates(node = 'relay-connector') {
+  const res = await fetch(`${edgeOf[node]}/rates`, { headers: { authorization: `Bearer ${bearer(node)}` } });
+  if (!res.ok) throw new Error(`${node} GET /rates -> ${res.status}`);
+  return res.json();
+}
+const rateRow = (rows, from, to) =>
+  rows.find((r) => String(r.from).toLowerCase() === from && String(r.to).toLowerCase() === to);
+// The rate the hub would actually deal `solana USDC -> ANYONE` at right now, as
+// an exact fraction: (par leg) x (ANYONE leg inverted) x (1 - spread).
+function dealtUsdcToAnyone(rows) {
+  const par = rateRow(rows, ASSET_USDC_SOL, ASSET_USDC_EVM);
+  const anyone = rateRow(rows, ASSET_ANYONE, ASSET_USDC_EVM);
+  if (!par?.rate || !anyone?.rate) return null;
+  // par: uUSDC(solana) -> uUSDC(evm);  anyone: ANYONE base -> uUSDC, so inverted
+  const num = BigInt(par.rate.numerator) * BigInt(anyone.rate.denominator) * (SPREAD_DEN - SPREAD_NUM);
+  const den = BigInt(par.rate.denominator) * BigInt(anyone.rate.numerator) * SPREAD_DEN;
+  return { num, den, anyone, par };
+}
+// What `floor(amount x rate) - fee` would forward onto the ANYONE peering.
+const forwardedAnyone = (uusdc, r) => (uusdc * r.num) / r.den - ANYONE_PEER_FEE;
 
 // ── Solana payment-channel account layout ─────────────────────────────────
 // Offsets from the connector's packages/solana-program/src/state.rs (see the
@@ -263,26 +357,86 @@ for (const [name, url] of EDGES) {
   ok(`${name}: ${desc.ilpAddresses?.join(',') ?? '(no addresses)'} — routes: ${routes}`);
 }
 
-// ── 0c. THE PRICE TRIPLE agrees, by derivation from one file ─────────────
-// This is the guard on the subsystem's sharpest hazard. The issuer verifies
-// the amount inside the minter's signed claim against its own BUNDLE_PRICE;
-// both read conf/anytoon.conf, so those two are one number. The connector's
-// route price is that number in base units, and the hub's is that plus the
-// peering fee — neither of which any code enforces. Asserted here, against
-// what the nodes actually SERVE, so a drift fails by name. An anytoon-
-// subsystem concern, so skipped under the payments profile (the anytoon
-// edge is not running there to be read).
+// ── 0c. the price of a bundle, on both sides of the boundary ─────────────
+// Two assertions of two different KINDS, and the difference between them is
+// the whole of what the cross-asset flip changed.
+//
+// (i)  THE ANYTOON EDGE IS EXACT. The issuer verifies the amount inside the
+//      minter's signed claim against its own BUNDLE_PRICE; both read
+//      conf/anytoon.conf, so those two are one number, and the connector's
+//      route price is that number in ANYONE base units. Nothing enforces the
+//      multiplication, so it is asserted here against what the node SERVES.
+// (ii) THE HUB'S PRICE IS AN INEQUALITY. It is quoted in the client's money
+//      for a route priced in someone else's, at a rate neither file knows. So
+//      what is checked is that the hub's static quote STILL COVERS the live
+//      market — computed from the hub's own GET /rates exactly as the
+//      forwarding path would compute it.
 if (!PAYMENTS_ONLY) {
-  step('0c. the BUNDLE_PRICE triple agrees (conf/anytoon.conf is the single source of truth)');
-  console.log(`  conf/anytoon.conf: BUNDLE_PRICE=${BUNDLE_PRICE_DECIMAL} -> ${BUNDLE_PRICE_UNITS} base units at ${USDC_DECIMALS}dp`);
+  step('0c. the bundle price: exact at the anytoon edge, sufficient at the hub');
+  console.log(`  conf/anytoon.conf: BUNDLE_PRICE=${BUNDLE_PRICE_DECIMAL} -> ${BUNDLE_PRICE_UNITS} base units at ${ANYONE_DECIMALS}dp (ANYONE)`);
   assert(advertised['anytoon-connector']?.['g.anyone.credentials'] === BUNDLE_PRICE_UNITS,
-    `anytoon-connector prices g.anyone.credentials at ${advertised['anytoon-connector']?.['g.anyone.credentials']} = BUNDLE_PRICE x 10^${USDC_DECIMALS} (${BUNDLE_PRICE_UNITS})`);
-  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials'] === BUNDLE_PRICE_HUB,
-    `the hub forwards it at ${advertised['relay-connector (hub)']?.['g.anyone.credentials']} = downstream ${BUNDLE_PRICE_UNITS} + fee ${PEER_FEE} (${BUNDLE_PRICE_HUB})`);
+    `anytoon-connector prices g.anyone.credentials at ${advertised['anytoon-connector']?.['g.anyone.credentials']} = BUNDLE_PRICE x 10^${ANYONE_DECIMALS} (${BUNDLE_PRICE_UNITS})`);
   assert(advertised['anytoon-connector']?.['g.anyone.credentials.keys'] === 0n,
     'anytoon-connector prices the key document at 0 — free at the issuing node');
-  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials.keys'] === PEER_FEE,
-    `the hub forwards the key document at ${advertised['relay-connector (hub)']?.['g.anyone.credentials.keys']} = downstream 0 + fee ${PEER_FEE} (not 0: a hub that charged nothing would still subtract its fee and R01 every request)`);
+  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials'] === HUB_CREDENTIALS_PRICE,
+    `the hub quotes g.anyone.credentials at ${advertised['relay-connector (hub)']?.['g.anyone.credentials']} uUSDC — a STATIC price in the client's own money (${HUB_CREDENTIALS_PRICE})`);
+  assert(advertised['relay-connector (hub)']?.['g.anyone.credentials.keys'] === HUB_KEYS_PRICE,
+    `the hub quotes the key document at ${advertised['relay-connector (hub)']?.['g.anyone.credentials.keys']} uUSDC (not 0: a hub that charged nothing would still subtract its ANYONE fee and R01 every request)`);
+}
+
+// ── 0d. the rate is LIVE, and the hub's quote covers it ──────────────────
+// The first of two polls; step 6 takes the second and requires movement
+// between them. Everything here reads the hub's own rate table, which is the
+// table the forwarding path converts against — not a second opinion about it.
+//
+// Runs under the payments profile too. The anytoon node is not up there, so
+// nothing on that profile's path converts, but the POOLS are (anvil builds
+// them either way — the hub cannot resolve its own ANYONE TokenNetwork
+// otherwise) and a hub that boots without pricing ANYONE is worth catching
+// wherever it happens.
+step('0d. the hub prices ANYONE off a LIVE Uniswap v3 TWAP');
+let ratesBefore = [];
+let dealtBefore = null;
+try {
+  ratesBefore = await rates();
+  console.log(`  GET /rates: ${ratesBefore.map((r) => `${r.from} -> ${r.to} ${r.state}`).join(' | ')}`);
+  const par = rateRow(ratesBefore, ASSET_USDC_SOL, ASSET_USDC_EVM);
+  const anyone = rateRow(ratesBefore, ASSET_ANYONE, ASSET_USDC_EVM);
+  assert(par?.state === 'live' && par.last_refreshed === null,
+    `the two mock USDCs are declared at par (${par?.rate?.numerator}/${par?.rate?.denominator}); a static row carries no last_refreshed and never goes stale`);
+  assert(anyone?.state === 'live' && typeof anyone.last_refreshed === 'string',
+    `ANYONE is OBSERVED, not declared: state=${anyone?.state}, last_refreshed=${anyone?.last_refreshed} (a null there would mean someone typed the rate in)`);
+  assert(anyone?.refused_refresh == null,
+    'no refresh has been refused by the max_move guard — the swap driver is the only thing trading');
+  dealtBefore = dealtUsdcToAnyone(ratesBefore);
+  if (dealtBefore === null) {
+    bad('the hub cannot price solana-USDC -> ANYONE: one of the two legs is missing from GET /rates');
+  } else {
+    // The composed pair is not on /rates; this is it, computed the way the
+    // connector computes it. Report it as a human price too.
+    const usdcPerAnyone = Number(BigInt(dealtBefore.anyone.rate.numerator) * 10n ** 18n
+      / BigInt(dealtBefore.anyone.rate.denominator)) / 1e6;
+    console.log(`  composed+spread: 1 uUSDC buys ${Number(dealtBefore.num) / Number(dealtBefore.den)} ANYONE base units`
+      + ` (1 ANYONE = ${usdcPerAnyone.toFixed(6)} USDC at the mid)`);
+    // THE ASSERTION THE WHOLE PRICING MODEL RESTS ON.
+    const wouldForward = forwardedAnyone(HUB_CREDENTIALS_PRICE, dealtBefore);
+    assert(wouldForward >= BUNDLE_PRICE_UNITS,
+      `the hub's static ${HUB_CREDENTIALS_PRICE} uUSDC still covers the live market:`
+      + ` floor(${HUB_CREDENTIALS_PRICE} x rate) - fee ${ANYONE_PEER_FEE} = ${wouldForward} >= ${BUNDLE_PRICE_UNITS}`
+      + ` (${(Number(wouldForward - BUNDLE_PRICE_UNITS) / Number(BUNDLE_PRICE_UNITS) * 100).toFixed(2)}% of FX buffer left)`);
+    assert(forwardedAnyone(HUB_KEYS_PRICE, dealtBefore) > 0n,
+      `and the free key document's ${HUB_KEYS_PRICE} uUSDC still clears the fee (forwards ${forwardedAnyone(HUB_KEYS_PRICE, dealtBefore)} > 0)`);
+    // The cap and the ceiling, from the same number rather than from a probe:
+    // a client cannot overpay a forwarded route (the edge refuses F03 above
+    // `price`), so the only packet that can reach this peering is the priced
+    // one, and this is what it weighs in the outgoing unit.
+    assert(wouldForward + ANYONE_PEER_FEE <= 1_000_000_000_000_000_000n,
+      `the converted packet (${wouldForward + ANYONE_PEER_FEE}) is inside the peering's declared max_packet_amount of 1e18 ANYONE base units — the default 1000000 would have refused it T04`);
+    assert(wouldForward + ANYONE_PEER_FEE < 2n ** 64n,
+      'and inside the outgoing leg\'s u64 ceiling (~18.4 ANYONE on an 18-decimal leg, ADR 0071)');
+  }
+} catch (e) {
+  bad(`GET /rates on the hub failed: ${e.message}`);
 }
 
 // ── 0b. the SOLANA peering channels are live on chain ────────────────────
@@ -295,7 +449,7 @@ if (!PAYMENTS_ONLY) {
 // Asserted under the `payments` profile too: the hub is the sole submitter and
 // signs against the peers' committed PUBLIC keys, so the accounts land whether
 // or not the counterparty connectors are running.
-step('0b. the three SOLANA peering channels are open and collateralised on the validator');
+step('0b. the peering channels are open and collateralised — two on SOLANA, one on ANVIL');
 for (const [label, { account, peer }] of Object.entries(SOLANA_CHANNELS)) {
   let ch = null;
   for (let i = 0; i < 45 && !ch; i++) {
@@ -315,8 +469,46 @@ for (const [label, { account, peer }] of Object.entries(SOLANA_CHANNELS)) {
     `${label}: the hub's own side holds ${hubDeposit} base units of collateral (>= ${HUB_CHANNEL_DEPOSIT})`);
 }
 
+// The third peering, on the other chain and in the other token. Same claim as
+// the Solana ones make: a peer claim's verdict never reads the chain, so a
+// topology whose channel was never opened rehearses exactly as green as one
+// whose channel is real. Read the ANYONE TokenNetwork's own storage instead.
+{
+  const provider = new JsonRpcProvider(ANVIL_URL);
+  try {
+    const tn = new EthersContract(AMM.ANYONE_TOKEN_NETWORK, [
+      'function token() view returns (address)',
+      'function channels(bytes32) view returns (uint256 settlementTimeout, uint8 state, uint256 closedAt, uint256 openedAt, address participant1, address participant2)',
+      'function participants(bytes32,address) view returns (uint256 deposit, uint256 nonce, uint256 transferredAmount)',
+    ], provider);
+    const [token, ch, hubSide] = await Promise.all([
+      tn.token(), tn.channels(ANYONE_CHANNEL), tn.participants(ANYONE_CHANNEL, HUB_EVM),
+    ]);
+    assert(token.toLowerCase() === AMM.ANYONE_TOKEN.toLowerCase(),
+      `relay-anytoon: the TokenNetwork at ${AMM.ANYONE_TOKEN_NETWORK} settles ANYONE (${token}) — a different contract from the mock-USDC one, because a TokenNetwork is per token`);
+    assert(Number(ch.state) === 1, `relay-anytoon: channel ${ANYONE_CHANNEL} is Opened (state ${ch.state})`);
+    const parts = [ch.participant1, ch.participant2].map((a) => a.toLowerCase()).sort();
+    assert(parts.join() === [HUB_EVM, ANYTOON_EVM].map((a) => a.toLowerCase()).sort().join(),
+      `relay-anytoon: participants are the hub and the anytoon node (${parts.join(', ')})`);
+    assert(hubSide.deposit >= ANYONE_CHANNEL_DEPOSIT,
+      `relay-anytoon: the hub's own side holds ${hubSide.deposit} base units of ANYONE behind its claims (>= ${ANYONE_CHANNEL_DEPOSIT})`);
+  } catch (e) {
+    bad(`relay-anytoon: could not read the ANYONE channel on anvil: ${e.message}`);
+  } finally {
+    provider.destroy();
+  }
+}
+
 // ── 1. a channel against the hub ─────────────────────────────────────────
-step('1. a payment channel on anvil against the hub');
+// THE BUYER PAYS USDC ON SOLANA. It used to pay on anvil, and the one line
+// that moved it is `chain: 'solana'` — the client picks its settlement out of
+// the node's own GET /ilp `settlements[]` by chain and signs an ed25519
+// balance proof over the ADR 0053 message instead of an EIP-712 one. The move
+// was forced rather than chosen: the hub's `[settlement.evm]` token is ANYONE
+// now, and one token per chain per node means an EVM client channel against
+// this hub is an ANYONE channel. USDC on Solana is the only place the buyer's
+// money can be.
+step('1. a mock-USDC payment channel ON SOLANA against the hub');
 // NOT under data/ — that tree is created root-owned by docker bind mounts.
 // .toon-client/ is host-owned, gitignored, wiped by `make clean` (its channel
 // watermark MUST die with the chain: a stale one refuses every later claim).
@@ -324,12 +516,18 @@ mkdirSync(join(ROOT, '.toon-client'), { recursive: true });
 const client = await ToonClient.create({
   connector: HUB,
   mnemonic: MNEMONIC,
-  chain: 'evm',
-  rpcUrl: ANVIL_URL,
+  chain: 'solana',
+  rpcUrl: RPC_URL,
   channelStore: join(ROOT, '.toon-client', 'channels.json'),
   deposit: 10_000_000n, // 10 USDC — plenty against ~1100/packet prices
   timeoutMs: 60_000,
 });
+// The client derives this from the mnemonic; scripts/seed-toon-solana.mjs
+// funded it from a committed copy of the same string. If the library's
+// derivation path ever moves, the failure is HERE and says so, rather than a
+// ChannelFundingError about a wallet nobody can find.
+assert(client.identity?.solanaPublicKey === BUYER_SOL,
+  `the buyer is ${client.identity?.solanaPublicKey} — the address seed-toon-solana funded (${BUYER_SOL})`);
 const opened = await client.channel.open({ deposit: 10_000_000n });
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 
@@ -339,7 +537,7 @@ const storeBefore = PAYMENTS_ONLY ? 0n
 const gasBefore = PAYMENTS_ONLY ? 0n
   : peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
 const anytoonBefore = PAYMENTS_ONLY ? 0n
-  : clientBookOnChannel(await claims('anytoon-connector'), SOLANA_CHANNELS['relay-anytoon'].account);
+  : clientBookOnChannel(await claims('anytoon-connector'), `evm:${ANYONE_CHANNEL}`);
 console.log(PAYMENTS_ONLY
   ? `  books before: hub client=${hubBefore}`
   : `  books before: hub client=${hubBefore}, store peer=${storeBefore}, gas peer=${gasBefore}, anytoon client=${anytoonBefore}`);
@@ -388,7 +586,7 @@ if (read) {
 // book — small, but it is a real signed claim on the anvil channel opened in
 // step 1, which is the whole point.
 if (PAYMENTS_ONLY) {
-  step('5. the hub’s own book says the write was PAID — client leg, on EVM');
+  step('5. the hub’s own book says the write was PAID — client leg, on SOLANA');
   let rows = [];
   let hubNow = hubBefore;
   for (let i = 0; i < 20 && hubNow - hubBefore < 1n; i++) {
@@ -399,12 +597,12 @@ if (PAYMENTS_ONLY) {
   assert(hubNow - hubBefore >= 1n,
     `hub client book advanced by ${hubNow - hubBefore} (>= 1, the paid relay write)`);
   const payChannels = [...new Set(rows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
-  assert(payChannels.length > 0 && payChannels.every((c) => /^(evm:)?0x[0-9a-f]{64}$/i.test(c)),
-    `client leg settles on EVM: hub client-book channels ${payChannels.join(', ')} are anvil channel ids`);
-  assert(payChannels.some((c) => c.replace(/^evm:/, '').toLowerCase() === String(opened.channelId).toLowerCase()),
+  assert(payChannels.length > 0 && payChannels.every((c) => /^solana:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c)),
+    `client leg settles on SOLANA: hub client-book channels ${payChannels.join(', ')} are payment_channel accounts, not anvil ids`);
+  assert(payChannels.some((c) => c === `solana:${opened.channelId}`),
     `and include the channel the client opened in step 1 (${opened.channelId})`);
   console.log(failures === 0
-    ? '\n\x1b[32mTOON PAYMENTS SMOKE OK: contracts + payment_channel live, the hub’s two Solana peering channels open and collateralised, an EVM channel opened against the hub, a paid write routed through it and journaled as a claim on that channel.\x1b[0m'
+    ? '\n\x1b[32mTOON PAYMENTS SMOKE OK: contracts + payment_channel live, the ANYONE asset layer deployed and quoting a live TWAP, the hub’s two Solana peering channels and its ANYONE channel on anvil open and collateralised, a Solana USDC channel opened against the hub, a paid write routed through it and journaled as a claim on that channel.\x1b[0m'
     : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
   process.exit(failures === 0 ? 0 : 1);
 }
@@ -709,11 +907,15 @@ if (freeClient) {
     `an UNPAID request to g.anyone.credentials is refused (${unpaid.code ?? `fulfilled ${unpaid.status}`})`);
 }
 
-// (iv) THE ROUTED PURCHASE. One client, one channel — the EVM channel opened
-//      against the HUB in step 1 — buying from a node it has no channel with,
-//      over the relay-anytoon peering. Sealed to the anytoon node because that
-//      is where the envelope is opened; paid at the hub, which forwards
-//      price - fee onward.
+// (iv) THE ROUTED PURCHASE, AND THE CROSSING. One client, one channel — the
+//      SOLANA channel opened against the HUB in step 1 — buying from a node it
+//      has no channel with, over a peering that settles a DIFFERENT TOKEN ON A
+//      DIFFERENT CHAIN. Sealed to the anytoon node because that is where the
+//      envelope is opened; paid at the hub in uUSDC, which converts at the
+//      live TWAP and forwards `floor(amount x rate) - fee` in ANYONE. Nothing
+//      on the wire says any of that: no packet, header or claim gained an
+//      asset field, because a claim was always denominated by the channel it
+//      is written against.
 const credPrice = await client.price('g.anyone.credentials');
 assert(credPrice !== null, `the hub prices g.anyone.credentials (${jstr(credPrice)})`);
 if (epoch !== null) {
@@ -740,22 +942,28 @@ if (epoch !== null) {
     assert(bundle.epoch === epoch, `the issuer signed a bundle under epoch ${bundle.epoch}`);
     assert(Array.isArray(bundle.blind_signatures) && bundle.blind_signatures.length === 10,
       `and returned ${bundle.blind_signatures?.length} blind signatures`);
-    assert(BigInt(bought.claim?.amount ?? 0) === BUNDLE_PRICE_HUB,
-      `the client paid the hub ${bought.claim?.amount} for it (= ${BUNDLE_PRICE_UNITS} + fee ${PEER_FEE})`);
+    // EXACT, and the only number in this flow that can be: the client pays
+    // the hub's advertised price, in the client's own money, on the client's
+    // own channel. What the hub then pays onward is rate-dependent and is
+    // asserted in step 5 with the inequality it actually satisfies.
+    assert(BigInt(bought.claim?.amount ?? 0) === HUB_CREDENTIALS_PRICE,
+      `the client paid the hub exactly ${bought.claim?.amount} uUSDC for it (the hub's static quote, ${HUB_CREDENTIALS_PRICE})`);
   }
 } else {
   bad('no epoch from the key document — skipping the routed purchase');
 }
 
-// ── 5. the money, PER LEG ────────────────────────────────────────────────
-// Cross-chain, same-asset: the client leg settles on the anvil (EVM)
-// channel the client opened in step 1; all three downstream legs settle on the SOLANA
-// channel accounts asserted on-chain in step 0b. Amounts are the same
-// 6-decimal USDC unit end to end — no conversion anywhere.
-step('5. the connectors’ own books say everything was PAID — per settlement leg');
+// ── 5. the money, PER LEG, IN EACH LEG'S OWN UNIT ────────────────────────
+// Three legs, two chains, two tokens, and the whole point of asserting them
+// separately: the client leg is mock USDC on a Solana payment_channel account
+// (6 decimals), the store and gas legs are the same token at par on their own
+// Solana accounts, and the anytoon leg is ANYONE on an anvil channel (18
+// decimals). Nothing on the wire said so — each figure is denominated by the
+// channel it was written against and always was.
+step('5. the connectors’ own books say everything was PAID — per settlement leg, in each leg’s own unit');
 // Claims are journaled on the far side of the same round trip; poll briefly.
 let hubRows = [], hubAfter = hubBefore, storeAfter = storeBefore, gasAfter = gasBefore, anytoonAfter = anytoonBefore;
-const HUB_EXPECTED = 1n + 9n * 1100n + BUNDLE_PRICE_HUB;
+const HUB_EXPECTED = 1n + 9n * 1100n + HUB_CREDENTIALS_PRICE;
 for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED || storeAfter - storeBefore < 3000n
     || gasAfter - gasBefore < 6000n || anytoonAfter - anytoonBefore < BUNDLE_PRICE_UNITS); i++) {
   await sleep(500);
@@ -763,38 +971,102 @@ for (let i = 0; i < 20 && (hubAfter - hubBefore < HUB_EXPECTED || storeAfter - s
   hubAfter = clientBookTotal(hubRows);
   storeAfter = peerBookTotal(await claims('store-connector'), SOLANA_CHANNELS['relay-store'].account);
   gasAfter = peerBookTotal(await claims('gas-connector'), SOLANA_CHANNELS['relay-gas'].account);
-  anytoonAfter = clientBookOnChannel(await claims('anytoon-connector'), SOLANA_CHANNELS['relay-anytoon'].account);
+  anytoonAfter = clientBookOnChannel(await claims('anytoon-connector'), `evm:${ANYONE_CHANNEL}`);
 }
-// Client leg (EVM): ten paid packets entered the hub's client edge — relay
-// write (1), store blob (>= 1100), the brokered ArNS ceremony's five
-// (kind:5096 fee-payer quote, kind:5095 op=prepare, kind:5096 quote with
+// Client leg (SOLANA, uUSDC): eleven paid packets entered the hub's client
+// edge — relay write (1), store blob (>= 1100), the brokered ArNS ceremony's
+// five (kind:5096 fee-payer quote, kind:5095 op=prepare, kind:5096 quote with
 // draft, kind:5096 execute, kind:5095 op=buy — >= 1100 each), 5096 quote
-// (1100), 5098 quote (1100), 5098 execute (1100) — and every client-book
-// claim rides the EVM channel opened on anvil in step 1.
-// …plus the credentials bundle (10100 = 10000 + fee), for eleven in all.
+// (1100), 5098 quote (1100), 5098 execute (1100), and the credentials bundle
+// (11000, the hub's static cross-asset quote).
 assert(hubAfter - hubBefore >= HUB_EXPECTED,
-  `hub client book advanced by ${hubAfter - hubBefore} (>= ${HUB_EXPECTED}, the eleven packets' prices)`);
-// The hub's book keys a client channel as `evm:0x<64 hex>` — the chain
-// family prefix plus the anvil channel id.
+  `hub client book advanced by ${hubAfter - hubBefore} uUSDC (>= ${HUB_EXPECTED}, the eleven packets' prices)`);
+// The hub's book keys a client channel by chain namespace, and THAT is the
+// assertion: a `solana:` key is the buyer paying in mock USDC. An `evm:` key
+// here would mean the buyer had opened an ANYONE channel by accident and been
+// charged uUSDC prices in a token worth 10^12 times more per base unit.
 const clientChannels = [...new Set(hubRows.filter((r) => r.book === 'client' && r.direction === 'inbound').map((r) => r.channel_id))];
-assert(clientChannels.length > 0 && clientChannels.every((c) => /^(evm:)?0x[0-9a-f]{64}$/i.test(c)),
-  `client leg settles on EVM: hub client-book channels ${clientChannels.join(', ')} are anvil channel ids`);
-assert(clientChannels.some((c) => c.replace(/^evm:/, '').toLowerCase() === String(opened.channelId).toLowerCase()),
+assert(clientChannels.length > 0 && clientChannels.every((c) => /^solana:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c)),
+  `client leg settles on SOLANA: hub client-book channels ${clientChannels.join(', ')} are payment_channel accounts`);
+assert(clientChannels.some((c) => c === `solana:${opened.channelId}`),
   `and include the channel the client opened in step 1 (${opened.channelId})`);
-// Peer legs (SOLANA): the payees' watermarks advanced ON the Solana channel
-// accounts — the totals above were already restricted to exactly those ids.
+// Store and gas legs (SOLANA, uUSDC): at par, so these are the same integers
+// that entered the hub less its flat fee — no conversion anywhere on them.
 assert(storeAfter - storeBefore >= 3000n,
-  `store peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
+  `store peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-store'].account} advanced by ${storeAfter - storeBefore} uUSDC (>= 3000: 5094 blob + 5095 prepare + 5095 buy)`);
 assert(gasAfter - gasBefore >= 6000n,
-  `gas peer leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
-// The credentials hop, both legs of the one purchase: the client paid the hub
-// 10100 (asserted in step 4c off the claim the client itself holds), and the
-// hub paid the anytoon node 10000 of it — the fee is the hub's, and the
-// downstream's own price is what lands.
-assert(anytoonAfter - anytoonBefore >= BUNDLE_PRICE_UNITS,
-  `anytoon leg settles on SOLANA: watermark on channel ${SOLANA_CHANNELS['relay-anytoon'].account} advanced by ${anytoonAfter - anytoonBefore} (>= ${BUNDLE_PRICE_UNITS}: one credentials bundle at hub price ${BUNDLE_PRICE_HUB} minus fee ${PEER_FEE})`);
+  `gas peer leg settles on SOLANA at par: watermark on channel ${SOLANA_CHANNELS['relay-gas'].account} advanced by ${gasAfter - gasBefore} uUSDC (>= 6000: 5096 fee-payer quote + 5096 draft quote + 5096 execute + 5096 quote + 5098 quote + 5098 execute)`);
+
+// ── the crossing itself ─────────────────────────────────────────────────
+// The one purchase, seen from both sides of the boundary. The client paid the
+// hub exactly 11000 uUSDC (step 4c, off the claim the client itself holds);
+// the hub paid the anytoon node some number of ANYONE base units that no file
+// could have predicted. Three things are true of that number and all three are
+// checked, because any one of them alone would pass on a broken conversion:
+//   * it is ~10^12 times bigger than the uUSDC figure — a hop that forwarded
+//     the arriving integer would be wrong by exactly that factor and is the
+//     failure this whole assertion exists to catch
+//   * it is at least the downstream's own price
+//   * it is what the LIVE rate says it should be, within the width of the
+//     driver's band — computed from the same GET /rates the hub converts
+//     against, not from a constant
+const crossed = anytoonAfter - anytoonBefore;
+assert(crossed >= BUNDLE_PRICE_UNITS,
+  `anytoon leg settles ANYONE ON ANVIL: client book on channel ${ANYONE_CHANNEL} advanced by ${crossed} base units`
+  + ` (>= ${BUNDLE_PRICE_UNITS}, the bundle's own price; the surplus is the hub's FX buffer arriving as a gift)`);
+assert(crossed > HUB_CREDENTIALS_PRICE * 1_000_000_000n,
+  `and it is a CONVERTED figure, not a carried one: ${crossed} against the ${HUB_CREDENTIALS_PRICE} uUSDC that arrived`);
+if (dealtBefore !== null) {
+  // Bounds rather than an equality: the rate moved while the packet was in
+  // flight, on purpose. The driver's band is +/-ANYONE_BAND_TICKS (~2%), so
+  // allow 5% either way of what the pre-flight rate predicted.
+  const predicted = forwardedAnyone(HUB_CREDENTIALS_PRICE, dealtBefore);
+  const lo = predicted * 95n / 100n, hi = predicted * 105n / 100n;
+  assert(crossed >= lo && crossed <= hi,
+    `and it matches the live rate: ${crossed} is within 5% of the ${predicted} the rate read in step 0d predicted`
+    + ' (the hub converted at a price that moved under it while the packet was in flight)');
+}
+
+// ── 6. the rate is LIVE ─────────────────────────────────────────────────
+// Everything above would pass against a frozen TWAP: a static rate converts
+// just as correctly as a moving one. This is the step that says the market is
+// real. The hub's poller refreshes every ttl/3 = 40s and the swap driver moves
+// the 300-second TWAP continuously, so the run's own duration is normally
+// enough; if it was not, wait.
+step('6. the ANYONE rate MOVED while this test ran — a live TWAP, not a decorated constant');
+{
+  const leg = (rows) => rateRow(rows, ASSET_ANYONE, ASSET_USDC_EVM);
+  const before = leg(ratesBefore);
+  let after = null;
+  for (let i = 0; i < 30; i++) {
+    after = leg(await rates().catch(() => []));
+    if (after?.last_refreshed && after.last_refreshed !== before?.last_refreshed) break;
+    await sleep(5000);
+  }
+  if (!before?.rate || !after?.rate) {
+    bad('could not read the ANYONE leg from GET /rates at both ends of the run');
+  } else {
+    assert(after.state === 'live',
+      `the ANYONE pair is still live at the end of the run (state ${after.state}) — the swap driver kept blocks coming, so nothing aged past ttl_secs`);
+    assert(after.last_refreshed !== before.last_refreshed,
+      `the poller took a new observation: ${before.last_refreshed} -> ${after.last_refreshed}`);
+    // Fractions, compared by cross-multiplication: no floats on this path.
+    const bn = BigInt(before.rate.numerator), bd = BigInt(before.rate.denominator);
+    const an = BigInt(after.rate.numerator), ad = BigInt(after.rate.denominator);
+    const moved = bn * ad !== an * bd;
+    const ppm = Number((an * bd * 1_000_000n) / (bn * ad)) - 1_000_000;
+    assert(moved,
+      `and the PRICE moved with it: ${bn}/${bd} -> ${an}/${ad} (${(ppm / 10_000).toFixed(3)}%), which only a pool being traded can do`);
+    // Still bounded, which is what lets the hub quote a static price at all.
+    const dealtAfter = dealtUsdcToAnyone(await rates().catch(() => []));
+    if (dealtAfter) {
+      assert(forwardedAnyone(HUB_CREDENTIALS_PRICE, dealtAfter) >= BUNDLE_PRICE_UNITS,
+        `and it is still inside the hub's FX buffer: the static ${HUB_CREDENTIALS_PRICE} uUSDC would still forward ${forwardedAnyone(HUB_CREDENTIALS_PRICE, dealtAfter)} >= ${BUNDLE_PRICE_UNITS}`);
+    }
+  }
+}
 
 console.log(failures === 0
-  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store, gas station and the Anyone credentials issuer (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay, blind-signed credentials bundle) — client leg settled on EVM, all three peer legs settled on SOLANA payment channels, same USDC unit throughout.\x1b[0m'
+  ? '\n\x1b[32mTOON SMOKE OK: paid routing through the relay hub to store, gas station and the Anyone credentials issuer (blob store, brokered ArNS spawn+buy, Solana quote + EVM ERC-2771 relay, blind-signed credentials bundle) — buyer paid mock USDC on a SOLANA channel, store and gas legs settled at par on Solana, and the credentials leg CROSSED A DENOMINATION BOUNDARY into ANYONE on anvil at a live Uniswap v3 TWAP.\x1b[0m'
   : `\n\x1b[31m${failures} assertion(s) failed.\x1b[0m`);
 process.exit(failures === 0 ? 0 : 1);
