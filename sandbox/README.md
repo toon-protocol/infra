@@ -38,10 +38,12 @@ Four layers, one compose project:
   on the local validator resolve at `http://<name>.ar.localhost:3000/`.
 - **TOON payment layer** — four ILP connectors: the **hub**
   (`relay-connector`) and three peered connectors, with **real,
-  collateralised payment channels**. The client leg settles USDC on anvil;
-  all three peering legs settle USDC over Solana `payment_channel` accounts.
-  Same 6-decimal unit end to end — conversion/FX is explicitly out of scope
-  and unsupported.
+  collateralised payment channels** — and a **denomination boundary**. The
+  client leg and two of the three peerings settle 6-decimal mock USDC over
+  Solana `payment_channel` accounts, at par. The third settles **ANYONE** on
+  anvil (the real 18-decimal mainnet ERC-20, at its own mainnet address), and
+  the hub converts onto it at a **live Uniswap v3 TWAP** read off pools this
+  sandbox deploys and trades (§6.7).
 - **TOON apps** — the relay (paid Nostr writes), the store (paid Arweave
   uploads + brokered ArNS buys), the gas station (pays your Solana rent or
   relays your EVM meta-tx), and the **Anyone Protocol credentials issuer**
@@ -58,8 +60,16 @@ Everything can be reached through the hub by ILP address:
 | `g.toon.relay.ephemeral` | ephemeral write | 0 |
 | `g.toon.store` | blob store (kind:5094), ArNS broker (kind:5095) | 1100 base + 10/KiB |
 | `g.toon.gastation` | gas station (kind:5096 Solana, kind:5098 EVM) | 1100 |
-| `g.anyone.credentials` | Anyone credentials bundle (`POST v1/bundles`) | 10100 |
-| `g.anyone.credentials.keys` | the issuer's epoch key document (`GET current`) | 100 (**0** at `anytoon-connector`'s own edge) |
+| `g.anyone.credentials` | Anyone credentials bundle (`POST v1/bundles`) | 11000 ⇄ |
+| `g.anyone.credentials.keys` | the issuer's epoch key document (`GET current`) | 110 ⇄ (**0** at `anytoon-connector`'s own edge) |
+
+⇄ marks the two routes that **cross a denomination boundary**. Their hub price
+is in µUSDC like every other row, but downstream they are priced in ANYONE
+(`0.04` and `0`) and the hub converts at a rate that moves. A static price
+against a floating rate has to carry an FX buffer, so these two are quoted
+*generously* rather than derived: 11000 covers a 0.04 ANYONE bundle plus the
+hop's fee with ~9% to spare, and the arithmetic behind that figure is written
+out in `conf/connector-relay.toml`. See §6.7.
 
 What `make smoke` proves on every run — all flows paid, all entering at the
 hub's edge:
@@ -80,8 +90,13 @@ hub's edge:
    Anyone issuer (the free epoch key document first, then one routed
    purchase that comes back blind-signed — plus the proof that the free
    route cannot be walked into the issuer's paid root). The connectors' own
-   claim books are asserted per leg: the client leg on the anvil channel,
-   all three peering legs on the committed Solana channel accounts.
+   claim books are asserted per leg **and in each leg's own unit**: the
+   client leg on the buyer's Solana channel in µUSDC, the store and gas legs
+   at par on their Solana channels, and the credentials leg in ANYONE base
+   units on an anvil channel — ~10^12 times the integer that arrived, which
+   is what a real conversion looks like. The smoke also polls `GET /rates` at
+   both ends of the run and requires the ANYONE rate to have **moved**: every
+   other assertion would pass against a frozen TWAP.
 
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
@@ -162,32 +177,43 @@ make up-payments     # docker compose --profile payments up -d --build
 make smoke-payments  # payment-layer proof only
 ```
 
-Seven services instead of twenty-one:
+Seven services instead of twenty-nine:
 
 | in `payments` | why |
 |---|---|
-| `anvil` | the CLIENT leg settles here (EVM mock USDC) |
-| `solana-validator` | the PEER legs settle here; carries `payment_channel` |
-| `seed-toon-evm` | ETH + mock USDC for every settlement key |
+| `anvil` | the ANYONE asset layer lives here — and the hub cannot boot without it (§6.7) |
+| `solana-validator` | the client leg and two peer legs settle here; carries `payment_channel` |
+| `seed-toon-evm` | ETH + mock USDC + ANYONE for every settlement key, and the one EVM peering channel |
 | `seed-toon-solana` | the Solana mock USDC mint, ATAs and SOL |
 | `relay` | `g.toon.relay` is the hub's only TERMINATED route — the one destination a paid packet can reach with no peer running |
 | `relay-connector` | the hub itself, client edge on **3200** |
-| `open-toon-solana-channels` | opens + collateralises the hub's two Solana channels |
+| `open-toon-solana-channels` | opens + collateralises the hub's two Solana peering channels |
 
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
-`localstack`, `seed-gateway-block`, `seed-solana`), the `store` and
-`gas-station` apps, and the two peering connectors that front them
-(`store-connector`, `gas-connector`).
+`localstack`, `seed-gateway-block`, `seed-solana`), the `store`,
+`gas-station` and credentials-issuer apps, the three peering connectors that
+front them (`store-connector`, `gas-connector`, `anytoon-connector`), and
+`swap-driver`.
 
-The hub still LOADS both peerings under this profile — nothing about its
-config changes — so `g.toon.store` and `g.toon.gastation` are still priced and
-routed, they simply answer `T01` with nobody on the far side. `g.toon.relay`
-(price 1) and `g.toon.relay.ephemeral` (free) work exactly as in the full
-stack, which is what `make smoke-payments` proves: contracts + program live,
-both Solana peering channels open and collateralised on the validator, an EVM
-channel opened against the hub, a paid write routed through it and journaled
-as a claim on that channel.
+The hub still LOADS all three peerings under this profile — nothing about its
+config changes — so `g.toon.store`, `g.toon.gastation` and
+`g.anyone.credentials` are still priced and routed, they simply answer `T01`
+with nobody on the far side. `g.toon.relay` (price 1) and
+`g.toon.relay.ephemeral` (free) work exactly as in the full stack, which is
+what `make smoke-payments` proves: contracts + program live, the ANYONE asset
+layer deployed and quoting a live TWAP, both Solana peering channels and the
+ANYONE channel on anvil open and collateralised, a Solana USDC channel opened
+against the hub, a paid write routed through it and journaled as a claim on
+that channel.
+
+**One thing is deliberately absent here: the market.** `swap-driver` is a
+`full`-profile service, so under `payments` nothing trades, anvil mines
+nothing, and the ANYONE rate goes **stale** a couple of minutes in — the hub
+logs it and `make smoke-payments` tolerates it by name. Nothing on this
+profile's path converts, so nothing on this profile's path cares. The pools
+are still built (the hub cannot resolve its own ANYONE `TokenNetwork`
+otherwise) and the smoke still requires that they priced at least once.
 
 `make down`, `make clean`, `make logs` and `make ps` work the same either way.
 
@@ -274,7 +300,7 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | service | what | host port |
 |---|---|---|
 | `solana-validator` | agave test validator with AR.IO's five Anchor programs + Metaplex Core + the TOON `payment_channel` program preloaded at genesis, 2MB NameRegistry account preloaded | 8899 (RPC), 8900 (WS) |
-| `anvil` | local EVM chain (chain-id 31337) with the connector's settlement contracts auto-deployed (MockERC20 USDC, TokenNetworkRegistry, TokenNetwork) + the sandbox's ERC-2771 extras | 8545 |
+| `anvil` | local EVM chain (chain-id 31337): the connector's settlement contracts (MockERC20 USDC, TokenNetworkRegistry, TokenNetwork), the sandbox's ERC-2771 extras, and **the ANYONE asset layer** — real mainnet ANYONE + WETH9 bytecode, real Uniswap v3, two seeded pools with primed oracles (§6.7) | 8545 |
 | `arlocal` | fake Arweave node (the gateway's "trusted node") | 1984 |
 | `envoy` + `core` + `redis` | AR.IO gateway (ar-io-node r83; service definitions vendored, images pinned to r83's SHAs — no ar-io-node checkout needed) | 3000 (gateway), 3004 (core direct) |
 | `upload-service` + `fulfillment-service` + `upload-service-pg` + `localstack` | Turbo bundler stack | 5100 (upload), 4566 (localstack) |
@@ -288,30 +314,46 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `issuer` | the **upstream** `anyone-protocol/credentials-issuer`, unmodified — blind-signs credential bundles, refuses without a signed `X-Payment-Claim` | none (unpublished) |
 | `claim-minter` | turns the connector's `X-TOON-Payer` attribution into that signed claim; proxies `POST /v1/bundles` and nothing else. Built from the anytoon sibling checkout | none (unpublished) |
 | `issuer-postgres`, `issuer-redis` | the issuer's own datastores (issuance records, idempotency, rate limits) | none (unpublished) |
+| `swap-driver` | trades both Uniswap pools every 15s so the hub's ANYONE TWAP is genuinely live and genuinely bounded (§6.7). `full` only | none |
 | `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `seed-toon-evm`, `open-toon-solana-channels`, `issuer-keys`, `issuer-migrate` | one-shot idempotent init jobs | — |
 
 ### Payment topology
 
 ```
 smoke test / any client (host)
-   │ POST /ilp (paid)                       ┌──────────────────────────────┐
-   ▼                                        │  ws://localhost:7100 (free)  │
+   │ POST /ilp (paid)   — pays uUSDC on a SOLANA channel
+   ▼                                        ┌──────────────────────────────┐
 relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ relay reads┘
    │        (hub)      ── g.toon.relay.ephemeral ─▶ relay:3100/write-ephemeral
+   │                      (terminated here; ws://localhost:7100 reads free)
    ├─ g.toon.store ──[peering relay-store]──▶ store-connector :3210
-   │        (settles on SOLANA)                 └─▶ store:3300/store (kind:5094/5095)
+   │        (uUSDC on SOLANA, at par)           └─▶ store:3300/store (kind:5094/5095)
    ├─ g.toon.gastation ──[peering relay-gas]──▶ gas-connector :3220
-   │        (settles on SOLANA)                 └─▶ gas-station:3300/gas (kind:5096 + 5098)
+   │        (uUSDC on SOLANA, at par)           └─▶ gas-station:3300/gas (kind:5096 + 5098)
    └─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
-            (settles on SOLANA)                 ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
-                                                └─▶ issuer:3000/v1/keys/              (free)
+       *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
+       floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
+                 ▲
+                 └── rate polled from two real Uniswap v3 pools on the same
+                     anvil, kept live by the swap-driver service (§6.7)
 ```
 
-Cross-chain, same-asset: the CLIENT leg settles on anvil (EVM mock USDC —
-the channel the smoke opens in step 1), all three PEERING legs settle on the
-local validator (`payment_channel`-program channels in the Solana mock USDC
-mint). Both mocks are 6-decimal USDC, so amounts cross the chain boundary
-unconverted.
+Three legs, two chains, **two tokens**:
+
+- the **client leg** settles 6-decimal mock USDC on the local validator — the
+  `payment_channel` account the smoke's buyer opens in step 1
+- **relay-store** and **relay-gas** settle the same token on their own Solana
+  accounts, **at par**: same asset, same scale, amounts cross the chain
+  boundary unconverted
+- **relay-anytoon** settles **ANYONE on anvil** — the real 18-decimal mainnet
+  ERC-20 — so every packet the hub forwards onto it is a **conversion**, at a
+  live Uniswap v3 TWAP. That is the denomination boundary, and §6.7 is about
+  nothing else.
+
+A claim never says what it is denominated in and never had to: a claim is
+denominated by the channel it is written against. The µUSDC the buyer signs
+for and the ANYONE the hub signs for are the same wire format carrying
+integers 10^12 apart.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220**,
   anytoon **3230** (all `GET /ilp` self-describing; the operator surface
@@ -556,9 +598,19 @@ payment). Every step below has a committed working example to copy —
 > instead of `[[peer_channels]]` and drop `peer_expose` — then the hub is
 > your paying client and the header names its channel. Copy
 > `conf/connector-anytoon.toml` instead of `conf/connector-store.toml`, and
-> assert your leg in the CLIENT book (keyed `solana:<channel_account>`).
-> The hub's side (step 3) is identical either way. Most apps do not need
-> this: if yours never reads the header, take the peer role.
+> assert your leg in the CLIENT book (keyed by chain namespace —
+> `solana:<channel_account>` or `evm:<channel_id>`). The hub's side (step 3)
+> is identical either way. Most apps do not need this: if yours never reads
+> the header, take the peer role.
+
+> **If your app wants to be paid in a DIFFERENT TOKEN**, copy
+> `conf/connector-anytoon.toml`'s ANYONE shape instead: settle your peering
+> on the chain that token lives on, price your route in ITS base units, and
+> then the hub needs a `[[tokens]]` row for it, a quote or a static rate to
+> the numeraire, an explicit `max_packet_amount` on the peering, and a hub
+> price with enough FX headroom to survive the rate moving. §6.7 is the whole
+> checklist, and it is a genuinely bigger step than adding a peering — take
+> the same token unless you have a reason not to.
 
 When it works in the sandbox, the path to a real deployment is the app
 repos' `deploy/` dirs (Caddy + connector + app on one box) — the shape is
@@ -581,13 +633,28 @@ identical, only keys, domains and chain endpoints change.
   the gateway's GraphQL to sign receipts; on a chainless gateway every
   upload would 503. The bundler services only start after this completes.
 - **`seed-toon-solana`** — creates the deterministic mock USDC mint
-  (`H8HSre…A77H`), airdrops SOL + mints USDC to every settlement key and
-  the gas station's fee payer.
-- **`seed-toon-evm`** — funds ETH + USDC on anvil (the client-leg channel
-  lives there), funds the kind:5098 relayer, and asserts the forwarder +
-  probe contracts are deployed.
+  (`H8HSre…A77H`), airdrops SOL + mints USDC to every settlement key, the
+  gas station's fee payer, **and the smoke's buyer**. That last one is new
+  with the Solana client leg and it is not optional: `@toon-protocol/client`
+  opens the channel but never creates the payer's ATA, and refuses below
+  4,179,040 lamports — an unfunded buyer is a `ChannelFundingError` at smoke
+  step 1.
+- **the anvil entrypoint's third stage** (`scripts/seed-toon-evm-amm.sh`, not
+  a separate service) — the ANYONE asset layer: mainnet ANYONE and WETH9
+  bytecode placed at their own mainnet addresses, ANYONE's `TokenNetwork`,
+  the official Uniswap v3 factory, two pools with full-range liquidity, and
+  900 seconds of primed oracle history. It runs **inside** the anvil
+  container and **before** the healthcheck can pass because two connectors
+  refuse to start without ANYONE's `TokenNetwork` and the hub's rate poller
+  has nothing to read without the pools. See §6.7.
+- **`seed-toon-evm`** — funds ETH + mock USDC + ANYONE on anvil, funds the
+  kind:5098 relayer, asserts the forwarder + probe contracts are deployed,
+  and **opens + collateralises the relay-anytoon channel** (100 ANYONE). The
+  EVM half of a peering needs no operator surface: `openChannel` and
+  `setTotalDeposit` are ordinary contract calls `cast` can build from a
+  signature string.
 - **`open-toon-solana-channels`** — after the hub is healthy, opens and
-  collateralises the three Solana peering channels (100 USDC each) through
+  collateralises the **two** Solana peering channels (100 USDC each) through
   the hub's own operator surface, then re-reads the on-chain accounts and
   fails unless participants, mint, `Opened` status and deposit all agree
   with the committed configs. An open channel is left alone; deposits are
@@ -622,27 +689,48 @@ set `peer_expose = "http"` and hold the mirror `[[peer_channels]]` row. The
 runtime alternative (`POST /peers`, ADR 0058) exists but the config-file
 route is what the connector's own local topologies commit and rehearse.
 
+Two of the three peerings settle the same token as the client edge and are
+plain carriage. The third settles a different token on a different chain and
+is a **conversion** — everything specific to that is in §6.7.
+
 Fee arithmetic (enforced by nothing — kept true by these committed files):
-the hub collects `price`, retains `fee = 100`, forwards the rest; the payees
-terminate at exactly the forwarded amount (store `{base=1000, per_kib=10}`
-behind hub `{base=1100, per_kib=10}`; gas `1000` behind `1100`; anytoon
-`10000` behind `10100`).
+the hub collects `price`, retains `fee`, forwards the rest; the payees
+terminate at exactly the forwarded amount. **At par** that is one subtraction
+— store `{base=1000, per_kib=10}` behind hub `{base=1100, per_kib=10}`, gas
+`1000` behind `1100`, `fee = 100` µUSDC on both.
 
-The same arithmetic is why `g.anyone.credentials.keys` is priced **100** at
-the hub and not 0, even though it is free downstream: a hub route at price 0
-charges the client nothing but still subtracts its fee from the packet's
-carried amount, so every honest request (which carries 0) comes back `R01
+**Across the denomination boundary it is `floor(amount × rate) − fee`**, with
+the fee in the OUTGOING unit (ADR 0071 decision 1, ADR 0061). The
+relay-anytoon row therefore charges `fee = 400000000000000` — 0.0004 ANYONE,
+which is the same money as the other two peerings' 100 µUSDC and is written
+in the unit it is collected in rather than converted from one. That row also
+carries an explicit `max_packet_amount`, because the 1000000 default is
+10^-12 of one token on an 18-decimal leg and would refuse every crossing
+`T04`. §6.7 has the whole model.
+
+The fee is also why `g.anyone.credentials.keys` is priced **110** at the hub
+and not 0, even though it is free downstream: a hub route at price 0 charges
+the client nothing but still subtracts its fee from the packet's carried
+amount, so every honest request (which carries 0) comes back `R01
 Insufficient Source Amount`. Free downstream + a fee-taking hop = the hop's
-fee. It is free where it is free: at `anytoon-connector`'s own edge.
+fee — 110 µUSDC rather than 100 because the conversion has to clear the fee
+at the *worst* rate in the band. It is free where it is free: at
+`anytoon-connector`'s own edge.
 
-The channel rows use the connector's SOLANA shape (`local/mixed-chain`,
-connector issues #759/#1146/#1128): a `channel_account` PDA instead of an
-EVM `channel_id`, base58 Solana settlement pubkeys as `counterparty_key`, no
-`chain_id`/`token_network`/`program_id` (the program is bound in from
-`[settlement.solana]` alone). The accounts are
+The two Solana channel rows use the connector's SOLANA shape
+(`local/mixed-chain`, connector issues #759/#1146/#1128): a `channel_account`
+PDA instead of an EVM `channel_id`, base58 Solana settlement pubkeys as
+`counterparty_key`, no `chain_id`/`token_network`/`program_id` (the program is
+bound in from `[settlement.solana]` alone). The accounts are
 `find_program_address(["channel", min, max, mint])` with the participants
 sorted by 32-byte value — precomputed and committed in
 `conf/connector-*.toml`.
+
+The relay-anytoon rows use the **EVM** shape: `channel_id` =
+`keccak256(p1, p2, epoch)` with the participants sorted (ADR 0059), plus
+`chain_id` and `token_network` — and that `token_network` is a *different
+contract* from the mock-USDC one every other EVM thing here names, because a
+`TokenNetwork` is per token.
 
 **One asymmetry, and it is deliberate.** `store-connector` and
 `gas-connector` hold their channel as `[[peer_channels]]` — they take the
@@ -657,8 +745,8 @@ without it. The hub's side is unchanged either way — `[[peers]]`, the
 forwarded `[[routes]]` row and the `[[peer_channels]]` + `[[pay_channels]]`
 pair are identical in shape for all three peerings — so this shows up only
 in where the payee books the money: peer book for store/gas, client book
-(keyed `solana:<channel_account>`) for anytoon. The smoke asserts each in
-its own book.
+(keyed `evm:<channel_id>`, in ANYONE base units) for anytoon. The smoke
+asserts each in its own book and in its own unit.
 
 The channels are REAL: `InitializeChannel` is a positional account list no
 chain CLI can build, so — exactly as the connector repo's
@@ -695,8 +783,9 @@ the sandbox works from a fresh clone:
   they inherit uid-10001 ownership and die with `make clean` (a stale claim
   journal against a wiped chain satisfies payment assertions vacuously).
 
-`artifacts/` (program `.so` dumps + the 2MB NameRegistry genesis account) is
-committed for convenience but fully regenerable:
+`artifacts/` (program `.so` dumps, the 2MB NameRegistry genesis account, and
+the EVM bytecode blobs under `artifacts/evm/`) is committed for convenience
+but fully regenerable:
 `./scripts/fetch-artifacts.sh` re-dumps the five AR.IO programs from devnet
 and mpl_core from mainnet-beta using the pinned validator image (no Solana
 toolchain needed), and `node scripts/gen-genesis.mjs` rebuilds the genesis
@@ -705,6 +794,15 @@ admin pubkey in `docker-compose.yml`). The program ids are the
 staging/devnet ids (= `@ar.io/sdk` `DEVNET_PROGRAM_IDS`) — they cannot be
 changed, the binaries carry `declare_id!` for them. Refresh the dumps only
 together with an `@ar.io/sdk` / `@ar.io/solana-contracts` upgrade.
+
+`artifacts/evm/` holds the three blobs the EVM asset layer places on anvil —
+ANYONE's and WETH9's mainnet RUNTIME bytecode, and the official Uniswap v3
+factory's CREATION bytecode. Those are the only artifacts here that come from
+a chain this sandbox does not run, which is exactly why they are committed:
+`make up` must never need an internet connection. `./scripts/fetch-artifacts.sh`
+re-dumps them (`MAINNET_RPC` overrides the endpoint) and
+`artifacts/evm/README.md` explains the provenance, the runtime-vs-creation
+split, and how to check the factory blob against mainnet's deployed one.
 
 `artifacts/payment_channel.so` is built from the connector repo with its
 pinned toolchain (platform-tools v1.52 via `make solana-build` there,
@@ -774,20 +872,34 @@ anytoon-connector ──▶ claim-minter ──▶ issuer ──▶ issuer-postg
 > (2) and (3) are **one file**: `conf/anytoon.conf` is the `env_file` of both
 > services, so they cannot drift from each other. (1) cannot be an env var —
 > the connector has no environment layer, every value comes from its TOML —
-> so it is the hand-kept derivation
-> `price = BUNDLE_PRICE × 10^6` (mock USDC decimals), and the hub's forwarded
-> row is `that + fee`:
+> so it is the hand-kept derivation `price = BUNDLE_PRICE × 10^18`, **in
+> ANYONE**, because that is the token this node settles in:
 >
 > | site | value | source |
 > |---|---|---|
-> | `conf/anytoon.conf` `BUNDLE_PRICE` | `0.01` | **the source of truth** |
-> | `conf/connector-anytoon.toml` `price` | `10000` | `0.01 × 10^6` |
-> | `conf/connector-relay.toml` `price` | `10100` | `10000 + fee 100` |
+> | `conf/anytoon.conf` `BUNDLE_PRICE` | `0.04` (ANYONE) | **the source of truth** |
+> | `conf/connector-anytoon.toml` `price` | `40000000000000000` | `0.04 × 10^18` |
 >
-> `scripts/smoke-toon.mjs` step 0c re-derives all of this from
-> `conf/anytoon.conf` and asserts it against what the two nodes **advertise**
-> at `GET /ilp`, so a drift fails the smoke by name. **Change the price in
-> `conf/anytoon.conf`, then update both TOMLs, then re-run `make smoke`.**
+> 0.04 ANYONE is 0.01 USDC at the rate this sandbox deals at — the same money
+> the route always cost, said in the currency the node is actually paid in.
+>
+> **THE HUB IS NO LONGER A FOURTH SITE, and that is the one thing the
+> cross-asset flip changed here.** It charges µUSDC and pays ANYONE at a rate
+> no file can know, so its price cannot be `this + fee`; it is a static quote
+> with an FX buffer, and the arithmetic behind it lives in
+> `conf/connector-relay.toml` where the band is (§6.7). What `make smoke`
+> asserts about it is therefore an **inequality**, computed on every run from
+> the hub's own `GET /rates` exactly as the forwarding path computes it:
+>
+> ```
+> floor(hubPrice × liveRate) − peeringFee  ≥  BUNDLE_PRICE × 10^18
+> ```
+>
+> — which is precisely the condition for a purchase to clear, and fails the
+> same way whether the rate moved, the spread changed, the fee changed or
+> someone edited a price. **Change the price in `conf/anytoon.conf`, then
+> update `conf/connector-anytoon.toml`, then re-check the headroom
+> arithmetic in `conf/connector-relay.toml`, then re-run `make smoke`.**
 
 **Who paid, and why this node is wired differently.** The minter needs the
 connector to tell it who paid, and a connector only ever says that for a
@@ -799,7 +911,7 @@ have reached the minter unattributed and been refused **after the client had
 already paid**. It therefore declares the hub's channel in
 `[[client_channels]]`: the hub signs a client-role cover-forward claim before
 every forwarded PREPARE leaves (ADR 0042 item 2), so this states the literal
-truth — on this hop the payer is the hub, `solana:3ZA8DPi1…`. Per-hub rather
+truth — on this hop the payer is the hub, `evm:0x94ab42f9…`. Per-hub rather
 than per-end-client bucketing is also the only shape the end client's
 anonymity permits. See the header of `conf/connector-anytoon.toml`; the hub's
 own config is unaffected (§6.2).
@@ -870,9 +982,190 @@ that is how its step 4c proves an unpaid request is refused. A client reusing
 account 0 would *adopt* that channel (an open channel is taken as found,
 deposit and all) and could never pay from it; collateralising it instead would
 silently break the assertion `make smoke` makes. Two buyers, two channels,
-no interference in either direction. The buyer mints its own mock USDC —
-`MockERC20.mint` is ungated on the from-source deploy — over the circuit, like
-everything else it does.
+no interference in either direction. The buyer is **funded in ANYONE** — this
+node's settlement token since the cross-asset flip — by the sandbox's faucet
+account, over the circuit like everything else it does. It cannot mint its own
+the way it used to: ANYONE is the real contract with a fixed supply and no
+`mint()`. There is no hub in this path and therefore no conversion; the buyer
+simply holds the money the node charges in.
+
+### 6.7 The denomination boundary: ANYONE, Uniswap v3 and a live rate
+
+Everything else in this sandbox moves one token. The `relay-anytoon` peering
+moves a different one, and the hub converts. This section is the whole of how.
+
+#### The asset layer is the real thing
+
+`anvil` builds it on every start, inside its own container, **before its
+healthcheck can pass** — two connectors refuse to boot unless ANYONE resolves a
+`TokenNetwork`, and the hub's rate poller has nothing to read until the pools
+exist. `scripts/seed-toon-evm-amm.sh` is the script; `conf/amm-topology.conf`
+is every address and figure it uses; `artifacts/evm/` holds the bytecode (with
+its provenance in `artifacts/evm/README.md`).
+
+| on chain | what | how |
+|---|---|---|
+| `0xFeAc2Eae…` | **ANYONE**, the Anyone Protocol ERC-20 | mainnet RUNTIME bytecode, `anvil_setCode` at its own mainnet address |
+| `0xC02aaA39…` | **WETH9** | same |
+| `0x95bD8D42…` | **UniswapV3Factory** | official `@uniswap/v3-core@1.0.1` CREATION bytecode, deployed normally |
+| `0x8983f136…` | ANYONE/WETH pool, fee 1% | `factory.createPool` — genuine v3-core |
+| `0xef5d6240…` | WETH/USDC pool, fee 0.05% | same |
+| `0x9f1ac54B…` | ANYONE's `TokenNetwork` | `registry.createTokenNetwork(ANYONE)` |
+
+`decimals()` answering 18 is that contract answering, not a constructor
+argument this sandbox chose. Two consequences of `setCode` are worth knowing
+because they are invisible until they bite:
+
+- **it copies code, not storage.** The constructor's words are written by hand
+  afterwards. For ANYONE one of them is a `launched` flag packed beside
+  `_owner`, and without it **every `transfer` reverts
+  `AnyoneProtocolToken: Not launched.`** — first noticed from inside a failing
+  pool mint.
+- **ANYONE has a fixed 100M supply and no `mint()`.** Nothing can conjure it
+  the way the mock USDC is conjured; the seed script hands anvil account 0 the
+  supply and everything else is a transfer. (This is also why the `hs` buyer is
+  now *sent* tokens by a faucet rather than minting its own.)
+
+The factory is deployed rather than etched because `createPool` depends on
+constructor state — and deploying it gets the pools right for free, since
+`UniswapV3Pool`'s creation code is embedded in the factory's own runtime. The
+package's `initCodeHash` is the canonical
+`0xe34f199b…8b54`, and the committed pool addresses are CREATE2 derivations
+from it, so a substituted factory fails the bring-up by name.
+
+`contracts/SandboxAmm.s.sol` is the 60-line stand-in for v3-periphery: a v3
+pool calls **back** into `msg.sender` for what a `mint` or `swap` owes it, so
+the caller has to be a contract. It holds the tokens, holds one full-range
+position per pool, and pays its own callbacks.
+
+#### Priming the oracles, and why anvil starts in the past
+
+A fresh v3 pool has observation **cardinality 1**: `observe([300, 0])` reverts
+`OLD`, the connector maps that to `WindowNotServed`, and the pair then
+**silently never prices** — config loads, node boots, every crossing refuses
+`F02` and nothing says why. So the seed script grows both pools to cardinality
+128 and then *walks the clock*, alternating `evm_increaseTime` with a dust
+swap, because an observation is only written when a swap touches the pool. Ten
+steps of 90 seconds gives 900 seconds of history before any connector starts.
+
+Those 900 seconds are exactly how far **behind wall-clock** the `anvil` service
+is started (`--timestamp`). anvil's clock runs at wall speed from whatever
+genesis it is given and `evm_increaseTime` shifts that offset permanently, so
+priming brings the chain back to real time. It matters in both directions: a
+chain left running early makes every rate look permanently fresh, and one left
+running late makes every rate look permanently **stale** — `T00` on the first
+packet. The script then calls `observe()` itself and refuses to report success
+otherwise; the anvil healthcheck gates on the same call, which is the entire
+asset layer in one RPC.
+
+#### The swap driver
+
+`scripts/swap-driver.sh`, `full` profile, every 15 seconds. It exists because a
+seeded-and-abandoned pool is a frozen constant with a decorated config:
+
+- v3 writes observations in `swap()` and **nowhere else**, so without trades
+  the TWAP never changes;
+- anvil mines only when a transaction arrives, so without trades the head
+  block's timestamp never advances either — and `observed_at` is the head
+  block's own timestamp, so the pair goes stale one `ttl_secs` later.
+
+It steers ANYONE/WETH as a **bounded triangle wave** — ±200 ticks (≈ ±2%)
+around the 0.25 USDC target, flipping every 300 seconds — and pins WETH/USDC at
+its own target so all the movement comes from one pool. Bounded rather than
+random is the load-bearing choice: the hub quotes a *static* price against this
+rate, and a random walk would eventually leave the headroom that price was
+sized for and start refusing purchases at 3am. That would be a true fact about
+FX risk and a terrible property in a sandbox. Logging is one line a minute.
+
+#### What the hub declares
+
+```toml
+[[tokens]] asset = "evm:<mock USDC>"   numeraire = true
+[[tokens]] asset = "evm:<ANYONE>"      quote = [ANYONE/WETH pool, WETH/USDC pool]  # 300s TWAP each
+[[tokens]] asset = "solana:<mock USDC>"
+[[rates]]  from = "solana:<mock USDC>" to = "evm:<mock USDC>"  rate = 1/1  spread = 0/1
+[rate_guards] spread = 30/10000   ttl_secs = 120   max_move = 5/100
+```
+
+Five things about that block are easy to get wrong and each is a named boot
+failure or a silent refusal:
+
+1. **The numeraire is a token nothing on this node settles in.** That is legal
+   and it is the point — a numeraire is a unit of account, not a balance — and
+   it is *forced*, because a quote's last leg must end at the numeraire on the
+   numeraire's own chain, and the quote legs are EVM pools. The Solana mock
+   USDC could not be the numeraire however convenient that sounds.
+2. **Every `[settlement.<chain>]` table's token must be declared**, not just
+   the ones a `[[client_channels]]` row names — a settlement table is what lets
+   a node accept a claim on a channel it was never configured for (ADR 0052).
+   Omit one and it is `ClientChannelTokenNotDeclared` at load.
+3. **The `[[rates]]` row's direction is load-bearing.** Only `token →
+   numeraire` is visible to the composer. Written the other way it is invisible
+   and every credentials purchase is `F02`.
+4. **The pair the packets actually convert is declared nowhere.**
+   `solana:USDC → evm:ANYONE` is *composed* at lookup: the par row, then the
+   ANYONE quote **read backwards**, with the spread applied once on top. It
+   appears on no surface, including `GET /rates` — only declared pairs are
+   listed, because a composition is derived and a refusal is not.
+5. **A v3 tick is already `token1 per token0 in base units`.** The 18-vs-6
+   decimal gap is folded into it and nothing applies a second scale;
+   `decimals` in the settlement tables is a boot-time assertion against the
+   chain, never an input to value arithmetic.
+
+The guards are not read from the same place either: `spread` comes from the
+pair being looked up (the composed one), while `ttl_secs` and `max_move` are
+read **per leg** from that leg's own `(token, numeraire)` pair. `ttl_secs` also
+sets the polling cadence — `ttl/3`, no separate knob, so 40 seconds here.
+
+#### Why the hub's price is static, and what the smoke asserts instead
+
+**A route price is config.** `GET /ilp` reads it straight out of the route
+table and never touches the rate table; there is no route-advertisement
+protocol and no way for a price to float. So a dealing hub does what a dealer
+does: it quotes its client a fixed price **in the client's own money** and
+carries the risk between quoting and settling.
+
+`conf/connector-relay.toml` writes the sizing out:
+
+```
+downstream 0.04 ANYONE + fee 0.0004 ANYONE     = 4.04e16 must arrive
+mid 4e12 ANYONE base units per µUSDC
+  less spread 0.3%, less the driver's band 2.02%  = 3.908e12 worst rate
+4.04e16 / 3.908e12 = 10338                     →  the route charges 11000
+```
+
+The 662 µUSDC of headroom is about four times the driver's band. What the old
+"price triple" guaranteed by multiplication, `scripts/smoke-toon.mjs` now
+guarantees by **inequality** (§6.5) — and it adds two assertions the old
+topology had no need for:
+
+- **step 0d / step 6** poll `GET /rates` at both ends of the run and require
+  the ANYONE leg's `last_refreshed` *and its price* to have moved. Every other
+  assertion in the file would pass against a frozen TWAP.
+- **step 5** checks the crossing from both sides: the client paid the hub
+  *exactly* 11000 µUSDC (a static quote, off the claim the client itself
+  holds), and the hub paid the anytoon node a number that is ≥ the bundle
+  price, ~10^12× the integer that arrived, and within 5% of what the
+  pre-flight rate predicted. Any one of those alone would pass on a broken
+  conversion.
+
+#### Operator surfaces worth knowing
+
+```bash
+# the hub's rate table — the only surface that moves with the rate
+curl -s localhost:3200/rates \
+  -H "authorization: Bearer $(cat keys/toon/relay-connector/operator-bearer.token)" | jq
+```
+
+A row with `last_refreshed: null` is a **declaration** (static, never stale); a
+row with a timestamp is an **observation**. `state` is `live` / `stale` /
+`refused`, and `refused_refresh` shows a reading the `max_move` guard rejected
+— which leaves the previous rate in force and ageing, rather than taking
+anything down.
+
+```bash
+docker compose --profile full logs -f swap-driver   # one line a minute
+```
 
 ## 7. Lifecycle and state
 
@@ -909,11 +1202,33 @@ everything else it does.
 - **`*.ar.localhost` doesn't resolve**: use
   `curl -H 'Host: <name>.ar.localhost' http://localhost:3000/` (note: Node's
   `fetch()` silently drops a user-set Host header; curl is fine).
-- **Connector refuses to boot**: its startup is fail-closed on both
-  settlement backends — check that anvil is healthy (contracts deployed;
-  the healthcheck requires code at the registry AND the sandbox extras) and
-  the validator answers on 8899; then `docker compose logs <connector>`
-  names the failing backend.
+- **Connector refuses to boot**: its startup is fail-closed on every
+  settlement backend AND on every quote path — check that anvil is healthy
+  (the healthcheck requires code at the registry, the sandbox extras, AND a
+  live `observe()` over the ANYONE pool's TWAP window) and the validator
+  answers on 8899; then `docker compose logs <connector>` names the failure.
+  Boot-time refusals in this area are all named:
+  `ClientChannelTokenNotDeclared` / `PeeringTokenNotDeclared` (a settlement
+  or peering token with no `[[tokens]]` row), `MixedNumeraire`,
+  `TokenQuoteDoesNotEndAtNumeraire`, `RateGuardsMissing`, and
+  `QuotePathUnusable::NoSourceForChain` (a `quote` on a chain with no rate
+  source — i.e. any Solana one). §6.7.
+- **Every credentials purchase refuses `F02`**: the hub declares no rate for
+  the pair. Either the `[[rates]]` par row is written `numeraire → token`
+  instead of `token → numeraire`, or the ANYONE quote never produced an
+  observation. `GET /rates` on the hub tells you which (§6.7).
+- **Every credentials purchase refuses `T00`**: the ANYONE pair went **stale**
+  — nothing is trading, so no blocks are being mined and the observation aged
+  past `ttl_secs`. Check `docker compose logs swap-driver`. Expected under the
+  `payments` profile, which runs no driver.
+- **Every crossing refuses `T04` naming a tiny ceiling**: the ANYONE peering
+  lost its explicit `max_packet_amount` and fell back to the 1000000 default,
+  which is 10^-12 of one token on an 18-decimal leg.
+- **The ANYONE pair never prices and nothing says why**: the pools cannot
+  serve the TWAP window (`WindowNotServed` — a cardinality or priming
+  failure, which is *not* a startup refusal). `seed-toon-evm-amm.sh` calls
+  `observe()` itself before reporting success and the anvil healthcheck gates
+  on the same call, so this should be impossible without editing one of them.
 - **`make up` stops on the store or anytoon context**: those two images
   build from sibling checkouts — see Prerequisites for repointing
   `STORE_CONTEXT` / `ANYTOON_CONTEXT`, or use `make up-payments`, which
@@ -922,8 +1237,8 @@ everything else it does.
 - **A bare `docker compose` command does nothing**: it selected no profile —
   see the note at the end of §2.
 - **Every credentials purchase comes back PAID but `402 CLAIM_INVALID`**:
-  the price triple has drifted — the connector's base-unit route price no
-  longer equals `BUNDLE_PRICE × 10^6`. `make smoke-toon` step 0c names it
+  the price coupling has drifted — the anytoon node's base-unit route price
+  no longer equals `BUNDLE_PRICE × 10^18`. `make smoke-toon` step 0c names it
   exactly; fix per §6.5. (`402 PAYER_UNATTRIBUTED` instead means the
   connector delivered without an `X-TOON-Payer`, i.e. `anytoon-connector`'s
   `[[client_channels]]` row was turned into a `[[peer_channels]]` row —
@@ -984,13 +1299,28 @@ everything else it does.
   after a non-holder buy fails benignly (locally AnchorError 2006
   `ConstraintSeeds` on `ant_authority`; receipt carries
   `syncAttributesTxId: null`, logged non-fatal by the store).
-- **Conversion/FX is unsupported and out of scope** — the cross-chain
-  topology works because both mock USDCs share one 6-decimal unit. In
-  particular the credentials peering is **Phase 1 only**: it settles in the
-  same 6-decimal mock USDC as everything else. Settling it in an 18-decimal
-  mock ANYONE under a USDC client leg (Phase 2) needs cross-asset forwarding,
-  which is blocked upstream on `toon-protocol/connector#1286`; do not try it
-  here.
+- **The hub carries real FX risk, on purpose, and it is bounded by a shell
+  script.** A route price is static config and cannot float (§6.7), so the
+  hub's µUSDC quote for the ANYONE routes covers the worst rate inside the
+  swap driver's band with ~9% to spare. Stop `swap-driver` and let the pair
+  go stale and every credentials purchase refuses `T00`; make it wander
+  further than its band and they start refusing `F06`. Both are true
+  properties of dealing rather than sandbox bugs — but it does mean the
+  ANYONE routes are the only ones here whose correctness depends on a running
+  service rather than on committed numbers.
+- **The pair the packets actually convert is invisible on `GET /rates`.**
+  `solana:<mock USDC> → evm:ANYONE` is composed at lookup out of the par row
+  and the ANYONE quote read backwards; only *declared* pairs are listed, so
+  its health has to be inferred from the two legs. `scripts/smoke-toon.mjs`
+  composes it the same way the connector does.
+- **Two legs is the maximum for a quote path**, and this sandbox uses both
+  (ANYONE → WETH → USDC). A token whose price needed three hops could not be
+  quoted here at all.
+- **There is no Solana rate source in the connector.** Every token quoted
+  live has to be on an EVM chain with a Uniswap v3 pool; a `quote` on a
+  Solana token refuses startup by name (`QuotePathUnusable::NoSourceForChain`).
+  That is why the numeraire is the *EVM* mock USDC and the Solana one reaches
+  it through a declared 1/1 row.
 - **The credentials issuer's epoch expires after 30 days.** The
   `issuer-keys` job re-forges an expired one on the next `make up`, but a
   stack left running past the window signs nothing until it is restarted
