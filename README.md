@@ -7,10 +7,11 @@ Infrastructure for the TOON Protocol.
 **[`sandbox/`](sandbox/README.md)** is a complete TOON Protocol network on
 your machine: one `docker compose` project with local chains (Solana, EVM,
 Arweave-sim), a local AR.IO permaweb stack (gateway + Turbo bundler + ArNS),
-the TOON payment layer (three ILP connectors with real, collateralised
-payment channels — client leg on EVM, peerings on Solana), and the three
-first-party TOON apps (relay, store, gas station). Nothing touches mainnet;
-every key is a valueless committed throwaway.
+the TOON payment layer (four ILP connectors with real, collateralised
+payment channels, settling mock USDC on Solana and **ANYONE on the EVM chain
+across a live Uniswap v3 rate**), and the four first-party TOON apps (relay,
+store, gas station, Anyone credentials issuer). Nothing touches mainnet; every
+key is a valueless committed throwaway.
 
 ```bash
 cd sandbox
@@ -19,8 +20,10 @@ make setup && make up && make smoke
 
 `make smoke` proves the whole thing end to end — paid Nostr writes, paid
 Arweave uploads served by the local gateway, the full brokered ArNS buy
-ceremony, and paid gas on both chains, all entering at the hub connector and
-settling on local payment channels.
+ceremony, paid gas on both chains, and a blind-signed credentials bundle
+bought **across a denomination boundary**: all entering at the hub connector,
+settling on local payment channels, in the unit each leg is actually
+denominated in.
 
 Working on the payment layer or on a TOON client? `make up-payments && make
 smoke-payments` runs the chains, the hub and its seed jobs alone — seven

@@ -16,7 +16,7 @@
 // the anytoon node's own client edge, over the circuit, settling on the
 // sandbox's anvil reached through the SAME proxy. Nothing it needs is dialled
 // on clearnet: not the packets, not the channel open, not the deposit, not even
-// the mock USDC it funds itself with.
+// the ANYONE it funds itself with.
 //
 // THE CHAIN RPC IS NOT AN AFTERTHOUGHT. @toon-protocol/client sends JSON-RPC
 // through `socksProxy` by DEFAULT (`proxyRpc`), because reaching a connector
@@ -56,7 +56,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ToonClient } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
-import { HDNodeWallet, Interface, randomBytes } from 'ethers';
+import { HDNodeWallet, Interface, Wallet as EthersWallet, randomBytes } from 'ethers';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // sandbox/
 const RENDERED = join(ROOT, 'conf', '.rendered', 'connector-anytoon.toml');
@@ -73,8 +73,19 @@ const ATTEMPTS = Number(process.env.SMOKE_HS_ATTEMPTS ?? 3);
 const MNEMONIC = 'test test test test test test test test test test test junk';
 const ACCOUNT_INDEX = 5;
 const EVM_CHAIN_ID = 31337;
-const DEPOSIT = 10_000_000n; // 10 USDC — plenty against a 10000-unit bundle
-const USDC_DECIMALS = 6;
+// THIS BUYER PAYS ANYONE, not mock USDC, and that is the one thing the
+// cross-asset flip changed about this file: the anytoon node's
+// `[settlement.evm]` token is the real mainnet ANYONE ERC-20 (18 decimals), so
+// its client edge is an ANYONE edge and every figure here is in ANYONE base
+// units. There is no hub in this path and therefore no conversion — the buyer
+// simply holds the money the node charges in.
+const DEPOSIT = 1_000_000_000_000_000_000n; // 1 ANYONE — 25 bundles at 0.04
+const ANYONE_DECIMALS = 18;
+// anvil account 0 — the sandbox's faucet. ANYONE is the REAL contract with a
+// fixed 100M supply and no `mint()`, so a buyer cannot conjure its own the way
+// it could with the mock USDC: the faucet has to send it some. Public test key,
+// local chain only.
+const FAUCET_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 // ── output ────────────────────────────────────────────────────────────────
 const step = (name) => console.log(`\n\x1b[1m== ${name}\x1b[0m`);
@@ -146,7 +157,7 @@ function bundlePriceUnits() {
   const m = conf.match(/^\s*BUNDLE_PRICE\s*=\s*(\S+)\s*$/m);
   if (!m) throw new SandboxFault('conf/anytoon.conf has no BUNDLE_PRICE line');
   const [whole, frac = ''] = m[1].trim().split('.');
-  return BigInt(whole) * 10n ** BigInt(USDC_DECIMALS) + BigInt(frac.padEnd(USDC_DECIMALS, '0') || '0');
+  return BigInt(whole) * 10n ** BigInt(ANYONE_DECIMALS) + BigInt(frac.padEnd(ANYONE_DECIMALS, '0') || '0');
 }
 
 // ── 0. preflight: everything that is this sandbox's own doing ─────────────
@@ -227,8 +238,9 @@ async function preflight() {
   }
   ok(`and prices g.anyone.credentials at ${price} base units (= conf/anytoon.conf BUNDLE_PRICE)`);
 
-  // The mock USDC the node settles in, taken from the node's own description
-  // rather than hardcoded — the buyer has to fund itself in that token below.
+  // The token the node settles in — ANYONE — taken from the node's own
+  // description rather than hardcoded, because the buyer has to hold that token
+  // and not merely believe it does.
   const evm = (described.settlements ?? []).find((s) => s.chain === `evm:${EVM_CHAIN_ID}`);
   if (!evm?.tokenAddress) {
     throw new SandboxFault(`the node publishes no evm:${EVM_CHAIN_ID} settlement for this buyer to pay on.`);
@@ -241,7 +253,7 @@ async function preflight() {
 // ── raw JSON-RPC, over the circuit ────────────────────────────────────────
 // The TOON client carries its OWN chain reads and writes over the proxy; this
 // is here for the one thing that happens before a client exists — a buyer with
-// no test USDC minting itself some. Written out by hand rather than handed to a
+// no ANYONE being sent some by the faucet. Written out by hand rather than handed to a
 // provider so that it is unmistakable that every one of these requests leaves
 // through the same SOCKS5h proxy the purchase does.
 function rpcOver(fetchImpl, url) {
@@ -261,13 +273,16 @@ function rpcOver(fetchImpl, url) {
 
 const ERC20 = new Interface([
   'function balanceOf(address) view returns (uint256)',
-  'function mint(address,uint256)',
+  'function transfer(address,uint256) returns (bool)',
 ]);
 
-// The buyer arrives holding nothing, which is what a buyer does. MockERC20.mint
-// is ungated on this sandbox's from-source deploy (scripts/seed-toon-evm.sh says
-// so), so it mints its own — over the circuit, like everything else here.
+// The buyer arrives holding nothing, which is what a buyer does. It cannot mint
+// its way out of that any more: the token is the REAL ANYONE contract with a
+// fixed supply, so the sandbox's faucet account sends it some instead — over
+// the circuit, like everything else here, signed by the faucet rather than by
+// the buyer because that is who has the tokens.
 async function fundBuyer(rpc, wallet, token, want) {
+  const faucet = new EthersWallet(FAUCET_KEY);
   const read = async (data) => rpc('eth_call', [{ to: token, data }, 'latest']);
   const balanceOf = async (who) => BigInt(
     ERC20.decodeFunctionResult('balanceOf', await read(ERC20.encodeFunctionData('balanceOf', [who])))[0]);
@@ -275,13 +290,13 @@ async function fundBuyer(rpc, wallet, token, want) {
   const held = await balanceOf(wallet.address);
   if (held >= want) return { held, minted: 0n };
 
-  const data = ERC20.encodeFunctionData('mint', [wallet.address, want]);
+  const data = ERC20.encodeFunctionData('transfer', [wallet.address, want]);
   const [nonce, gasPrice, gasLimit] = await Promise.all([
-    rpc('eth_getTransactionCount', [wallet.address, 'pending']),
+    rpc('eth_getTransactionCount', [faucet.address, 'pending']),
     rpc('eth_gasPrice'),
-    rpc('eth_estimateGas', [{ from: wallet.address, to: token, data }]),
+    rpc('eth_estimateGas', [{ from: faucet.address, to: token, data }]),
   ]);
-  const raw = await wallet.signTransaction({
+  const raw = await faucet.signTransaction({
     type: 0, to: token, data, chainId: EVM_CHAIN_ID,
     nonce: Number(nonce), gasPrice: BigInt(gasPrice), gasLimit: BigInt(gasLimit) * 2n,
   });
@@ -291,8 +306,8 @@ async function fundBuyer(rpc, wallet, token, want) {
     receipt = await rpc('eth_getTransactionReceipt', [hash]);
     if (receipt === null) await sleep(500);
   }
-  if (receipt === null) throw new Error(`the mint transaction ${hash} never got a receipt`);
-  if (BigInt(receipt.status) !== 1n) throw new SandboxFault(`the mint transaction ${hash} reverted`);
+  if (receipt === null) throw new Error(`the faucet transaction ${hash} never got a receipt`);
+  if (BigInt(receipt.status) !== 1n) throw new SandboxFault(`the faucet transaction ${hash} reverted`);
   return { held: await balanceOf(wallet.address), minted: want, hash };
 }
 
@@ -378,10 +393,10 @@ async function purchase({ address, price, token }, attempt) {
     ok(`the key document served FREE over the overlay: epoch ${doc.epoch_id} (alg ${doc.alg})`);
     if (keys.claim !== undefined) throw new SandboxFault('a claim was spent on the FREE route');
 
-    // (ii) THE MONEY, also over the circuit. The buyer holds no test USDC until
-    //      it mints itself some; the mint, the reads around it and the receipt
-    //      poll all leave through the proxy.
-    step('2. the buyer funds itself and opens a channel — every JSON-RPC call over the same circuit');
+    // (ii) THE MONEY, also over the circuit. The buyer holds no ANYONE until
+    //      the faucet sends it some; that transfer, the reads around it and the
+    //      receipt poll all leave through the proxy.
+    step('2. the buyer is funded in ANYONE and opens a channel — every JSON-RPC call over the same circuit');
     const rpc = rpcOver(transport.fetch, rpcUrl);
     const chainId = BigInt(await rpc('eth_chainId'));
     if (chainId !== BigInt(EVM_CHAIN_ID)) {
@@ -389,8 +404,8 @@ async function purchase({ address, price, token }, attempt) {
     }
     ok(`the chain RPC answers over the overlay: eth_chainId = ${chainId} (anvil, through the hidden service)`);
     const funded = await fundBuyer(rpc, wallet, token, DEPOSIT);
-    ok(`the buyer ${wallet.address} holds ${funded.held} base units of mock USDC` +
-       (funded.minted > 0n ? ` (minted ${funded.minted} over the circuit, tx ${funded.hash})` : ' (already funded)'));
+    ok(`the buyer ${wallet.address} holds ${funded.held} base units of ANYONE` +
+       (funded.minted > 0n ? ` (sent ${funded.minted} by the faucet over the circuit, tx ${funded.hash})` : ' (already funded)'));
 
     // (iii) THE CHANNEL. The registry read, the approve, the openChannel and
     //       the setTotalDeposit are the client's own; every one of them leaves

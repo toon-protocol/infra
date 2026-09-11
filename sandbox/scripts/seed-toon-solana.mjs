@@ -13,6 +13,14 @@
 //      settlement backend submits a real ATA-create + simulated
 //      InitializeChannel at startup — an unfunded key is a refuse-to-boot)
 //   4. airdrop SOL to the gas station's fee payer (keys/toon/gas-fee-payer.json)
+//   5. fund THE BUYER — the smoke test's own Solana identity. New with the
+//      cross-asset flip: the client leg used to settle on anvil, where a payer
+//      needs nothing seeded (mock USDC is mintable and anvil hands out ETH),
+//      but a Solana channel needs its payer to already hold SOL *and* an ATA
+//      of the right mint. @toon-protocol/client opens the channel and will not
+//      create either: `assertOpenFunding` refuses below 4179040 lamports or
+//      without an ATA holding the deposit, which would strand the smoke at
+//      step 1 with a ChannelFundingError.
 //
 // This is the JS equivalent of the connector repo's host-side
 // infra/solana/create-usdc-mint.sh + local/keys.sh funding loop, done with
@@ -44,6 +52,14 @@ const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgo
 const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
+// THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
+// test mnemonic ("test test ... junk"), which is what
+// `ToonClient.create({ mnemonic, chain: 'solana' })` derives at index 0 —
+// scripts/smoke-toon.mjs asserts the client agrees with this address before it
+// opens anything, so a client-library change to the derivation path fails by
+// name here rather than as an unfunded-wallet mystery.
+const BUYER = address('oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96');
+const BUYER_USDC = 1_000_000_000n; // 1000 USDC — the smoke deposits 10 of it
 
 const rpc = createSolanaRpc(RPC_URL);
 const rpcSubscriptions = createSolanaRpcSubscriptions(WS_URL);
@@ -86,10 +102,16 @@ async function ata(owner) {
 {
   const mintInfo = await rpc.getAccountInfo(mintKp.address, { encoding: 'base64' }).send();
   if (mintInfo.value !== null) {
-    const relayAta = await ata(nodeSigners['relay-connector'].address);
-    const bal = await rpc.getTokenAccountBalance(relayAta).send().catch(() => null);
-    if (bal && BigInt(bal.value.amount) > 0n) {
-      console.log('[seed-toon-solana] mint + funded connector ATAs already exist — nothing to do.');
+    // The BUYER's ATA is checked too, and not only the relay's: a chain seeded
+    // by an older revision of this script has the mint and the connectors but
+    // no buyer, and skipping on the relay alone would leave the smoke unable
+    // to open its channel on a stack that looks seeded.
+    const funded = async (owner) => {
+      const bal = await rpc.getTokenAccountBalance(await ata(owner)).send().catch(() => null);
+      return bal !== null && BigInt(bal.value.amount) > 0n;
+    };
+    if (await funded(nodeSigners['relay-connector'].address) && await funded(BUYER)) {
+      console.log('[seed-toon-solana] mint + funded connector/buyer ATAs already exist — nothing to do.');
       process.exit(0);
     }
   }
@@ -112,6 +134,7 @@ async function sendIxs(feePayer, ixs, label) {
 const airdropTargets = [
   ['usdc-authority', authority.address],
   ['gas-fee-payer', gasFeePayer.address],
+  ['buyer (the smoke test)', BUYER],
   ...NODES.map((n) => [n, nodeSigners[n].address]),
 ];
 for (const [who, addr] of airdropTargets) {
@@ -197,6 +220,18 @@ for (const n of NODES) {
   const nodeAta = await ata(nodeSigners[n].address);
   await sendIxs(authority, [createAtaIx(nodeAta, nodeSigners[n].address), mintToIx(nodeAta, NODE_USDC)],
     `${n}: ATA + 1000 USDC (${nodeSigners[n].address})`);
+}
+
+// ── 4. the buyer's own ATA ────────────────────────────────────────────────
+// The connectors' ATAs above are created by the connector itself at startup
+// too; the buyer has no such startup. `@toon-protocol/client` reads this ATA
+// to check it can cover the deposit and then spends out of it into the
+// channel — it never creates it — so this is the difference between a smoke
+// that opens a Solana channel and one that raises ChannelFundingError.
+{
+  const buyerAta = await ata(BUYER);
+  await sendIxs(authority, [createAtaIx(buyerAta, BUYER), mintToIx(buyerAta, BUYER_USDC)],
+    `buyer: ATA + 1000 USDC (${BUYER})`);
 }
 
 console.log('\n[seed-toon-solana] done.');
