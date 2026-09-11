@@ -276,8 +276,12 @@ async function rates(node = 'relay-connector') {
   if (!res.ok) throw new Error(`${node} GET /rates -> ${res.status}`);
   return res.json();
 }
+// Both sides lowercased: the connector canonicalises EVM addresses to lower
+// case but leaves base58 Solana mints alone (base58 is case-SIGNIFICANT), so a
+// one-sided comparison silently misses the Solana row.
 const rateRow = (rows, from, to) =>
-  rows.find((r) => String(r.from).toLowerCase() === from && String(r.to).toLowerCase() === to);
+  rows.find((r) => String(r.from).toLowerCase() === from.toLowerCase()
+    && String(r.to).toLowerCase() === to.toLowerCase());
 // The rate the hub would actually deal `solana USDC -> ANYONE` at right now, as
 // an exact fraction: (par leg) x (ANYONE leg inverted) x (1 - spread).
 function dealtUsdcToAnyone(rows) {
@@ -389,11 +393,14 @@ if (!PAYMENTS_ONLY) {
 // between them. Everything here reads the hub's own rate table, which is the
 // table the forwarding path converts against — not a second opinion about it.
 //
-// Runs under the payments profile too. The anytoon node is not up there, so
-// nothing on that profile's path converts, but the POOLS are (anvil builds
-// them either way — the hub cannot resolve its own ANYONE TokenNetwork
-// otherwise) and a hub that boots without pricing ANYONE is worth catching
-// wherever it happens.
+// Runs under the payments profile too, WITH ONE ALLOWANCE. The pools exist
+// there (anvil builds them either way — the hub cannot resolve its own ANYONE
+// TokenNetwork otherwise) but the swap driver does not, so nothing is trading
+// and nothing is mining: two minutes into a payments run the head block stops
+// advancing and the pair ages past ttl_secs. That is the correct behaviour and
+// the profile's own choice, so a STALE ANYONE pair is tolerated there — but
+// only after it has been observed at least once, which is the half of the
+// quote path that can actually be broken by a bad pool or a short window.
 step('0d. the hub prices ANYONE off a LIVE Uniswap v3 TWAP');
 let ratesBefore = [];
 let dealtBefore = null;
@@ -404,12 +411,18 @@ try {
   const anyone = rateRow(ratesBefore, ASSET_ANYONE, ASSET_USDC_EVM);
   assert(par?.state === 'live' && par.last_refreshed === null,
     `the two mock USDCs are declared at par (${par?.rate?.numerator}/${par?.rate?.denominator}); a static row carries no last_refreshed and never goes stale`);
-  assert(anyone?.state === 'live' && typeof anyone.last_refreshed === 'string',
-    `ANYONE is OBSERVED, not declared: state=${anyone?.state}, last_refreshed=${anyone?.last_refreshed} (a null there would mean someone typed the rate in)`);
+  assert(typeof anyone?.last_refreshed === 'string',
+    `ANYONE is OBSERVED, not declared: last_refreshed=${anyone?.last_refreshed} (a null there would mean someone typed the rate in)`);
   assert(anyone?.refused_refresh == null,
     'no refresh has been refused by the max_move guard — the swap driver is the only thing trading');
+  assert(anyone?.state === 'live' || PAYMENTS_ONLY,
+    `the ANYONE pair is live (state=${anyone?.state})`);
   dealtBefore = dealtUsdcToAnyone(ratesBefore);
-  if (dealtBefore === null) {
+  if (dealtBefore === null && PAYMENTS_ONLY) {
+    ok(`the ANYONE pair is ${anyone?.state} — expected under the payments profile, which runs no swap driver:`
+      + ' with nothing trading there are no new blocks, so the observation ages past ttl_secs.'
+      + ' Nothing on this profile\'s path converts.');
+  } else if (dealtBefore === null) {
     bad('the hub cannot price solana-USDC -> ANYONE: one of the two legs is missing from GET /rates');
   } else {
     // The composed pair is not on /rates; this is it, computed the way the
