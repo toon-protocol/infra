@@ -162,6 +162,18 @@ prefix = "g.toon.provider.basic.v1.extend"
 peer_id = "relay-provider"
 price = 1100
 
+# The sandbox-only `smoke` listing (conf/provider.toml): same price, a 30 s
+# Lease Interval, bought by `make smoke-m1`.
+[[routes]]
+prefix = "g.toon.provider.smoke.v1.spawn"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.smoke.v1.extend"
+peer_id = "relay-provider"
+price = 1100
+
 [[routes]]
 prefix = "g.toon.provider.availability"
 peer_id = "relay-provider"

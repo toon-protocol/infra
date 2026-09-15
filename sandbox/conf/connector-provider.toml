@@ -46,6 +46,16 @@ handler_url = "http://provider:8080/listings/basic/v1/extend"
 price = 1000
 
 [[routes]]
+prefix = "g.toon.provider.smoke.v1.spawn"
+handler_url = "http://provider:8080/listings/smoke/v1/spawn"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.provider.smoke.v1.extend"
+handler_url = "http://provider:8080/listings/smoke/v1/extend"
+price = 1000
+
+[[routes]]
 prefix = "g.toon.provider.availability"
 handler_url = "http://provider:8080/availability"
 price = 0
