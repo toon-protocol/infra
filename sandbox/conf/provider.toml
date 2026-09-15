@@ -1,0 +1,57 @@
+# The sandbox provider (toon-provider, built from the ../../provider sibling
+# checkout). One file, no environment variables — see that repo's
+# provider.example.toml for every key. Mounted read-only at
+# /etc/toon-provider/provider.toml by the `provider` compose service.
+#
+# The app runs INSIDE compose but its workloads run on the HOST daemon (the
+# service mounts /var/run/docker.sock), so every SSH forward and published
+# port lands on the host and `public_ip` is the host's own loopback: the
+# smoke test dials 127.0.0.1:<ssh_port>.
+
+backend = "docker"
+provider_name = "TOON Sandbox Provider"
+
+# Every route is a suffix of this: g.toon.provider.basic.v1.spawn, .extend,
+# and the free g.toon.provider.availability / .status / .terminate.
+ilp_address = "g.toon.provider"
+
+public_ip = "127.0.0.1"
+
+# THROWAWAY dev identity, committed like everything under keys/toon/. Hex.
+# Its public key (what a Lease Request's `p` tag must name) is
+# b78bca6ec5631d2dc9bdbff28bce4c3e3423f449a8e43009845390e7536de953;
+# scripts/smoke-provider.mjs derives it from this line.
+nostr_private_key = "498e723f94204af41bc15fb391d1f42481193ca903fdcc302d928f7a8fbfbb12"
+
+relay_set = ["ws://relay:7100"]
+capabilities = []
+
+# The connector dials the app by compose service name.
+http_bind_addr = "0.0.0.0:8080"
+handler_base_url = "http://provider:8080"
+
+# 100 workload ids -> SSH forwards 40000..40099, port blocks from 41000
+# (16 per id, so up to 42599). Host ports, published by the host daemon.
+workload_id_range_start = 1000
+workload_id_range_end = 1099
+ssh_port_start = 40000
+workload_port_start = 41000
+
+lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# One tier. A SHORT interval on purpose: the smoke leaves its workload to
+# expire, and a stack that reaps in three minutes is one you can re-run.
+# The price is what conf/connector-provider.toml's spawn/extend rows charge,
+# and the hub adds its 100 uUSDC fee on top (conf/connector-relay.toml).
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 180
+price = 1000
+capabilities = []
+capacity = 4
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1

@@ -43,6 +43,12 @@ name: toon-sandbox
 #                                          packet can reach without a peer
 #               relay-connector            the hub itself
 #               open-toon-solana-channels  opens the hub's Solana channels
+#               provider, provider-connector
+#                                          the compute provider (TOON_Network
+#                                          Milestone 1) and its own connector,
+#                                          peered to the hub — the sandbox's
+#                                          Level 2 example that needs no
+#                                          sibling checkout beyond ../../provider
 #             Everything else — the AR.IO gateway + Turbo bundler, the store,
 #             gas-station and Anyone credentials-issuer subsystems and their
 #             three peering connectors — stays out (the `credentials` profile
@@ -618,6 +624,7 @@ services:
   #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
   #             g.anyone.credentials    ──peering──▶ anytoon-connector ──▶ claim-minter:8080 ──▶ issuer:3000
   #             g.anyone.credentials.keys ──peering──▶ anytoon-connector ──▶ issuer:3000/v1/keys/ (price 0 there)
+  #             g.toon.provider.*       ──peering──▶ provider-connector ──▶ provider:8080/… (spawn/extend paid, the rest free)
   #   any client ──ws──▶ relay:7100 (free reads, host :7100)
   #
   # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
@@ -1151,6 +1158,68 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ── The compute provider (TOON_Network Milestone 1) ──────────────────────
+  # `toon-provider`, built from the provider sibling checkout: a tenant pays
+  # `g.toon.provider.basic.v1.spawn` and gets a running container reachable
+  # over SSH with its own key. The app is a plain HTTP app behind ITS OWN
+  # connector (README §5 Level 2, copied from the store-connector shape); it
+  # reads no X-TOON-* header, so it takes the peer role.
+  #
+  # THE DOCKER SOCKET IS MOUNTED, and that is the whole deployment shape: the
+  # provider shells out to the docker CLI, so its workloads run as siblings
+  # on the HOST daemon (named toon-<id>), their SSH forwards and ports are
+  # published on the host, and conf/provider.toml's public_ip is 127.0.0.1
+  # from the host's point of view. The image is pulled by the daemon by
+  # reference@digest. Handler port 8080 is UNPUBLISHED, like every other
+  # app's paid port here — only provider-connector dials it.
+  provider:
+    profiles: ['payments', 'full']
+    build:
+      # The provider sibling checkout (toon-protocol/provider). Relative so
+      # the file stays portable; only `payments` and `full` render it.
+      context: ${PROVIDER_CONTEXT:-../../provider}
+    volumes:
+      - ./conf/provider.toml:/etc/toon-provider/provider.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The lease table: the only record that a lease exists. A named volume
+      # so a `docker compose restart provider` strands nothing.
+      - provider-state:/var/lib/toon-provider
+    expose:
+      - '8080' # PRIVATE, only provider-connector dials this
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  provider-connector:
+    profiles: ['payments', 'full']
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-provider.toml:/app/config/connector.toml:ro
+      - ./keys/toon/provider-connector:/app/data:ro
+      - provider-connector-state:/app/state
+    ports:
+      - '3240:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      provider:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
   # The hub. Starts after all three accepting peers are healthy (it dials them; a
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
@@ -1189,6 +1258,11 @@ services:
         condition: service_healthy
         required: false
       anytoon-connector:
+        condition: service_healthy
+        required: false
+      # On `payments` and `full`; `credentials` leaves it out, hence the
+      # same required:false downgrade as the three above.
+      provider-connector:
         condition: service_healthy
         required: false
     restart: unless-stopped
@@ -1361,6 +1435,9 @@ volumes:
   store-connector-state:
   gas-connector-state:
   anytoon-connector-state:
+  provider-connector-state:
+  # The provider's lease table (see the `provider` service).
+  provider-state:
   # The issuer's signed epoch keyring + the minter/issuer proxy pair, written
   # by the issuer-keys job. Dev key material; dies with `make clean`.
   anytoon-keys:

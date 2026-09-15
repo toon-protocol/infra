@@ -49,7 +49,7 @@ const SYSTEM = address('11111111111111111111111111111111');
 const TOKEN = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = address('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR');
-const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector'];
+const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector', 'provider-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
@@ -102,15 +102,19 @@ async function ata(owner) {
 {
   const mintInfo = await rpc.getAccountInfo(mintKp.address, { encoding: 'base64' }).send();
   if (mintInfo.value !== null) {
-    // The BUYER's ATA is checked too, and not only the relay's: a chain seeded
-    // by an older revision of this script has the mint and the connectors but
-    // no buyer, and skipping on the relay alone would leave the smoke unable
-    // to open its channel on a stack that looks seeded.
+    // EVERY node's ATA is checked, and the BUYER's: a chain seeded by an
+    // older revision of this script has the mint and the connectors it knew
+    // about, but not a node added since (the provider-connector was) and not
+    // necessarily the buyer — and a connector whose settlement key holds no
+    // SOL refuses to boot, so skipping on the relay alone would leave a new
+    // node unbootable on a stack that looks seeded.
     const funded = async (owner) => {
       const bal = await rpc.getTokenAccountBalance(await ata(owner)).send().catch(() => null);
       return bal !== null && BigInt(bal.value.amount) > 0n;
     };
-    if (await funded(nodeSigners['relay-connector'].address) && await funded(BUYER)) {
+    const allFunded = (await Promise.all([...NODES.map((n) => nodeSigners[n].address), BUYER].map(funded)))
+      .every(Boolean);
+    if (allFunded) {
       console.log('[seed-toon-solana] mint + funded connector/buyer ATAs already exist — nothing to do.');
       process.exit(0);
     }

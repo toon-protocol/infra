@@ -139,8 +139,10 @@ hold the detailed findings).
   `claim-minter/` is used — the issuer itself is the upstream image, pulled
   and run unmodified. The `payments` profile never builds it
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
-  3210, 3220, 3230, 3300, 3400, 7100 — the `payments` profile only needs
-  8545, 8899, 8900, 3200 and 7100; `credentials` needs those five plus 3230
+  3210, 3220, 3230, 3240, 3300, 3400, 7100 — the `payments` profile only
+  needs 8545, 8899, 8900, 3200, 3240 and 7100 (plus 40000–42599 for the
+  provider's workload SSH forwards and ports); `credentials` needs the
+  first five plus 3230
 - **Full stack only** — `*.localhost` resolving to loopback (default on
   modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
 
@@ -363,6 +365,8 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
+| `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
@@ -385,9 +389,11 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    │        (uUSDC on SOLANA, at par)           └─▶ store:3300/store (kind:5094/5095)
    ├─ g.toon.gastation ──[peering relay-gas]──▶ gas-connector :3220
    │        (uUSDC on SOLANA, at par)           └─▶ gas-station:3300/gas (kind:5096 + 5098)
-   └─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
-       *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
-       floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
+   ├─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
+   │   *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
+   │   floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
+   └─ g.toon.provider.* ──[peering relay-provider]──▶ provider-connector :3240
+            (uUSDC on SOLANA, at par)              └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
                  ▲
                  └── rate polled from two real Uniswap v3 pools on the same
                      anvil, kept live by the swap-driver service (§6.7)
@@ -411,8 +417,8 @@ for and the ANYONE the hub signs for are the same wire format carrying
 integers 10^12 apart.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220**,
-  anytoon **3230** (all `GET /ilp` self-describing; the operator surface
-  rides the same port).
+  anytoon **3230**, provider **3240** (all `GET /ilp` self-describing; the
+  operator surface rides the same port).
 - The apps' PAID handler ports (relay 3100, store 3300, gas-station 3300)
   are **unpublished** — the only route to them is a paid packet through a
   connector, and the relay leans on exactly that (it skips schnorr

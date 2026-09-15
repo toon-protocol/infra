@@ -46,8 +46,8 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-hs hs-address logs ps \
-        require-store-context require-anytoon-context
+        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-hs \
+        hs-address logs ps require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -266,6 +266,18 @@ smoke-payments:
 ## No store, gateway, bundler or gas-station assertions.
 smoke-credentials:
 	TOON_SMOKE_CREDENTIALS_ONLY=1 node scripts/smoke-toon.mjs
+
+## compute-provider proof for `make up-payments` (or `make up`): a tenant
+## opens a Solana mock-USDC channel against the hub, signs a Lease Request
+## with a fresh Nostr key, pays g.toon.provider.basic.v1.spawn through the
+## hub (sealed to the provider's own connector), and the answer names a
+## container that is running on the host and reachable over SSH with the
+## tenant's key; both connectors' books grow by their prices, and a replay
+## of the same request is refused (and still billed). The workload is left
+## to expire (conf/provider.toml lease_interval_s) unless the script removes
+## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
+smoke-provider:
+	node scripts/smoke-provider.mjs
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,
