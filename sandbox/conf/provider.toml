@@ -56,6 +56,14 @@ publish_url = "http://directory-publisher:8081/publish"
 http_bind_addr = "0.0.0.0:8080"
 handler_base_url = "http://provider:8080"
 
+# The operator endpoint (`POST /operator/evict`, used by `toon-provider
+# evict`) — loopback only, and left at the defaults on purpose: `docker
+# compose exec provider toon-provider evict ...` runs INSIDE this same
+# container, so 127.0.0.1 already reaches it. Not published as a compose
+# port and never should be — reaching it takes no signature and no payment.
+operator_bind_addr = "127.0.0.1:8090"
+operator_url = "http://127.0.0.1:8090"
+
 # 100 workload ids -> SSH forwards 40000..40099, port blocks from 41000
 # (16 per id, so up to 42599). Host ports, published by the host daemon.
 workload_id_range_start = 1000

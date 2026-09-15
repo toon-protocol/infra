@@ -46,8 +46,8 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory smoke-hs \
-        hs-address logs ps require-store-context require-anytoon-context
+        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
+        smoke-eviction smoke-hs hs-address logs ps require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -290,6 +290,17 @@ smoke-provider:
 ## (conf/provider.toml liveness_cadence_s), so it takes about a minute.
 smoke-directory:
 	node scripts/smoke-directory.mjs
+
+## eviction proof for `make up-payments` (or `make up`): a tenant pays for its
+## own lease, `docker compose exec provider toon-provider evict ...` stops it
+## through the provider's loopback-only operator endpoint (never a published
+## port), the container is gone, the free status route reports
+## `Ended(eviction)`, and a signed Eviction Notice naming the workload id and
+## reason is readable on the sandbox relay. The lease is always evicted
+## before the script exits, so — unlike smoke-provider's raw `docker rm -f` —
+## it never leaves a lease running for smoke-directory to count.
+smoke-eviction:
+	node scripts/smoke-eviction.mjs
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,
