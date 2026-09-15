@@ -23,8 +23,34 @@ public_ip = "127.0.0.1"
 # scripts/smoke-provider.mjs derives it from this line.
 nostr_private_key = "498e723f94204af41bc15fb391d1f42481193ca903fdcc302d928f7a8fbfbb12"
 
+# The Relay Set: the sandbox relay, by the address the compose network reaches
+# it on for READS. Writes to it are paid packets on a different address — see
+# RELAY_WRITE_ROUTES on the `directory-publisher` service.
 relay_set = ["ws://relay:7100"]
 capabilities = []
+
+# ── The Provider Directory (TOON_Network spec §4) ────────────────────────────
+# What the Provider Profile tells a tenant about reaching and paying this
+# provider. The URL is a location hint; the sealing key is what a tenant
+# actually seals its spawn to and refuses to proceed without (ADR 0011), so it
+# is copied VERBATIM from the connector's own self-description —
+# `curl -s http://localhost:3240/ilp/identity | jq -r .publicKey` — including
+# the 0x, so a tenant's comparison is byte-for-byte.
+connector_url = "http://provider-connector:3000/ilp"
+connector_seal_key = "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188"
+
+# This sandbox sells containers on a shared host daemon.
+isolation = "shared-kernel"
+
+# SHORT on purpose, like lease_interval_s: `make smoke-directory` waits out a
+# cadence to prove Liveness is REPLACED rather than accumulated, and 30 s is a
+# wait you can sit through. Each event expires 5 x 30 = 150 s out (ADR 0007).
+liveness_cadence_s = 30
+
+# Where directory events go to be PAID FOR: the `directory-publisher` service,
+# which holds a Solana mock-USDC channel against the hub and buys one
+# g.toon.relay write per event. The provider app itself holds no money.
+publish_url = "http://directory-publisher:8081/publish"
 
 # The connector dials the app by compose service name.
 http_bind_addr = "0.0.0.0:8080"
@@ -38,6 +64,17 @@ ssh_port_start = 40000
 workload_port_start = 41000
 
 lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# What provider-connector settles in, straight out of conf/connector-provider.toml.
+[[settlement]]
+chain = "solana"
+token = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[[settlement]]
+chain = "evm:31337"
+token = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
 
 # One tier. A SHORT interval on purpose: the smoke leaves its workload to
 # expire, and a stack that reaps in three minutes is one you can re-run.

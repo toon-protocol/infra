@@ -46,7 +46,7 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-hs \
+        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory smoke-hs \
         hs-address logs ps require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -278,6 +278,18 @@ smoke-credentials:
 ## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
 smoke-provider:
 	node scripts/smoke-provider.mjs
+
+## provider-directory proof for `make up-payments` (or `make up`): the
+## provider's Profile, its Listing and its Liveness are read back off the
+## sandbox relay at :7100 by author and #L, the Listing is filterable by its
+## #l isolation and arch labels (the RELAY does the search, not the tenant),
+## Liveness carries an expiration five cadences out and is REPLACED rather
+## than accumulated on the next cadence, and every write was a PAID
+## g.toon.relay packet on the directory publisher's own Solana channel —
+## never the free g.toon.relay.ephemeral lane. It waits out one cadence
+## (conf/provider.toml liveness_cadence_s), so it takes about a minute.
+smoke-directory:
+	node scripts/smoke-directory.mjs
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,
