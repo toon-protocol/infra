@@ -47,7 +47,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
-        smoke-eviction smoke-m1 smoke-m2 smoke-hs hs-address logs ps test require-store-context require-anytoon-context
+        smoke-eviction smoke-m1 smoke-m2 smoke-ci smoke-hs hs-address logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -333,6 +333,21 @@ smoke-m1:
 ## listing; about two minutes.
 smoke-m2:
 	node scripts/smoke-milestone2.mjs
+
+## The `ci` listing (TOON_Network #14; spec §4.4 and Appendix A.1,
+## scripts/smoke-ci.mjs) for `make up-payments` (or `make up`): the `ci`
+## Listing on the relay carries ["t","docker"] and A.1's content; a tenant
+## pays g.toon.provider.ci.v1.spawn through the hub; on the host daemon the
+## workload runs unprivileged beside the provider's privileged `toon-<id>-dind`
+## sidecar, both under the lease's cgroup slice carrying the tier's limits;
+## over SSH, as the tenant, /var/run/docker.sock answers, is NOT the host's
+## daemon, pulls hello-world and runs it; the books grow by the tier's price;
+## a tenant-signed terminate removes the workload, the sidecar, its volumes,
+## its network and its slice. Pre-pulls the dind image so the spawn does not
+## pay for it. About a minute.
+smoke-ci:
+	@docker pull -q $$(node -e "process.stdout.write(require('fs').readFileSync('scripts/smoke-ci.mjs','utf8').match(/DIND_IMAGE = '([^']+)'/)[1])") >/dev/null
+	node scripts/smoke-ci.mjs
 
 ## Unit tests for the host-side tooling (today: the publisher,
 ## scripts/publisher/, TOON_Network Milestone 2) against in-memory fakes —

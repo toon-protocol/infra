@@ -55,6 +55,18 @@ prefix = "g.toon.provider.smoke.v1.extend"
 handler_url = "http://provider:8080/listings/smoke/v1/extend"
 price = 1000
 
+# The `ci` listing (conf/provider.toml; spec Appendix A.1): 5000 per 600 s
+# Lease Interval, bought by `make smoke-ci`.
+[[routes]]
+prefix = "g.toon.provider.ci.v1.spawn"
+handler_url = "http://provider:8080/listings/ci/v1/spawn"
+price = 5000
+
+[[routes]]
+prefix = "g.toon.provider.ci.v1.extend"
+handler_url = "http://provider:8080/listings/ci/v1/extend"
+price = 5000
+
 [[routes]]
 prefix = "g.toon.provider.availability"
 handler_url = "http://provider:8080/availability"
