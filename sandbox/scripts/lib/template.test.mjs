@@ -161,3 +161,22 @@ test('an address names the Template to read: kind, publisher, name', () => {
   assert.throws(() => parseTemplateAddress(`30436:${PUBLISHER}:`), /name/);
   assert.throws(() => parseTemplateAddress('30436:nothex:static-site'), /pubkey/);
 });
+
+test('a tenant value that is not a string is refused: the provider would only bill for saying so', () => {
+  // §6.2's `env` is an object of environment VARIABLES, and the provider
+  // parses it as strings — a number here is `invalid_request` on a paid
+  // route (ADR 0003).
+  assert.throws(() => expand(fixtureTemplate(), { values: { SITE_TITLE: 5 } }), /SITE_TITLE/);
+  assert.throws(() => expand(fixtureTemplate(), { values: { SITE_TITLE: null } }), /SITE_TITLE/);
+});
+
+test('a Template that lists the same port twice is refused', () => {
+  // The provider refuses `80/tcp is listed twice` as invalid_request, and
+  // that refusal is billed: a Template nobody could spawn is caught here.
+  assert.throws(
+    () => expand(fixtureTemplate({ ports: [{ container_port: 8080, protocol: 'tcp' }, { container_port: 8080, protocol: 'tcp' }] })),
+    /8080\/tcp/,
+  );
+  // The same port on the other protocol is two ports, not one twice.
+  assert.equal(expand(fixtureTemplate({ ports: [{ container_port: 8080, protocol: 'tcp' }, { container_port: 8080, protocol: 'udp' }] })).ports.length, 2);
+});

@@ -134,6 +134,7 @@ export function checkTemplateContent(content) {
   }
 
   if (!Array.isArray(content.ports)) throw new Error('a Template\'s ports is a list of { container_port, protocol }');
+  const seen = new Set();
   for (const port of content.ports) {
     if (!isObject(port)) throw new Error('a Template\'s ports is a list of { container_port, protocol }');
     refuseUnknown(port, PORT_FIELDS, 'this Template\'s ports carry');
@@ -141,6 +142,11 @@ export function checkTemplateContent(content) {
       throw new Error(`ports: ${JSON.stringify(port.container_port)} is not a container port`);
     }
     if (port.protocol !== 'tcp' && port.protocol !== 'udp') throw new Error(`ports: protocol is "tcp" or "udp", not ${JSON.stringify(port.protocol)}`);
+    // The provider refuses a repeated port/protocol as invalid_request, and
+    // that refusal is paid for (ADR 0003).
+    const key = `${port.container_port}/${port.protocol}`;
+    if (seen.has(key)) throw new Error(`ports: ${key} is listed twice`);
+    seen.add(key);
   }
 
   if (content.data_path !== undefined && (typeof content.data_path !== 'string' || !content.data_path.startsWith('/'))) {
@@ -215,10 +221,12 @@ function checkValues(content, values) {
   const asked = content.env_tenant;
   const given = Object.keys(values);
   const missing = asked.filter((name) => !Object.hasOwn(values, name));
+  const notStrings = asked.filter((name) => Object.hasOwn(values, name) && typeof values[name] !== 'string');
   const unasked = given.filter((name) => !asked.includes(name));
-  if (missing.length > 0 || unasked.length > 0) {
+  if (missing.length > 0 || unasked.length > 0 || notStrings.length > 0) {
     const faults = [
       missing.length > 0 ? `no value for ${missing.join(', ')}` : null,
+      notStrings.length > 0 ? `${notStrings.join(', ')}: an environment variable's value is a string` : null,
       unasked.length > 0 ? `${unasked.join(', ')}: this Template does not open ${unasked.length > 1 ? 'those settings' : 'that setting'}` : null,
     ].filter(Boolean);
     throw new Error(

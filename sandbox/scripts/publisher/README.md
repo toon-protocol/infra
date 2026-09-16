@@ -225,11 +225,12 @@ Template's own address, which the provider keeps with the lease and reports in
 `status` without ever acting on it.
 
 **Everything that could go wrong is an error BEFORE anything is paid:** a
-missing tenant value (named), a value the Template never opened, a
-capability-like or undefined field, an `env_tenant` name `env_fixed` already
-fixes, a `workload_id` that is not 32 bytes of hex or an `ssh_public_key` that
-is not one OpenSSH line. A spawn refused at the provider is a spawn the tenant
-was billed for (ADR 0003), so none of these is worth finding there.
+missing tenant value (named), a value the Template never opened, a value that
+is not a string, a capability-like or undefined field, an `env_tenant` name
+`env_fixed` already fixes, the same `port/protocol` listed twice, a
+`workload_id` that is not 32 bytes of hex, an `ssh_public_key` that is not one
+OpenSSH line. A spawn refused at the provider is a spawn the tenant was billed
+for (ADR 0003), so none of these is worth finding there.
 
 ### How `data_path` maps onto a spawn
 
