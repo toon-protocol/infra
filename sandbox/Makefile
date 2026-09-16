@@ -47,7 +47,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-ci smoke-hs hs-address \
         logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -346,6 +346,34 @@ smoke-m1:
 ## listing; about two minutes.
 smoke-m2:
 	node scripts/smoke-milestone2.mjs
+
+## MILESTONE 3 ACCEPTANCE TEST (TOON_Network #11 / #35, scripts/smoke-milestone3.mjs)
+## for `make up-payments` (or `make up`): Warm Standby end to end, across BOTH
+## providers. One signed spawn with `standby_set` [provider, provider2] is
+## paid on the first provider's g.toon.provider.warm.v1.spawn (the PRIMARY:
+## role primary, access, a running SSH-reachable workload in its id range)
+## and on the second's g.toon.provider2.warm.v1.standby at standby_price (the
+## WARM STANDBY: role standby, no access, a slot its Liveness counts); the
+## reservation is paid on .standby.extend and refuses .extend (not_running).
+## Then `docker compose stop provider`: the standby watches the primary's
+## Liveness expire, announces a Takeover (kind 30433, d = the workload id)
+## on the relay, settles two cadences later and starts the workload in ITS
+## OWN id range (toon-11xx), reachable with the tenant's key; .extend at
+## full price succeeds and .standby.extend is not_standby. `docker compose
+## start provider`: the primary finds the Takeover, stops its copy (status
+## `stopped`) and exactly one copy runs on the host. Every book is closed to
+## the unit — standby_price per reservation interval, full price for the
+## spawn and the post-Takeover extension, the two billed refusals, and ONE
+## g.toon.relay unit for the Takeover on directory-publisher2's channel —
+## and both leases are ended by the tenant. Buys the 600 s `warm` tier on
+## both providers; about eight minutes, four of them the takeover timeline
+## (conf/provider2.toml says why). It stops and restarts the FIRST provider's
+## container, so nothing else should be spawning on it meanwhile.
+## TOON_M3_STANDBY_ONLY=1 runs the reservation side against provider2 alone
+## — for a first provider that does not sell `warm` — and says in its
+## verdict that it is not a pass.
+smoke-m3:
+	node scripts/smoke-milestone3.mjs
 
 ## The `ci` listing (TOON_Network #14; spec §4.4 and Appendix A.1,
 ## scripts/smoke-ci.mjs) for `make up-payments` (or `make up`): the `ci`

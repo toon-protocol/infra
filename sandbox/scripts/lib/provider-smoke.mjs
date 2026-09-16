@@ -1,6 +1,7 @@
 // Shared pieces of the compute-provider smokes (TOON_Network Milestone 1):
 // scripts/smoke-provider.mjs, smoke-directory.mjs, smoke-eviction.mjs and
-// smoke-milestone1.mjs. Everything here is what those scripts used to carry
+// smoke-milestone1.mjs — and, with a provider argument and the Standby Set
+// pieces, smoke-milestone3.mjs. Everything here is what those scripts used to carry
 // four times over — the sandbox's committed addresses, the provider's config
 // as the source of truth for prices and keys, the ok/FAIL reporter, the
 // connectors' claim-book readers (the same ones scripts/smoke-toon.mjs uses),
@@ -53,6 +54,9 @@ export const HUB_FEE = 100n;
 // The provider's expiry sweep cadence (its cleanup.rs SWEEP_INTERVAL_SECS):
 // the longest a lease can outlive its expires_at before the workload is gone.
 export const SWEEP_S = 30;
+// The standby watchdog's step (its watchdog.rs WATCHDOG_INTERVAL_SECS): how
+// late, past the cadence arithmetic, a Takeover can be announced or settled.
+export const WATCHDOG_S = 10;
 
 // Mirrored from the provider's src/nostr/kinds.rs — the allocation in spec
 // §3.1 (ADR 0012: one block per NIP-01 class, `432` suffix). What is
@@ -66,6 +70,7 @@ export const K_LISTING = 30432; // addressable
 export const K_IMAGE = 30434; // addressable: Image Registry entry (Milestone 2)
 export const K_BLOB = 30435; // addressable: Blob Record (Milestone 2)
 export const K_TEMPLATE = 30436; // addressable: Template (Milestone 2)
+export const K_TAKEOVER = 30433; // addressable: a Warm Standby's Takeover claim (Milestone 3, spec §7.1)
 export const TOON_LABEL = 'toon.network';
 
 
@@ -334,6 +339,14 @@ export const hasTag = (event, cells) =>
 /** The directory filters for one provider: by author and the toon.network label. */
 export const directoryFilter = (kind, which) =>
   ({ kinds: [kind], authors: [providerOf(which).pubkey], '#L': [TOON_LABEL] });
+/**
+ * The Takeover claims on one workload id from the given claimants — the same
+ * filter the provider's own settle step uses (spec §7.1 step 3): the kind,
+ * `d` = the workload id, and the AUTHORS restricted to the Standby Set, so a
+ * claim from outside the set never even arrives.
+ */
+export const takeoverFilter = (workloadId, claimants) =>
+  ({ kinds: [K_TAKEOVER], '#d': [workloadId], authors: claimants.map((c) => providerOf(c).pubkey) });
 
 // ── Solana payment-channel account layout ─────────────────────────────────
 // Offsets from the connector's packages/solana-program/src/state.rs (see the
@@ -385,6 +398,40 @@ export async function findWorkload(sshPort, seconds = 10) {
     return line ? { name: line.split('\t')[0], line: line.replace(/\t/g, '  ') } : null;
   }, seconds, 1000);
 }
+/** The names of every `toon-<id>` workload container that is RUNNING on the host daemon right now. */
+export const runningWorkloads = () =>
+  docker('ps', '--filter', 'name=toon-', '--format', '{{.Names}}').trim().split('\n').filter(isWorkloadName);
+/** A container's state on the daemon (`running`, `exited`, …), or null when no container of that exact name exists. */
+export function containerState(name) {
+  const out = docker('ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.State}}').trim();
+  return out.length === 0 ? null : out;
+}
+/**
+ * `docker compose stop|start <service>` for one sandbox service. The profile
+ * is what lets compose resolve the service at all (every service here carries
+ * one); `full` names them all, and stop/start touch only the container named.
+ */
+export const composeService = (verb, service) => docker('compose', '--profile', 'full', verb, service);
+/** True once the compose service's container reports `healthy`, polled for up to `seconds`. */
+export async function composeHealthy(service, seconds = 90) {
+  const healthy = await waitFor(async () => {
+    const out = docker('compose', '--profile', 'full', 'ps', '--format', '{{.Service}} {{.Health}}');
+    return new RegExp(`^${service} healthy$`, 'm').test(out);
+  }, seconds, 2000);
+  return healthy === true;
+}
+/**
+ * The hub client-book channel key (`solana:<account>`) a directory publisher
+ * pays its relay writes on, read from the channel store on its own volume.
+ * Two publishers hold two channels (docker-compose.yml says why), so the one
+ * relay write a smoke is looking for has to be counted on the right one.
+ */
+export function publisherChannel(service) {
+  const store = JSON.parse(docker('compose', '--profile', 'full', 'exec', '-T', service, 'cat', '/var/lib/toon-publisher/channels.json'));
+  const ids = Object.keys(store);
+  if (ids.length !== 1) throw new Error(`${service} holds ${ids.length} channels, expected exactly one`);
+  return `solana:${ids[0]}`;
+}
 /** True once no container of that exact name exists on the daemon (running or not) — the workload is gone — polled for up to `seconds`. */
 export async function workloadGone(name, seconds = 10) {
   const gone = await waitFor(
@@ -413,15 +460,18 @@ export function newTenant(keyName) {
  * A signed Lease Request: kind K_LEASE_REQUEST, p = the provider it is
  * addressed to, op, an expiration `ttl` seconds out. The `p` tag is the whole
  * reason this takes a provider: a provider refuses a request naming another
- * provider's key, so a Standby Set's members each get their own copy — same
- * tenant, same workload id, one `p` tag each.
+ * provider's key. `which` may also be an ARRAY of providers — a Standby Set's
+ * spawn is signed ONCE, carries one `p` tag per member in the set's order,
+ * and the same bytes go to every member (spec §7; only a spawn may name more
+ * than one provider, and its content's `standby_set` must list the same keys).
  */
 export function leaseRequest(tenant, op, content, ttl = 120, which) {
   const now = nowSec();
+  const members = Array.isArray(which) ? which : [which];
   return finalizeEvent({
     kind: K_LEASE_REQUEST,
     created_at: now,
-    tags: [['p', providerOf(which).pubkey], ['op', op], ['expiration', String(now + ttl)]],
+    tags: [...members.map((m) => ['p', providerOf(m).pubkey]), ['op', op], ['expiration', String(now + ttl)]],
     content: JSON.stringify(content),
   }, tenant.secret);
 }

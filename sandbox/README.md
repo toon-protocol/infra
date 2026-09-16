@@ -274,6 +274,38 @@ Milestone 1 and 2 built still means the first provider: `make smoke-provider2`
 is the one target that says otherwise, and it is the same script with a
 provider argument.
 
+**`make smoke-m3` — Milestone 3's acceptance test** (TOON_Network #11 / #35,
+`scripts/smoke-milestone3.mjs`): Warm Standby end to end, across both
+providers. A tenant signs ONE spawn whose content names the Standby Set
+`[provider, provider2]` — one `p` tag per member, the same bytes to each —
+and pays it on the first provider's `g.toon.provider.warm.v1.spawn` at the
+full price and on the second's `g.toon.provider2.warm.v1.standby` at
+`standby_price`. The primary answers `role: primary` with access and runs
+the workload in its own id range (`toon-10xx`), reachable over SSH with the
+tenant's key; the standby answers `role: standby` with no access, `status`
+says `reserved`, its next Liveness has `available.warm` one lower, it is
+paid on `.standby.extend` and refuses `.extend` as `not_running`. The smoke
+then runs `docker compose stop provider` and waits: the primary's Liveness
+expires five cadences after its last publication, one cadence of silence
+later the standby announces a Takeover on the relay (kind 30433, `d` = the
+workload id, `{ workload_id, primary }`, signed by provider2, paid as one
+`g.toon.relay` unit on `directory-publisher2`'s own channel), two cadences
+after that it settles the race and starts the workload from the image in
+ITS OWN id range (`toon-11xx`), reachable with the same key; `status` on
+provider2 says `running`, `role: standby`, `takeover.winner` = itself and
+an unchanged `expires_at`, so `.extend` at the full price is bought and
+`.standby.extend` is refused `not_standby`. `docker compose start provider`
+then has the primary find the Takeover at startup and stand down — `status`
+`stopped`, no access — leaving exactly one running copy on the host daemon.
+Every book is closed to the unit (both peer books, the hub's client book,
+the publisher's relay units) and both leases are ended by the tenant. Buys
+the 600 s `warm` tier on both providers; about eight minutes, four of them
+the takeover timeline. It stops and restarts the FIRST provider's container,
+so run it alone. `TOON_M3_STANDBY_ONLY=1` runs the reservation side against
+provider2 alone for a first provider that does not sell `warm`, and its
+verdict says it is not a pass. `make smoke-m1` and `make smoke-m2` still
+pass afterwards.
+
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
 FULL stack (`make up`): the store, the gateway and the relay. `node
@@ -495,7 +527,7 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
 | `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
-| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s), `warm` (600 s, `standby_price = 400` — the tier that sells Warm Standbys, spec §7) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2` and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s), `warm` (600 s, `standby_price = 400` — the tier that sells Warm Standbys, spec §7) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2`, `make smoke-m3` (with `provider2`) and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
 | `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the Solana channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
 | `provider2-connector` | TOON connector terminating `g.toon.provider2.*` — the SECOND provider's, on its own peering with the hub. Same rows as the first, plus the two the `warm` tier prices: `.standby` and `.standby.extend` at 400 (spec §7) | 3250 (client edge) |
 | `provider2` | the SECOND compute provider (TOON_Network #34, Milestone 3), the same image and the same host daemon as `provider`, with its own config (`conf/provider2.toml`), its own Nostr identity, its own lease table and **disjoint ranges**: workload ids 1100–1199, SSH at 43000+, port blocks from 44000. A Standby Set has to span two PROVIDERS — a Warm Standby bought from the provider already running the primary is no standby — so the sandbox runs a second one, whole. Sells `basic`, `smoke` and `warm` (600 s, `standby_price = 400`) | — |
