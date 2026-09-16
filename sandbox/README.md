@@ -181,7 +181,7 @@ make up-payments     # docker compose --profile payments up -d --build
 make smoke-payments  # payment-layer proof only
 ```
 
-Thirteen services instead of thirty-two:
+Thirteen services instead of thirty-five:
 
 | in `payments` | why |
 |---|---|
@@ -529,9 +529,6 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    │        (uUSDC on SOLANA, at par)              └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
    └─ g.toon.provider2.* ─[peering relay-provider2]─▶ provider2-connector :3250
             (uUSDC on SOLANA, at par)              └─▶ provider2:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
-            the SECOND provider: its own identity, its own channel, its own
-            id/SSH/port ranges — and `.standby` / `.standby.extend` rows on
-            both connectors, for the `warm` tier that prices Warm Standbys
                  ▲
                  └── rate polled from two real Uniswap v3 pools on the same
                      anvil, kept live by the swap-driver service (§6.7)
