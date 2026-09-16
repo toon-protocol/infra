@@ -13,11 +13,11 @@
 #   DERIVED from anvil's public test mnemonic (rewritten every run; their
 #   ADDRESSES are committed in conf/connector-*.toml as counterparty_key and
 #   feed the committed channel ids, so they must be identical everywhere):
-#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29
-#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34/35/36/37/38
-#       (28/37 are the anytoon-connector's, 29/38 the provider-connector's;
-#        27 was already spent on the gas relayer below, which is why the EVM
-#        index skips it)
+#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30
+#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-39
+#       (28/37 are the anytoon-connector's, 29/38 the provider-connector's and
+#        30/39 the SECOND provider's, provider2-connector; 27 was already spent
+#        on the gas relayer below, which is why the EVM index skips it)
 #     gas-evm-relayer.key          EVM secp256k1, index 27 — the gas station's
 #                                  DEDICATED kind:5098 relayer; its 0x-prefixed
 #                                  value is embedded in conf/gas-station.conf
@@ -63,7 +63,8 @@ CAST="docker run --rm --entrypoint cast ghcr.io/foundry-rs/foundry:v1.8.1"
 CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.08.28.1
 
 i=0
-for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 provider-connector:29:38; do
+for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 \
+           provider-connector:29:38 provider2-connector:30:39; do
   IFS=: read -r node ei si <<<"$pair"
   mkdir -p "$KEYS/$node"
   for k in signer.key operator-send.key operator-bearer.token; do

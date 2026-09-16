@@ -67,6 +67,29 @@ prefix = "g.toon.provider.ci.v1.extend"
 handler_url = "http://provider:8080/listings/ci/v1/extend"
 price = 5000
 
+# The `warm` listing (conf/provider.toml): the tier that prices Warm Standbys,
+# so `toon-provider routes` prints FOUR rows for it — the running pair at 1000
+# and the standby pair at its `standby_price`, 400. Bought by `make smoke-m3`.
+[[routes]]
+prefix = "g.toon.provider.warm.v1.spawn"
+handler_url = "http://provider:8080/listings/warm/v1/spawn"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.extend"
+handler_url = "http://provider:8080/listings/warm/v1/extend"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.standby"
+handler_url = "http://provider:8080/listings/warm/v1/standby"
+price = 400
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.standby.extend"
+handler_url = "http://provider:8080/listings/warm/v1/standby/extend"
+price = 400
+
 [[routes]]
 prefix = "g.toon.provider.availability"
 handler_url = "http://provider:8080/availability"

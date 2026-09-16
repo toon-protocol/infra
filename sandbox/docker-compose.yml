@@ -54,6 +54,13 @@ name: toon-sandbox
 #                                          Liveness are PAID g.toon.relay
 #                                          packets, never the free ephemeral
 #                                          lane (TOON_Network ADR 0007)
+#               provider2, provider2-connector, directory-publisher2
+#                                          THE SECOND PROVIDER (TOON_Network
+#                                          #34, Milestone 3), the same three
+#                                          services again: a Standby Set spans
+#                                          two providers, so the sandbox has
+#                                          two — own identity, own connector
+#                                          on :3250, own channel, own payer
 #             Everything else — the AR.IO gateway + Turbo bundler, the store,
 #             gas-station and Anyone credentials-issuer subsystems and their
 #             three peering connectors — stays out (the `credentials` profile
@@ -1280,6 +1287,106 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ── THE SECOND PROVIDER (TOON_Network #34, Milestone 3) ──────────────────
+  # A Standby Set has to span two PROVIDERS — a Warm Standby bought from the
+  # provider that already runs the primary is no standby at all (spec §7) — so
+  # the sandbox runs a second one, whole: its own Nostr identity
+  # (conf/provider2.toml), its own connector on its own client edge, its own
+  # peering channel with the hub, its own directory publisher on its own
+  # wallet, and its own lease table. The ONE thing it shares with the first
+  # provider is this host's Docker daemon, which a real second provider would
+  # not: hence the disjoint workload id, SSH and port ranges in its config
+  # (ids 1100-1199, SSH 43000-43099, port blocks 44000-45599), so the two
+  # never fight over a container name or a host port.
+  #
+  # Same image, same build context as `provider` — one checkout, two configs.
+  provider2:
+    profiles: ['payments', 'full']
+    build:
+      context: ${PROVIDER_CONTEXT:-../../provider}
+    volumes:
+      - ./conf/provider2.toml:/etc/toon-provider/provider.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Its OWN lease table: two providers sharing one would be one provider.
+      - provider2-state:/var/lib/toon-provider
+    expose:
+      - '8080' # PRIVATE, only provider2-connector dials this
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The SECOND provider's payer for relay writes. Everything the
+  # `directory-publisher` service's header says applies here; the one field
+  # that matters is TOON_ACCOUNT_INDEX. Two publishers on one account would be
+  # two processes on one channel, and two processes on one channel share one
+  # nonce watermark — the loser of that race has every later claim refused, so
+  # the second provider's publisher pays from ACCOUNT INDEX 2 of the same
+  # committed test phrase, with its own wallet, its own channel and its own
+  # watermark volume. scripts/seed-toon-solana.mjs funds it by address.
+  directory-publisher2:
+    profiles: ['payments', 'full']
+    build:
+      context: ${PROVIDER_CONTEXT:-../../provider}
+      dockerfile: tools/publisher/Dockerfile
+    environment:
+      TOON_CONNECTOR_URL: http://relay-connector:3000
+      TOON_CHAIN: solana
+      TOON_RPC_URL: http://solana-validator:8899
+      TOON_MNEMONIC: 'test test test test test test test test test test test junk'
+      TOON_ACCOUNT_INDEX: '2'
+      TOON_DEPOSIT: '10000000' # 10 mock USDC at 6 dp; a write costs 1 unit
+      TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
+      RELAY_WRITE_ROUTES: '{"ws://relay:7100":"g.toon.relay"}'
+      TOON_ENDPOINT_REWRITE: '{"http://127.0.0.1:3200":"http://relay-connector:3000"}'
+    volumes:
+      - directory-publisher2-state:/var/lib/toon-publisher
+    expose:
+      - '8081' # PRIVATE, only provider2 dials this
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+      seed-toon-solana:
+        condition: service_completed_successfully
+      relay-connector:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The second provider's connector: same pinned image as every other node
+  # here, the next free client-edge port (3250), its own key directory and its
+  # own state volume. It terminates g.toon.provider2.* — including the
+  # `.standby` and `.standby.extend` rows conf/provider2.toml's `warm` tier
+  # prices (spec §7) — and accepts the relay-provider2 peering.
+  provider2-connector:
+    profiles: ['payments', 'full']
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-provider2.toml:/app/config/connector.toml:ro
+      - ./keys/toon/provider2-connector:/app/data:ro
+      - provider2-connector-state:/app/state
+    ports:
+      - '3250:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      provider2:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
   # The hub. Starts after all three accepting peers are healthy (it dials them; a
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
@@ -1323,6 +1430,9 @@ services:
       # On `payments` and `full`; `credentials` leaves it out, hence the
       # same required:false downgrade as the three above.
       provider-connector:
+        condition: service_healthy
+        required: false
+      provider2-connector:
         condition: service_healthy
         required: false
     restart: unless-stopped
@@ -1500,6 +1610,11 @@ volumes:
   provider-connector-state:
   # The provider's lease table (see the `provider` service).
   provider-state:
+  # The second provider's, its connector's and its publisher's (TOON_Network
+  # #34) — one of each per provider, never shared.
+  directory-publisher2-state:
+  provider2-connector-state:
+  provider2-state:
   # The issuer's signed epoch keyring + the minter/issuer proxy pair, written
   # by the issuer-keys job. Dev key material; dies with `make clean`.
   anytoon-keys:

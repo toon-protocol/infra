@@ -51,7 +51,8 @@ const SYSTEM = address('11111111111111111111111111111111');
 const TOKEN = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = address('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR');
-const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector', 'provider-connector'];
+const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector',
+  'provider-connector', 'provider2-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
@@ -70,6 +71,10 @@ const BUYER_USDC = 1_000_000_000n; // 1000 USDC — the smoke deposits 10 of it
 // refused. Derived by `deriveFullIdentity(mnemonic, { accountIndex: 1 })`.
 const PUBLISHER = address('AqynRZwvVqUPRwRJXvm6odUb3t93fDjnWe3p6BeuUFxD');
 const PUBLISHER_USDC = 1_000_000_000n; // 1000 USDC — it deposits 10 of it
+// THE SECOND PROVIDER'S PUBLISHER (`directory-publisher2`, TOON_Network #34),
+// on account index 2 of the same phrase. It is a second wallet for the same
+// reason index 1 is a first one: one channel, one nonce watermark, one payer.
+const PUBLISHER2 = address('CqMbRgMuEhQi9BUS8xP44Wk5nENm48FqJnfjEi4eNb1k');
 
 const rpc = createSolanaRpc(RPC_URL);
 const rpcSubscriptions = createSolanaRpcSubscriptions(WS_URL);
@@ -123,7 +128,7 @@ async function ata(owner) {
       return bal !== null && BigInt(bal.value.amount) > 0n;
     };
     const allFunded = (await Promise.all(
-      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER].map(funded),
+      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER, PUBLISHER2].map(funded),
     )).every(Boolean);
     if (allFunded) {
       console.log('[seed-toon-solana] mint + funded connector/buyer/publisher ATAs already exist — nothing to do.');
@@ -151,6 +156,7 @@ const airdropTargets = [
   ['gas-fee-payer', gasFeePayer.address],
   ['buyer (the smoke test)', BUYER],
   ['directory-publisher (the provider’s relay-write payer)', PUBLISHER],
+  ['directory-publisher2 (the second provider’s)', PUBLISHER2],
   ...NODES.map((n) => [n, nodeSigners[n].address]),
 ];
 for (const [who, addr] of airdropTargets) {
@@ -258,6 +264,16 @@ for (const n of NODES) {
   const publisherAta = await ata(PUBLISHER);
   await sendIxs(authority, [createAtaIx(publisherAta, PUBLISHER), mintToIx(publisherAta, PUBLISHER_USDC)],
     `directory-publisher: ATA + 1000 USDC (${PUBLISHER})`);
+}
+
+// ── 6. the SECOND provider's publisher ────────────────────────────────────
+// Its own wallet, its own ATA, its own channel: two publishers on one account
+// would share one nonce watermark and the loser would have every later claim
+// refused (see docker-compose.yml, `directory-publisher2`).
+{
+  const publisher2Ata = await ata(PUBLISHER2);
+  await sendIxs(authority, [createAtaIx(publisher2Ata, PUBLISHER2), mintToIx(publisher2Ata, PUBLISHER_USDC)],
+    `directory-publisher2: ATA + 1000 USDC (${PUBLISHER2})`);
 }
 
 console.log('\n[seed-toon-solana] done.');
