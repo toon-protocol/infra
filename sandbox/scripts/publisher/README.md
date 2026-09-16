@@ -6,7 +6,7 @@ stack (`make up`): it pays the store and the relay through the hub and reads
 back through the local gateway. Not a tenant product.
 
 ```
-node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400]
+node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520]
 node scripts/publisher.mjs blob-verify sha256:<hex>
 make test
 ```
@@ -33,10 +33,12 @@ same signed event JSON is uploaded once to the store. The command prints
 JSON: the blob digest, every part, and the record's `event_id` (relay) and
 `store_txid` (the copy an Image Registry entry cites).
 
-- **Refused before any upload:** a `--part-size` over `maxPartSize()` (the
-  cap less the store's data item envelope), or a blob whose record would not
-  fit one data item (689 parts at 100 KiB — some 67 MiB — after which
-  the message names the part size to raise).
+- **Refused before a channel is opened or anything uploaded:** a
+  `--part-size` over `maxPartSize()` (the cap less the store's data item
+  envelope), or a blob whose record would not fit one data item (689 parts
+  at 100 KiB — some 67 MiB — after which the message names the part size
+  to raise to). `--data-item-max` moves the cap for a store whose ceiling
+  is not the sandbox's free tier.
 - **Skipped:** a blob the relay already records (a `kind 30435` event with
   `#x = <hex>`) makes no upload; the existing record's `event_id` is
   reported, and its `store_txid` when this host uploaded it.

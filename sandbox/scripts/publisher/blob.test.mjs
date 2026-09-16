@@ -111,7 +111,8 @@ test('a blob whose Blob Record would not fit one data item is refused, naming th
   // 1 KiB parts of a 1 MiB blob = 1024 parts: ~145 bytes each in the record, well over 107,520.
   await assert.rejects(
     publishBlob({ bytes: bytes(1024 * KiB, 3), secretKey: generateSecretKey(), partSize: KiB, io }),
-    (e) => /part size/i.test(e.message) && /raise|larger/i.test(e.message) && e.message.includes('1024'),
+    // 1024 parts at 1 KiB; the fix it names is the smallest part size whose record fits: 2 KiB.
+    (e) => /part size/i.test(e.message) && e.message.includes('Raise the part size to 2048'),
   );
   assert.equal(io.uploads.length, 0, 'refused before the first part went anywhere');
   assert.equal(io.published.length, 0);

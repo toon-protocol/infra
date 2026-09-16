@@ -3,11 +3,13 @@
 // (TOON_Network Milestone 2). Run from sandbox/ on the host against a running
 // stack (`make up`). Not a tenant product.
 //
-//   node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400]
+//   node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520]
 //       Store <file> as parts in the TOON store and publish its Blob Record
 //       (issue #20). Prints the digest, every part's txid, and the record's
 //       relay event id and store txid. A blob already recorded on the relay
-//       is skipped and the existing record reported.
+//       is skipped and the existing record reported. --data-item-max is the
+//       store's signed data item ceiling (the sandbox's free tier by default;
+//       a production store's differs).
 //
 //   node scripts/publisher.mjs blob-verify <sha256:hex>
 //       Read a Blob Record back the way a provider would: from the relay by
@@ -19,7 +21,7 @@
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { getPublicKey, verifyEvent } from 'nostr-tools/pure';
-import { publishBlob, sha256Hex, DEFAULT_PART_SIZE, K_BLOB } from './publisher/blob.mjs';
+import { publishBlob, planBlob, sha256Hex, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
 import { openToonIo, rememberRecord, readLedger, findBlobRecordOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
 
 const log = (m) => console.error(`  ${m}`);
@@ -44,12 +46,15 @@ async function blob(positionals, values) {
   if (!file) usage();
   const secretKey = secretKeyFrom(values.key ?? process.env.PUBLISHER_KEY);
   const partSize = Number(values['part-size'] ?? DEFAULT_PART_SIZE);
+  const dataItemMax = Number(values['data-item-max'] ?? DATA_ITEM_MAX_BYTES);
   const bytes = readFileSync(file);
-  log(`publisher ${getPublicKey(secretKey)}; ${file}: ${bytes.length} bytes at ${partSize}-byte parts`);
+  // Refuse a plan that cannot fit BEFORE a channel is opened or anything paid.
+  const plan = planBlob({ bytes, partSize, dataItemMax, createdAt: 0 });
+  log(`publisher ${getPublicKey(secretKey)}; ${file}: ${bytes.length} bytes, ${plan.pieces.length} parts of ${partSize} (${plan.digest})`);
 
   const io = await openToonIo({ secretKey, log });
   try {
-    const report = await publishBlob({ bytes, secretKey, partSize, io });
+    const report = await publishBlob({ bytes, secretKey, partSize, dataItemMax, io });
     if (!report.skipped) rememberRecord(report.digest.slice('sha256:'.length), report.record.store_txid);
     const { event, ...record } = report.record;
     console.log(JSON.stringify({ ...report, record }, null, 2));
@@ -95,7 +100,7 @@ async function blobVerify(positionals) {
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { key: { type: 'string' }, 'part-size': { type: 'string' } },
+  options: { key: { type: 'string' }, 'part-size': { type: 'string' }, 'data-item-max': { type: 'string' } },
 });
 const [command, ...rest] = positionals;
 const commands = { blob, 'blob-verify': blobVerify };

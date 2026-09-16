@@ -44,15 +44,18 @@ export const HUB_FEE = 100n;
 // the longest a lease can outlive its expires_at before the workload is gone.
 export const SWEEP_S = 30;
 
-// Mirrored from the provider's src/nostr/kinds.rs. EVERY NUMBER IS A
-// PLACEHOLDER until kinds are allocated (spec §11); what is normative is the
-// NIP-01 class, which is why the smokes talk about replacement rather than
-// about the numbers.
+// Mirrored from the provider's src/nostr/kinds.rs — the allocation in spec
+// §3.1 (ADR 0012: one block per NIP-01 class, `432` suffix). What is
+// normative is the class, which is why the smokes talk about replacement
+// rather than about the numbers.
 export const K_LEASE_REQUEST = 4432; // regular, never published
 export const K_EVICTION = 4433; // regular
 export const K_PROFILE = 10432; // replaceable
 export const K_LIVENESS = 10433; // replaceable
 export const K_LISTING = 30432; // addressable
+export const K_IMAGE = 30434; // addressable: Image Registry entry (Milestone 2)
+export const K_BLOB = 30435; // addressable: Blob Record (Milestone 2)
+export const K_TEMPLATE = 30436; // addressable: Template (Milestone 2)
 export const TOON_LABEL = 'toon.network';
 
 // The free provider-wide routes and the paid per-listing-version ones.

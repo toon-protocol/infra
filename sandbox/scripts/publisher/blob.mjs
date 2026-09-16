@@ -19,10 +19,9 @@
 // Nothing here knows about money, channels or connectors.
 import { createHash } from 'node:crypto';
 import { finalizeEvent } from 'nostr-tools/pure';
+import { K_BLOB, TOON_LABEL } from '../lib/provider-smoke.mjs';
 
-// Mirrors the provider's src/nostr/kinds.rs (spec §3.1, ADR 0012).
-export const K_BLOB = 30435;
-export const TOON_LABEL = 'toon.network';
+export { K_BLOB, TOON_LABEL };
 
 // The sandbox store serves Turbo's free tier only: a SIGNED ANS-104 data item
 // of at most 107,520 bytes (conf/store.conf, README §6.4). The store measures
@@ -76,14 +75,12 @@ export function signedRecordBytes({ digestHex, size, partSize, partSizes, create
 }
 
 /**
- * Store `bytes` as parts and publish the Blob Record. Resolves to
- *   { skipped: false, digest, size, part_size, parts: [{ txid, sha256, size }], record: { event_id, store_txid, event } }
- * or, when the relay already has a record for this digest,
- *   { skipped: true, digest, size, record: { event_id, store_txid, event } }
- * (`store_txid` is null there when nobody recorded which store copy is the record's).
- * Throws before touching the network when `partSize` or the record would not fit a data item.
+ * What storing `bytes` at `partSize` will take, decided before anything is
+ * paid for: the digest, the pieces, and the size of the signed record they
+ * will make. Throws when `partSize` does not fit one store data item, or when
+ * the record would not — naming, in that case, the part size that would.
  */
-export async function publishBlob({ bytes, secretKey, partSize = DEFAULT_PART_SIZE, io, dataItemMax = DATA_ITEM_MAX_BYTES, now = () => Math.floor(Date.now() / 1000) }) {
+export function planBlob({ bytes, partSize = DEFAULT_PART_SIZE, dataItemMax = DATA_ITEM_MAX_BYTES, createdAt }) {
   if (!Number.isInteger(partSize) || partSize <= 0) throw new Error(`part size must be a positive integer, got ${partSize}`);
   const cap = maxPartSize(dataItemMax);
   if (partSize > cap) {
@@ -94,18 +91,41 @@ export async function publishBlob({ bytes, secretKey, partSize = DEFAULT_PART_SI
   }
 
   const digestHex = sha256Hex(bytes);
-  const digest = `sha256:${digestHex}`;
   const size = bytes.length;
-  const createdAt = now();
-
   const pieces = splitParts(bytes, partSize);
   const recordBytes = signedRecordBytes({ digestHex, size, partSize, partSizes: pieces.map((p) => p.length), createdAt });
   if (recordBytes > dataItemMax) {
+    const raiseTo = smallestFittingPartSize({ digestHex, size, createdAt, dataItemMax });
     throw new Error(
-      `the Blob Record for ${digest} would be ${recordBytes} bytes over ${pieces.length} parts of ${partSize} — ` +
-        `more than one store data item (${dataItemMax} bytes). Raise the part size (at most ${cap}) so the record fits`,
+      `the Blob Record for sha256:${digestHex} would be ${recordBytes} bytes over ${pieces.length} parts of ${partSize} — ` +
+        `more than one store data item (${dataItemMax} bytes). Raise the part size to ${raiseTo}` +
+        (raiseTo > cap ? `, which is over the ${cap}-byte part cap: this blob cannot be stored at this data item size` : ' so the record fits'),
     );
   }
+  return { digestHex, digest: `sha256:${digestHex}`, size, pieces, recordBytes };
+}
+
+/** The smallest part size whose record fits `dataItemMax` (binary search; 1 KiB granularity). */
+function smallestFittingPartSize({ digestHex, size, createdAt, dataItemMax }) {
+  const fits = (partSize) => signedRecordBytes({
+    digestHex, size, partSize, partSizes: splitParts({ length: size, subarray: (a, b) => ({ length: b - a }) }, partSize).map((p) => p.length), createdAt,
+  }) <= dataItemMax;
+  let lo = 1, hi = size;
+  while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if (fits(mid)) hi = mid; else lo = mid + 1; }
+  return Math.ceil(lo / 1024) * 1024;
+}
+
+/**
+ * Store `bytes` as parts and publish the Blob Record. Resolves to
+ *   { skipped: false, digest, size, part_size, parts: [{ txid, sha256, size }], record: { event_id, store_txid, event } }
+ * or, when the relay already has a record for this digest,
+ *   { skipped: true, digest, size, record: { event_id, store_txid, event } }
+ * (`store_txid` is null there when nobody recorded which store copy is the record's).
+ * Throws, via `planBlob`, before touching the network when `partSize` or the record would not fit a data item.
+ */
+export async function publishBlob({ bytes, secretKey, partSize = DEFAULT_PART_SIZE, io, dataItemMax = DATA_ITEM_MAX_BYTES, now = () => Math.floor(Date.now() / 1000) }) {
+  const createdAt = now();
+  const { digestHex, digest, size, pieces } = planBlob({ bytes, partSize, dataItemMax, createdAt });
 
   const existing = await io.relay.findBlobRecord(digestHex);
   if (existing) {
