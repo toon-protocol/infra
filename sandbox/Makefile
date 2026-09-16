@@ -47,7 +47,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
-        smoke-eviction smoke-m1 smoke-hs hs-address logs ps require-store-context require-anytoon-context
+        smoke-eviction smoke-m1 smoke-hs hs-address logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -320,6 +320,13 @@ smoke-eviction:
 ## minutes. TOON_M1_LISTING=basic runs it on the three-minute tier instead.
 smoke-m1:
 	node scripts/smoke-milestone1.mjs
+
+## Unit tests for the host-side tooling (today: the publisher,
+## scripts/publisher/, TOON_Network Milestone 2) against in-memory fakes —
+## no stack needed. The publisher itself runs against `make up`:
+##   node scripts/publisher.mjs blob <file> --key <hex>
+test:
+	npm test
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,

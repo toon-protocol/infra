@@ -208,6 +208,20 @@ between the two. It buys the sandbox-only `smoke` listing
 (`conf/provider.toml`, a 30 s Lease Interval) and takes three to four
 minutes; the provider repo's README describes what it proves.
 
+**The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
+the development tool that puts images on the TOON Network — it needs the
+FULL stack (`make up`): the store, the gateway and the relay. `node
+scripts/publisher.mjs blob <file> --key <hex>` stores a file as 100 KiB
+parts, one paid `kind:5094` job each on `g.toon.store`, publishes its
+**Blob Record** (kind 30435, `d = sha256:<hex>`, findable by `#x`) as a
+paid `g.toon.relay` write, and uploads the same signed record once more to
+the store so an Image Registry entry can cite that copy's txid. A blob the
+relay already records is skipped. `node scripts/publisher.mjs blob-verify
+sha256:<hex>` reads it all back the way a provider would (relay by `#x`,
+the copy and every part at the gateway's `/raw/<txid>`, every hash
+checked) and pays nothing. `make test` runs the publisher's unit tests
+against fakes; see `scripts/publisher/README.md`.
+
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
 `localstack`, `seed-gateway-block`, `seed-solana`), the `store`,
