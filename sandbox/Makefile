@@ -47,7 +47,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
-        smoke-eviction smoke-m1 smoke-hs hs-address logs ps test require-store-context require-anytoon-context
+        smoke-eviction smoke-m1 smoke-m2 smoke-hs hs-address logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -320,6 +320,19 @@ smoke-eviction:
 ## minutes. TOON_M1_LISTING=basic runs it on the three-minute tier instead.
 smoke-m1:
 	node scripts/smoke-milestone1.mjs
+
+## Milestone 2's acceptance test (TOON_Network #10, scripts/smoke-milestone2.mjs):
+## the TOON-native image path end to end. Publishes a two-layer image built
+## here (base layer upstream, the rest as parts in the TOON store) and a
+## Template for it, expands the Template tenant-side and pays a spawn with
+## { digest, registry_entry } and no reference, then an all-store image
+## spawned by { digest } alone, twice (the second from the provider's cache);
+## reads every entry, Blob Record and part back from the relay and the
+## gateway; closes the store, relay and provider books to the unit. Needs the
+## FULL stack (`make up`): the store and the gateway. Buys the `smoke`
+## listing; about two minutes.
+smoke-m2:
+	node scripts/smoke-milestone2.mjs
 
 ## Unit tests for the host-side tooling (today: the publisher,
 ## scripts/publisher/, TOON_Network Milestone 2) against in-memory fakes —

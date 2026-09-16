@@ -208,6 +208,28 @@ between the two. It buys the sandbox-only `smoke` listing
 (`conf/provider.toml`, a 30 s Lease Interval) and takes three to four
 minutes; the provider repo's README describes what it proves.
 
+**`make smoke-m2` — Milestone 2's acceptance test** (`scripts/smoke-milestone2.mjs`):
+the TOON-native image path end to end. It needs the FULL stack (`make up`),
+because the store and the gateway are not on the payments profile. It builds
+a two-layer sshd image on the host daemon and publishes it with the base
+layer left upstream as an `oci` source and the built layer, config and
+manifest stored as parts in the TOON store (one Blob Record each, one Image
+Registry entry), publishes a Template for it, expands the Template
+tenant-side and pays a spawn with `{ digest, registry_entry }` and no
+`reference` — the provider fetches the base layer from Docker Hub and the
+rest from the local gateway, verifies every part and blob, `docker load`s
+the layout and runs the workload by digest; the tenant reaches it over SSH
+and `status` echoes the Template's address. It then publishes a tiny
+all-store image (busybox plus a marker layer, every blob in the store) and
+spawns it by `{ digest }` alone, twice: the second spawn fetches nothing,
+which the smoke sees in the provider's blob cache being byte-for-byte
+unchanged. Every entry, Blob Record, store copy and part is read back from
+the relay and the gateway with every hash checked (the publisher's
+`*-verify` commands), and the store, relay and provider books are closed
+to the unit from what each packet was charged. Three spawns of the `smoke`
+listing, each ended by the tenant; about two minutes. `make smoke-m1`
+still passes afterwards.
+
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
 FULL stack (`make up`): the store, the gateway and the relay. `node
@@ -429,7 +451,7 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
 | `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
-| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval) and the sandbox-only `smoke` (30 s) — `make smoke-m1` is the milestone's acceptance test | — |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval) and the sandbox-only `smoke` (30 s) — `make smoke-m1` and `make smoke-m2` are the milestones' acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
 | `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the Solana channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
