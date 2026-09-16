@@ -21,6 +21,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
 export const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 export const PROVIDER_EDGE = process.env.PROVIDER_EDGE_URL ?? 'http://localhost:3240';
+export const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
 export const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 export const RELAY_WS = process.env.RELAY_WS ?? 'ws://localhost:7100';
 // anvil's own published test mnemonic; the smokes' payer is its Solana
@@ -35,6 +36,10 @@ export const BUYER_SOL = 'oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96';
 // opened by the open-toon-solana-channels job.
 export const PROVIDER_SOL = '6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA';
 export const PROVIDER_CHANNEL = '87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn';
+// The relay-store peering channel: the PDA conf/connector-store.toml's
+// [[peer_channels]] row names, where the store connector books what the hub
+// has paid it for g.toon.store uploads.
+export const STORE_CHANNEL = '4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7';
 export const HUB_CHANNEL_DEPOSIT = 100_000_000n;
 // conf/connector-relay.toml's relay-provider [[peers]] row: the hub's own cut
 // on top of the provider's price, charged on every route it forwards,
@@ -44,15 +49,18 @@ export const HUB_FEE = 100n;
 // the longest a lease can outlive its expires_at before the workload is gone.
 export const SWEEP_S = 30;
 
-// Mirrored from the provider's src/nostr/kinds.rs. EVERY NUMBER IS A
-// PLACEHOLDER until kinds are allocated (spec §11); what is normative is the
-// NIP-01 class, which is why the smokes talk about replacement rather than
-// about the numbers.
+// Mirrored from the provider's src/nostr/kinds.rs — the allocation in spec
+// §3.1 (ADR 0012: one block per NIP-01 class, `432` suffix). What is
+// normative is the class, which is why the smokes talk about replacement
+// rather than about the numbers.
 export const K_LEASE_REQUEST = 4432; // regular, never published
 export const K_EVICTION = 4433; // regular
 export const K_PROFILE = 10432; // replaceable
 export const K_LIVENESS = 10433; // replaceable
 export const K_LISTING = 30432; // addressable
+export const K_IMAGE = 30434; // addressable: Image Registry entry (Milestone 2)
+export const K_BLOB = 30435; // addressable: Blob Record (Milestone 2)
+export const K_TEMPLATE = 30436; // addressable: Template (Milestone 2)
 export const TOON_LABEL = 'toon.network';
 
 // The free provider-wide routes and the paid per-listing-version ones.
@@ -161,7 +169,7 @@ export async function waitFor(probe, seconds, everyMs = 500) {
 // ── the connectors' own books (the same readers as scripts/smoke-toon.mjs) ─
 export const bearer = (node) =>
   readFileSync(join(ROOT, 'keys', 'toon', node, 'operator-bearer.token'), 'utf8').trim();
-export const edgeOf = { 'relay-connector': HUB, 'provider-connector': PROVIDER_EDGE };
+export const edgeOf = { 'relay-connector': HUB, 'provider-connector': PROVIDER_EDGE, 'store-connector': STORE_EDGE };
 export async function claims(node) {
   const res = await fetch(`${edgeOf[node]}/claims`, { headers: { authorization: `Bearer ${bearer(node)}` } });
   if (!res.ok) throw new Error(`${node} GET /claims -> ${res.status}`);
@@ -234,6 +242,17 @@ export async function relayReadUntil(filter, label, seconds) {
   }, seconds);
   return events ?? [];
 }
+/**
+ * The newest event `filter` matches, or null. An addressable kind is replaced
+ * on the relay, but a relay may still hold an older copy (or two publishers
+ * may race), so the reader decides rather than trusting the order it got.
+ */
+export async function newestMatching(filter, label) {
+  const events = await relayRead(filter, label);
+  if (events.length === 0) return null;
+  return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
+}
+
 export const tagValues = (event, name) => event.tags.filter((t) => t[0] === name).map((t) => t.slice(1));
 export const hasTag = (event, cells) =>
   event.tags.some((t) => t.length >= cells.length && cells.every((c, i) => t[i] === c));

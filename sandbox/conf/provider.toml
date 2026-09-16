@@ -28,6 +28,12 @@ nostr_private_key = "498e723f94204af41bc15fb391d1f42481193ca903fdcc302d928f7a8fb
 # it on for READS. Writes to it are paid packets on a different address — see
 # RELAY_WRITE_ROUTES on the `directory-publisher` service.
 relay_set = ["ws://relay:7100"]
+
+# Where this provider reads TOON-store parts and Blob Records from (spec
+# §8.4): the sandbox's local AR.IO gateway, by the address the compose
+# network reaches its envoy front on. `{txid}` is substituted per fetch.
+# Host-side scripts read the same bytes at http://localhost:3000/raw/<txid>.
+gateway_url_pattern = "http://envoy:3000/raw/{txid}"
 capabilities = []
 
 # ── The Provider Directory (TOON_Network spec §4) ────────────────────────────

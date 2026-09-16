@@ -2,6 +2,9 @@
   "name": "toon-sandbox",
   "private": true,
   "type": "commonjs",
+  "scripts": {
+    "test": "node --test \"scripts/**/*.test.mjs\""
+  },
   "dependencies": {
     "@ar.io/sdk": "^4.3.0",
     "@ar.io/solana-contracts": "^1.2.0",
