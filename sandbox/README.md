@@ -240,8 +240,20 @@ blob list would be incomplete is refused before anything is paid for, and
 30434:<pubkey>:<name>:<tag>` reads the entry back from the relay and every
 `toon-store` blob's Blob Record from the gateway, free.
 
-`make test` runs the publisher's unit tests against fakes and real OCI
-layouts in a temp directory; see `scripts/publisher/README.md`.
+`node scripts/publisher.mjs template <file> <name> --key <hex>` publishes a
+**Template** (kind 30436, `d = <name>`): a description of a spawn — an image
+by content address, its ports, where it keeps state, the settings its author
+fixed and the names a tenant may supply — that a TENANT expands and signs
+itself. A Template grants nothing (ADR 0004), so a content field that looks
+like a capability, or one spec §8.3 does not define, is refused before
+anything is signed. `node scripts/publisher.mjs template-verify
+30436:<pubkey>:<name> --value NAME=VALUE` reads it back from the relay and
+prints the spawn content it expands to, free, without sending a spawn
+anywhere. The expander itself is `scripts/lib/template.mjs`, tenant-side:
+`expandTemplate(template, { values, workloadId, sshPublicKey, volumeGb })`.
+
+`make test` runs the publisher's and the expander's unit tests against fakes
+and real OCI layouts in a temp directory; see `scripts/publisher/README.md`.
 
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,

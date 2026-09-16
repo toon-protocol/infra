@@ -43,15 +43,37 @@
 //       address, then every toon-store blob's Blob Record from the gateway's
 //       /raw/<blob_record_txid>. Free — nothing is paid.
 //
+//   node scripts/publisher.mjs template <file> <name> --key <hex> [--dry-run]
+//       Publish a Template (issue #25): a description of a spawn that a
+//       TENANT expands — an image by content address, its ports, where it
+//       keeps state, the settings its author fixed and the names a tenant may
+//       supply. <file> is that content as JSON (`version`, `image { digest,
+//       registry_entry? }`, `ports`, `data_path?`, `env_fixed`, `env_tenant`,
+//       `min_resources?`); <name> becomes the `d` tag. Prints the address
+//       30436:<pubkey>:<name>. A Template GRANTS NOTHING: a content field
+//       that looks like a capability, or one spec §8.3 does not define, is
+//       refused here before anything is signed or paid (ADR 0004).
+//       Republishing the same <name> replaces it. --dry-run prints the event
+//       it would sign and stops.
+//
+//   node scripts/publisher.mjs template-verify <30436:pubkey:name> [--value NAME=VALUE]...
+//       Read a Template back the way a TENANT would: from the relay by its
+//       address, checked for shape and signature, and — with a --value for
+//       each of its env_tenant names — expanded into the spawn content it
+//       would produce. Free — nothing is paid, and no spawn is sent.
+//
 // --key may also come from PUBLISHER_KEY. URLs: HUB_URL, STORE_EDGE_URL,
 // GATEWAY_URL, RELAY_WS (defaults are the sandbox's host-side ports).
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { hasTag } from './lib/provider-smoke.mjs';
 import { publishBlob, planBlob, sha256Hex, hexOf, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
 import { publishImage, planImage, parseRef, imageAddress, K_IMAGE, TOON_LABEL } from './publisher/image.mjs';
 import { openLayout } from './publisher/oci-layout.mjs';
+import { publishTemplate, templateEvent } from './publisher/template.mjs';
+import { readTemplate, expandTemplate, parseTemplateAddress, K_TEMPLATE, VOLUME_MOUNT_PATH } from './lib/template.mjs';
 import { openToonIo, readLedger, findBlobRecordOnRelay, findImageEntryOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
 
 const log = (m) => console.error(`  ${m}`);
@@ -234,15 +256,92 @@ async function imageVerify(positionals) {
   report({ address, event_id: event.id, digest: content.digest, blobs: content.blobs?.length });
 }
 
+async function template(positionals, values) {
+  const [file, name] = positionals;
+  if (!file || !name) usage();
+  const secretKey = secretKeyFrom(values.key ?? process.env.PUBLISHER_KEY);
+  const content = JSON.parse(readFileSync(file, 'utf8'));
+
+  // The shape check is the READER's (lib/template.mjs), run before a channel
+  // is opened: a Template no tenant could expand is never published.
+  const unsigned = templateEvent({ name, content, createdAt: 0 });
+  const pubkey = getPublicKey(secretKey);
+  log(`publisher ${pubkey}; ${file} as ${K_TEMPLATE}:${pubkey}:${name}`);
+  log(`image ${content.image.digest}${content.image.registry_entry ? ` via ${content.image.registry_entry.address}` : ' (by digest alone)'}`);
+  log(`fixed ${Object.keys(content.env_fixed).join(', ') || '(none)'}; the tenant supplies ${content.env_tenant.join(', ') || '(nothing)'}`);
+  if (values['dry-run']) {
+    console.log(JSON.stringify({ address: `${K_TEMPLATE}:${pubkey}:${name}`, event: unsigned }, null, 2));
+    return;
+  }
+
+  const io = await openToonIo({ secretKey, log });
+  try {
+    const report = await publishTemplate({ name, content, secretKey, io });
+    const { event, ...published } = report.template;
+    console.log(JSON.stringify({ ...report, template: published }, null, 2));
+  } finally {
+    await io.close();
+  }
+}
+
+async function templateVerify(positionals, values) {
+  const address = positionals[0] ?? '';
+  try {
+    parseTemplateAddress(address);
+  } catch {
+    usage();
+  }
+  const { check, report } = checklist();
+
+  // `readTemplate` is the TENANT's reader: it finds the newest Template at
+  // the address, and refuses a capability field, a field §8.3 does not
+  // define, and an image named by a mutable upstream reference (ADR 0004).
+  let template = null;
+  try {
+    template = await readTemplate(address);
+    if (!template) throw new Error(`no kind ${K_TEMPLATE} Template at ${address} on the relay`);
+    check(true, `content is a Template spec §8.3 defines: image ${template.content.image.digest}, ${template.content.ports.length} ports, ${template.content.env_tenant.length} tenant settings`);
+  } catch (e) {
+    check(false, e.message);
+    report({ address });
+    return;
+  }
+  const event = template.event;
+  check(hasTag(event, ['d', template.name]) && hasTag(event, ['L', TOON_LABEL]), `template ${event.id} is d=${template.name}, L=${TOON_LABEL}`);
+  check(verifyEvent(event), `signed by ${template.publisher}`);
+
+  // With a --value for each of its names, expand it: what a tenant would
+  // sign. Nothing is sent to any provider.
+  const given = Object.fromEntries((values.value ?? []).map((v) => {
+    const at = v.indexOf('=');
+    if (at <= 0) throw new Error(`--value ${v}: expected NAME=VALUE`);
+    return [v.slice(0, at), v.slice(at + 1)];
+  }));
+  let spawn = null;
+  try {
+    spawn = expandTemplate(template, {
+      values: given,
+      workloadId: randomBytes(32).toString('hex'),
+      sshPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGRyeS1ydW4tcGxhY2Vob2xkZXIta2V5 template-verify',
+    });
+    check(spawn.template === address, `expands to a spawn naming ${address}: env ${Object.keys(spawn.env).join(', ') || '(none)'}${spawn.volume_gb ? `, a ${spawn.volume_gb} GiB volume at ${VOLUME_MOUNT_PATH}` : ''}`);
+  } catch (e) {
+    check(false, `expanding it: ${e.message}`);
+  }
+
+  report({ address, event_id: event.id, name: template.name, spawn });
+}
+
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     key: { type: 'string' }, 'part-size': { type: 'string' }, 'data-item-max': { type: 'string' },
     upstream: { type: 'string', multiple: true }, root: { type: 'string' }, 'dry-run': { type: 'boolean' },
+    value: { type: 'string', multiple: true },
   },
 });
 const [command, ...rest] = positionals;
-const commands = { blob, 'blob-verify': blobVerify, image, 'image-verify': imageVerify };
+const commands = { blob, 'blob-verify': blobVerify, image, 'image-verify': imageVerify, template, 'template-verify': templateVerify };
 if (!commands[command]) usage();
 commands[command](rest, values).then(
   () => process.exit(0),
