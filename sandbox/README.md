@@ -139,10 +139,11 @@ hold the detailed findings).
   `claim-minter/` is used — the issuer itself is the upstream image, pulled
   and run unmodified. The `payments` profile never builds it
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
-  3210, 3220, 3230, 3240, 3300, 3400, 7100 — the `payments` profile only
-  needs 8545, 8899, 8900, 3200, 3240 and 7100 (plus 40000–42599 for the
-  provider's workload SSH forwards and ports); `credentials` needs the
-  first five plus 3230
+  3210, 3220, 3230, 3240, 3250, 3300, 3400, 7100 — the `payments` profile
+  only needs 8545, 8899, 8900, 3200, 3240, 3250 and 7100 (plus 40000–42599
+  for the first provider's workload SSH forwards and ports and 43000–45599
+  for the second's — disjoint on purpose, both providers publish on this one
+  host daemon); `credentials` needs the first five plus 3230
 - **Full stack only** — `*.localhost` resolving to loopback (default on
   modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
 
@@ -180,7 +181,7 @@ make up-payments     # docker compose --profile payments up -d --build
 make smoke-payments  # payment-layer proof only
 ```
 
-Ten services instead of twenty-nine:
+Thirteen services instead of thirty-five:
 
 | in `payments` | why |
 |---|---|
@@ -193,11 +194,16 @@ Ten services instead of twenty-nine:
 | `open-toon-solana-channels` | opens + collateralises the hub's Solana peering channels |
 | `provider` + `provider-connector` | the TOON_Network compute provider and the connector terminating `g.toon.provider.*` (client edge **3240**; peered to the hub) |
 | `directory-publisher` | the provider's payer for its relay writes (Profile, Listings, Liveness) |
+| `provider2` + `provider2-connector` | the SECOND compute provider and its own connector, terminating `g.toon.provider2.*` (client edge **3250**; its own peering with the hub). A Standby Set spans two providers, so the sandbox runs two (TOON_Network #34) |
+| `directory-publisher2` | the second provider's payer, on its own account — two payers never share one channel's nonce watermark |
 
 **The compute provider** (TOON_Network Milestone 1) lives on this profile
-too, and has four smokes of its own, all runnable back to back in any order:
+too, and has five smokes of its own, all runnable back to back in any order:
 `make smoke-provider` (one paid spawn through the hub, SSH in, the books,
-a billed replay, a tenant-signed terminate), `make smoke-directory` (the
+a billed replay, a tenant-signed terminate), `make smoke-provider2` (THE SAME
+SCRIPT against the second provider — `TOON_SMOKE_PROVIDER=provider2`, one
+provider argument through the same helpers: its edge at :3250, its pubkey,
+its config, its peering channel), `make smoke-directory` (the
 Profile, Listings and Liveness read back off the relay, paid writes only),
 `make smoke-eviction` (the operator command and its Eviction Notice), and
 **`make smoke-m1` — Milestone 1's acceptance test**: the whole lease
@@ -250,6 +256,55 @@ the sidecar, both volumes, the network and the slice. Needs only the
 payments profile; about a minute. The target pre-pulls the pinned dind
 image so the spawn does not pay for it. A run aborted mid-way leaves its
 lease for the sweep (600 s), counting against the tier's capacity of 2.
+
+**Two providers, not one** (TOON_Network #34, Milestone 3). A Warm Standby
+is only worth buying from a provider that is not the one already running the
+workload, so the sandbox runs `provider` and `provider2` as two genuinely
+separate providers: two Nostr identities in the directory, two connectors
+(:3240 and :3250) with two sealing keys, two peerings with the hub and two
+channels, two directory publishers on two accounts, and — because both create
+their containers on this one host daemon — disjoint workload id, SSH and
+published-port ranges (1000–1099 / 40000–42599 against 1100–1199 /
+43000–45599). Both price the same `warm` tier, whose 600 s Lease Interval
+outlives the takeover timeline (five cadences of Liveness expiry, one to
+trigger, two to settle — about four minutes at the sandbox's 30 s cadence)
+and whose `standby_price` is what makes each connector terminate
+`g.toon.provider<n>.warm.v1.standby` and `.standby.extend` at 400. Everything
+Milestone 1 and 2 built still means the first provider: `make smoke-provider2`
+is the one target that says otherwise, and it is the same script with a
+provider argument.
+
+**`make smoke-m3` — Milestone 3's acceptance test** (TOON_Network #11 / #35,
+`scripts/smoke-milestone3.mjs`): Warm Standby end to end, across both
+providers. A tenant signs ONE spawn whose content names the Standby Set
+`[provider, provider2]` — one `p` tag per member, the same bytes to each —
+and pays it on the first provider's `g.toon.provider.warm.v1.spawn` at the
+full price and on the second's `g.toon.provider2.warm.v1.standby` at
+`standby_price`. The primary answers `role: primary` with access and runs
+the workload in its own id range (`toon-10xx`), reachable over SSH with the
+tenant's key; the standby answers `role: standby` with no access, `status`
+says `reserved`, its next Liveness has `available.warm` one lower, it is
+paid on `.standby.extend` and refuses `.extend` as `not_running`. The smoke
+then runs `docker compose stop provider` and waits: the primary's Liveness
+expires five cadences after its last publication, one cadence of silence
+later the standby announces a Takeover on the relay (kind 30433, `d` = the
+workload id, `{ workload_id, primary }`, signed by provider2, paid as one
+`g.toon.relay` unit on `directory-publisher2`'s own channel), two cadences
+after that it settles the race and starts the workload from the image in
+ITS OWN id range (`toon-11xx`), reachable with the same key; `status` on
+provider2 says `running`, `role: standby`, `takeover.winner` = itself and
+an unchanged `expires_at`, so `.extend` at the full price is bought and
+`.standby.extend` is refused `not_standby`. `docker compose start provider`
+then has the primary find the Takeover at startup and stand down — `status`
+`stopped`, no access — leaving exactly one running copy on the host daemon.
+Every book is closed to the unit (both peer books, the hub's client book,
+the publisher's relay units) and both leases are ended by the tenant. Buys
+the 600 s `warm` tier on both providers; five to six minutes, four of them
+the takeover timeline. It stops and restarts the FIRST provider's container,
+so run it alone. `TOON_M3_STANDBY_ONLY=1` runs the reservation side against
+provider2 alone for a first provider that does not sell `warm`, and its
+verdict says it is not a pass. `make smoke-m1` and `make smoke-m2` still
+pass afterwards.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -472,8 +527,11 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
 | `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
-| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2` and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s), `warm` (600 s, `standby_price = 400` — the tier that sells Warm Standbys, spec §7) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2`, `make smoke-m3` (with `provider2`) and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
 | `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the Solana channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
+| `provider2-connector` | TOON connector terminating `g.toon.provider2.*` — the SECOND provider's, on its own peering with the hub. Same rows as the first, plus the two the `warm` tier prices: `.standby` and `.standby.extend` at 400 (spec §7) | 3250 (client edge) |
+| `provider2` | the SECOND compute provider (TOON_Network #34, Milestone 3), the same image and the same host daemon as `provider`, with its own config (`conf/provider2.toml`), its own Nostr identity, its own lease table and **disjoint ranges**: workload ids 1100–1199, SSH at 43000+, port blocks from 44000. A Standby Set has to span two PROVIDERS — a Warm Standby bought from the provider already running the primary is no standby — so the sandbox runs a second one, whole. Sells `basic`, `smoke` and `warm` (600 s, `standby_price = 400`) | — |
+| `directory-publisher2` | the second provider's payer for relay writes, on ACCOUNT INDEX 2 of the test phrase (the first is on 1): its own wallet, its own channel, its own nonce watermark (8081 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
@@ -499,8 +557,10 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    ├─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
    │   *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
    │   floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
-   └─ g.toon.provider.* ──[peering relay-provider]──▶ provider-connector :3240
-            (uUSDC on SOLANA, at par)              └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
+   ├─ g.toon.provider.* ──[peering relay-provider]──▶ provider-connector :3240
+   │        (uUSDC on SOLANA, at par)              └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
+   └─ g.toon.provider2.* ─[peering relay-provider2]─▶ provider2-connector :3250
+            (uUSDC on SOLANA, at par)              └─▶ provider2:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
                  ▲
                  └── rate polled from two real Uniswap v3 pools on the same
                      anvil, kept live by the swap-driver service (§6.7)
@@ -524,8 +584,8 @@ for and the ANYONE the hub signs for are the same wire format carrying
 integers 10^12 apart.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220**,
-  anytoon **3230**, provider **3240** (all `GET /ilp` self-describing; the
-  operator surface rides the same port).
+  anytoon **3230**, provider **3240**, provider2 **3250** (all `GET /ilp`
+  self-describing; the operator surface rides the same port).
 - The apps' PAID handler ports (relay 3100, store 3300, gas-station 3300)
   are **unpublished** — the only route to them is a paid packet through a
   connector, and the relay leans on exactly that (it skips schnorr
@@ -719,6 +779,24 @@ This is how the store and gas station actually run, and how you'd deploy
 for real (each app ships with its own connector; peerings carry the
 payment). Every step below has a committed working example to copy —
 `store-connector` is the template:
+
+> **The most recent worked example is the SECOND compute provider**
+> (TOON_Network #34): `provider2` + `provider2-connector` +
+> `directory-publisher2` are this checklist carried out end to end, and the
+> commit that added them is a diff of exactly these six steps —
+> `keys/toon/provider2-connector/` at the next free mnemonic indices (30 EVM /
+> 39 Solana, `scripts/gen-toon-keys.sh`), `conf/connector-provider2.toml`
+> copied from `conf/connector-provider.toml`, the `relay-provider2` peering
+> and its forwarded rows in `conf/connector-relay.toml`, the settlement key
+> and the new channel PDA added to the seed and channel-open jobs, three
+> compose services on the next free client-edge port (3250), and
+> `make smoke-provider2` driving it. Adding a SECOND instance of an app you
+> already run costs two things beyond the list: a payer of its own (its
+> directory publisher pays from account index 2, because two payers on one
+> wallet share one channel's nonce watermark and the loser has every later
+> claim refused), and disjoint host resources — the two providers share this
+> host's Docker daemon, so their workload id, SSH and published-port ranges
+> must not overlap.
 
 1. **Keys** — extend `scripts/gen-toon-keys.sh` (or follow its pattern) to
    mint your connector's set: `signer.key` (random ILP identity, holds no
@@ -941,8 +1019,10 @@ the sandbox works from a fresh clone:
   `conf/bundler.conf` and its address in the gateway's
   `ANS104_UNBUNDLE_FILTER`.
 - `keys/toon/` — per-connector `signer.key`, `settlement.key` /
-  `settlement-solana.key` (anvil public-mnemonic indices 24-26 + 28 / 34-37,
-  because their addresses appear in committed configs), the kind:5098
+  `settlement-solana.key` (anvil public-mnemonic indices 24-26 + 28-30 /
+  34-39, because their addresses appear in committed configs: 24/34 the hub,
+  25/35 the store, 26/36 the gas station, 28/37 anytoon, 29/38 the provider
+  connector and 30/39 the second provider's), the kind:5098
   relayer `gas-evm-relayer.key` (index 27, embedded in
   `conf/gas-station.conf`), operator credentials, the deterministic
   mock-USDC mint keypairs, and the app keypairs embedded in `conf/*.conf`

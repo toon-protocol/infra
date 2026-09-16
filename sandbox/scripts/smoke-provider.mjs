@@ -2,6 +2,14 @@
 // spawn through the hub, end to end. Run from sandbox/ on the host after
 // `make up-payments` (or `make up`); `make smoke-provider`.
 //
+// AGAINST EITHER PROVIDER. The sandbox runs two (TOON_Network #34), and the
+// whole ceremony below — which edge to seal to, which channel to read the
+// payee's book on, which pubkey a Lease Request is addressed to, which config
+// holds the prices — is the same ceremony with a different provider in it. So
+// it is one script with a provider argument: TOON_SMOKE_PROVIDER=provider2
+// (`make smoke-provider2`) runs it against the second one, and the default is
+// the first, which is what Milestone 1 means by "the provider".
+//
 //   0.  both edges answer GET /ilp and agree on the prices: the provider
 //       connector terminates g.toon.provider.basic.v1.spawn at the listing
 //       price, the hub forwards it at listing price + its 100 uUSDC fee, and
@@ -39,28 +47,34 @@
 //       expires, so more than four such runs inside three minutes answer
 //       no_capacity — which is the provider being right, not the smoke.
 import {
-  HUB, PROVIDER_EDGE, PROVIDER_CHANNEL, PROVIDER_SOL, HUB_SOL, BUYER_SOL, USDC_MINT,
+  HUB, HUB_SOL, BUYER_SOL, USDC_MINT,
   PAYMENT_CHANNEL_PROGRAM, HUB_CHANNEL_DEPOSIT, HUB_FEE,
-  TERMINATE_ROUTE, spawnRoute, extendRoute, IMAGE, SSH_USER,
-  listing, reporter, jstr, nowSec, waitFor,
+  IMAGE, SSH_USER, providerOf,
+  reporter, jstr, nowSec, waitFor,
   claims, clientBookTotal, peerBookTotal, readSolanaChannel,
   docker, findWorkload, workloadGone,
   newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
-const { step, ok, bad, assert, fatal, done } = reporter('PROVIDER SMOKE');
+// WHICH PROVIDER this run is about. Everything below asks it, rather than the
+// module, for its edge, its channel, its config and its route names.
+const P = providerOf(process.env.TOON_SMOKE_PROVIDER || 'provider');
+const { step, ok, bad, assert, fatal, done } = reporter(
+  P.service === 'provider' ? 'PROVIDER SMOKE' : `PROVIDER SMOKE (${P.service})`,
+);
 const KEEP_WORKLOAD = /^(1|true|yes)$/i.test(process.env.TOON_SMOKE_KEEP_WORKLOAD ?? '');
 
 // The listing every ticket-level smoke buys, and its route.
-const L = listing('basic');
-const SPAWN_ROUTE = spawnRoute(L.name, L.version);
+const L = P.listing('basic');
+const SPAWN_ROUTE = P.spawnRoute(L.name, L.version);
+const TERMINATE_ROUTE = P.terminateRoute;
 const HUB_PRICE = L.price + HUB_FEE;
 
 async function booksAdvanceTo(hubBefore, providerBefore, hubDelta, providerDelta) {
   let hubNow = hubBefore, providerNow = providerBefore;
   await waitFor(async () => {
     hubNow = clientBookTotal(await claims('relay-connector'));
-    providerNow = peerBookTotal(await claims('provider-connector'), PROVIDER_CHANNEL);
+    providerNow = peerBookTotal(await claims(P.connectorNode), P.channel);
     return hubNow - hubBefore >= hubDelta && providerNow - providerBefore >= providerDelta;
   }, 10);
   return { hub: hubNow - hubBefore, provider: providerNow - providerBefore };
@@ -69,35 +83,35 @@ async function booksAdvanceTo(hubBefore, providerBefore, hubDelta, providerDelta
 // ── 0. the edges and their prices ────────────────────────────────────────
 step('0. both edges are live and price the spawn route consistently');
 const advertised = {};
-for (const [name, url] of [['relay-connector (hub)', HUB], ['provider-connector', PROVIDER_EDGE]]) {
+for (const [name, url] of [['relay-connector (hub)', HUB], [P.connectorNode, P.edge]]) {
   const res = await fetch(`${url}/ilp`).catch((e) => fatal(`${name} unreachable at ${url}: ${e.message}`));
   if (!res.ok) fatal(`${name} GET /ilp -> ${res.status}`);
   const desc = await res.json();
   advertised[name] = Object.fromEntries((desc.routes ?? []).map((r) => [r.prefix, BigInt(r.price)]));
-  ok(`${name}: ${desc.ilpAddresses?.join(',')} — ${(desc.routes ?? []).filter((r) => r.prefix.startsWith('g.toon.provider')).map((r) => `${r.prefix}@${r.price}`).join(', ')}`);
+  ok(`${name}: ${desc.ilpAddresses?.join(',')} — ${(desc.routes ?? []).filter((r) => r.prefix.startsWith(P.ilpAddress)).map((r) => `${r.prefix}@${r.price}`).join(', ')}`);
 }
-assert(advertised['provider-connector'][SPAWN_ROUTE] === L.price,
-  `the provider connector terminates ${SPAWN_ROUTE} at ${L.price} uUSDC — conf/provider.toml's listing price, via \`toon-provider routes\``);
-assert(advertised['provider-connector'][extendRoute(L.name, L.version)] === L.price,
+assert(advertised[P.connectorNode][SPAWN_ROUTE] === L.price,
+  `${P.connectorNode} terminates ${SPAWN_ROUTE} at ${L.price} uUSDC — conf/${P.confFile}'s listing price, via \`toon-provider routes\``);
+assert(advertised[P.connectorNode][P.extendRoute(L.name, L.version)] === L.price,
   'and the extend route at the same price (one interval, one price)');
 for (const free of ['availability', 'status', 'terminate']) {
-  assert(advertised['provider-connector'][`g.toon.provider.${free}`] === 0n, `g.toon.provider.${free} is free at the provider`);
-  assert(advertised['relay-connector (hub)'][`g.toon.provider.${free}`] === HUB_FEE,
-    `the hub forwards g.toon.provider.${free} at exactly its fee (${HUB_FEE}): 0 arrives`);
+  assert(advertised[P.connectorNode][`${P.ilpAddress}.${free}`] === 0n, `${P.ilpAddress}.${free} is free at the provider`);
+  assert(advertised['relay-connector (hub)'][`${P.ilpAddress}.${free}`] === HUB_FEE,
+    `the hub forwards ${P.ilpAddress}.${free} at exactly its fee (${HUB_FEE}): 0 arrives`);
 }
 assert(advertised['relay-connector (hub)'][SPAWN_ROUTE] === HUB_PRICE,
   `the hub forwards ${SPAWN_ROUTE} at ${HUB_PRICE} = provider price + fee ${HUB_FEE}`);
 
 // ── 0b. the peering channel on chain ─────────────────────────────────────
-step('0b. the relay-provider peering channel is open and collateralised on SOLANA');
+step(`0b. the hub's peering channel with ${P.connectorNode} is open and collateralised on SOLANA`);
 {
-  const ch = await waitFor(() => readSolanaChannel(PROVIDER_CHANNEL), 90, 2000);
+  const ch = await waitFor(() => readSolanaChannel(P.channel), 90, 2000);
   if (!ch) {
-    bad(`channel account ${PROVIDER_CHANNEL} never appeared on the validator (docker compose logs open-toon-solana-channels)`);
+    bad(`channel account ${P.channel} never appeared on the validator (docker compose logs open-toon-solana-channels)`);
   } else {
-    assert(ch.owner === PAYMENT_CHANNEL_PROGRAM && ch.discriminator === 'pchannel', `${PROVIDER_CHANNEL} is a payment_channel program account`);
+    assert(ch.owner === PAYMENT_CHANNEL_PROGRAM && ch.discriminator === 'pchannel', `${P.channel} is a payment_channel program account`);
     const participants = [ch.participantA, ch.participantB].sort();
-    assert(participants.join() === [HUB_SOL, PROVIDER_SOL].sort().join(), `participants are the hub and the provider connector (${participants.join(', ')})`);
+    assert(participants.join() === [HUB_SOL, P.sol].sort().join(), `participants are the hub and ${P.connectorNode} (${participants.join(', ')})`);
     assert(ch.mint === USDC_MINT, 'settles in the Solana mock USDC mint');
     assert(ch.status === 0, 'status Opened');
     const hubDeposit = ch.participantA === HUB_SOL ? ch.depositA : ch.depositB;
@@ -111,15 +125,17 @@ const { client, opened } = await openChannel(HUB);
 assert(client.identity?.solanaPublicKey === BUYER_SOL, `the payer is ${client.identity?.solanaPublicKey} — the address seed-toon-solana funded`);
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 const hubBefore = clientBookTotal(await claims('relay-connector'));
-const providerBefore = peerBookTotal(await claims('provider-connector'), PROVIDER_CHANNEL);
+const providerBefore = peerBookTotal(await claims(P.connectorNode), P.channel);
 console.log(`  books before: hub client=${hubBefore}, provider peer=${providerBefore}`);
-const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_EDGE, timeoutMs: 120_000 });
+// SEALED TO THIS PROVIDER'S OWN EDGE: the sealing key a tenant seals to is the
+// one its Profile publishes (ADR 0011), and the two providers publish two.
+const send = (route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
 
 // ── 2. the tenant, its key, its Lease Request ────────────────────────────
 step('2. a tenant signs a Lease Request with a fresh Nostr key and a fresh SSH key');
 const tenant = newTenant('tenant');
 const workloadId = newWorkloadId();
-const request = leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant));
+const request = leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant), 120, P);
 ok(`tenant ${tenant.pubkey} signed request ${request.id} for workload ${workloadId} (p = ${request.tags[0][1]})`);
 
 // ── 3. the PAID spawn, through the hub ───────────────────────────────────
@@ -174,7 +190,7 @@ step("6. the connectors' own books say the spawn was PAID — hub client leg and
   const d = await booksAdvanceTo(hubBefore, providerBefore, HUB_PRICE, L.price);
   assert(d.hub >= HUB_PRICE, `hub client book advanced by ${d.hub} uUSDC (>= ${HUB_PRICE}: listing price + fee)`);
   assert(d.provider >= L.price,
-    `provider connector's peer-book watermark on channel ${PROVIDER_CHANNEL} advanced by ${d.provider} uUSDC (>= ${L.price}, the listing price)`);
+    `${P.connectorNode}'s peer-book watermark on channel ${P.channel} advanced by ${d.provider} uUSDC (>= ${L.price}, the listing price)`);
 }
 
 // ── 7. a replay is refused, and billed ───────────────────────────────────
@@ -200,7 +216,7 @@ if (!access) {
 } else if (KEEP_WORKLOAD) {
   console.log(`  ${workload?.name ?? 'the workload'} is left running (TOON_SMOKE_KEEP_WORKLOAD); the provider's expiry sweep destroys it ~${L.lease_interval_s}s after the spawn.`);
 } else {
-  const terminated = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }) });
+  const terminated = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!terminated.fulfilled) {
     bad(`terminate was refused short of the app: ${terminated.code} (${terminated.refusedBy})`);
   } else {

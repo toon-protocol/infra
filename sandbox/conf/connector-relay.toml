@@ -186,6 +186,30 @@ prefix = "g.toon.provider.ci.v1.extend"
 peer_id = "relay-provider"
 price = 5100
 
+# The `warm` listing (conf/provider.toml): the tier that PRICES WARM STANDBYS
+# (spec §7). Four rows, not two — the standby pair is forwarded at the
+# standby price + the fee (400 + 100), the running pair at the full one, which
+# is the whole point of the tier: held capacity costs less than a workload.
+[[routes]]
+prefix = "g.toon.provider.warm.v1.spawn"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.extend"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.standby"
+peer_id = "relay-provider"
+price = 500
+
+[[routes]]
+prefix = "g.toon.provider.warm.v1.standby.extend"
+peer_id = "relay-provider"
+price = 500
+
 [[routes]]
 prefix = "g.toon.provider.availability"
 peer_id = "relay-provider"
@@ -199,6 +223,69 @@ price = 100
 [[routes]]
 prefix = "g.toon.provider.terminate"
 peer_id = "relay-provider"
+price = 100
+
+# ── Forwarded: the SECOND provider, over the relay-provider2 peering ─────────
+# The same arithmetic and the same generated-rows discipline as the block
+# above, against conf/provider2.toml and conf/connector-provider2.toml. It is
+# a SEPARATE peering with a separate channel, because it is a separate payee:
+# the two providers are told apart by address (g.toon.provider2), by sealing
+# key and by Nostr pubkey, which is what lets a Standby Set span them
+# (TOON_Network #34, spec §7).
+[[routes]]
+prefix = "g.toon.provider2.basic.v1.spawn"
+peer_id = "relay-provider2"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider2.basic.v1.extend"
+peer_id = "relay-provider2"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider2.smoke.v1.spawn"
+peer_id = "relay-provider2"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider2.smoke.v1.extend"
+peer_id = "relay-provider2"
+price = 1100
+
+# `warm` again, identically priced: a Standby Set is one tier bought twice.
+[[routes]]
+prefix = "g.toon.provider2.warm.v1.spawn"
+peer_id = "relay-provider2"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider2.warm.v1.extend"
+peer_id = "relay-provider2"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider2.warm.v1.standby"
+peer_id = "relay-provider2"
+price = 500
+
+[[routes]]
+prefix = "g.toon.provider2.warm.v1.standby.extend"
+peer_id = "relay-provider2"
+price = 500
+
+[[routes]]
+prefix = "g.toon.provider2.availability"
+peer_id = "relay-provider2"
+price = 100
+
+[[routes]]
+prefix = "g.toon.provider2.status"
+peer_id = "relay-provider2"
+price = 100
+
+[[routes]]
+prefix = "g.toon.provider2.terminate"
+peer_id = "relay-provider2"
 price = 100
 
 # ── The peerings ─────────────────────────────────────────────────────────────
@@ -217,6 +304,11 @@ fee = 100
 [[peers]]
 id = "relay-provider"
 endpoint = "http://provider-connector:3000/ilp"
+fee = 100
+
+[[peers]]
+id = "relay-provider2"
+endpoint = "http://provider2-connector:3000/ilp"
 fee = 100
 
 # The converting peering. BOTH numbers on this row are in ANYONE base units,
@@ -299,6 +391,19 @@ counterparty_key = "6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA" # provider-con
 peer_id = "relay-provider"
 channel_account = "87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn"
 client_edge_url = "http://provider-connector:3000/ilp"
+
+# The second provider's peering: the same shape again, its own PDA, against
+# provider2-connector's committed settlement key (keys/toon/provider2-connector,
+# mnemonic index 39).
+[[peer_channels]]
+peer_id = "relay-provider2"
+channel_account = "Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF"
+counterparty_key = "CUCCqWMWMhwcHrZnxouDdwgRuUCd4MoSXx11zkfpLN4a" # provider2-connector Solana settlement
+
+[[pay_channels]]
+peer_id = "relay-provider2"
+channel_account = "Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF"
+client_edge_url = "http://provider2-connector:3000/ilp"
 
 # The ANYONE peering, and the reason this file has a `[[tokens]]` block at all.
 # A DIFFERENT SHAPE, not a different spelling: `channel_id` is an EVM channel

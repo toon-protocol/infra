@@ -1,0 +1,159 @@
+# THE SECOND sandbox provider (toon-provider, the same image the `provider`
+# service builds from the ../../provider sibling checkout). Mounted read-only
+# at /etc/toon-provider/provider.toml by the `provider2` compose service.
+#
+# WHY A SECOND ONE (TOON_Network #34, Milestone 3): a Standby Set has to span
+# two PROVIDERS — a tenant that buys a Warm Standby from the same provider
+# that runs the primary has bought nothing (spec §7). So this is a provider in
+# every sense the protocol cares about: its own Nostr identity, its own
+# connector behind its own client-edge port, its own payment channel with the
+# hub, its own directory publisher paying from its own account, and its own
+# lease table. It shares this host's Docker daemon with the first provider,
+# which is the one thing a real second provider would not — hence the DISJOINT
+# workload id, SSH and published-port ranges below.
+#
+# Everything not commented here is commented in conf/provider.toml; this file
+# only explains what DIFFERS. Keep the two in step: `make smoke-m3` buys the
+# `warm` tier from both.
+
+backend = "docker"
+provider_name = "TOON Sandbox Provider Two"
+
+# Distinct from the first provider's `g.toon.provider`, and not a child of it:
+# the hub forwards each provider's routes on its own peering, and a route the
+# wrong provider terminated would be paid to the wrong connector.
+ilp_address = "g.toon.provider2"
+
+public_ip = "127.0.0.1"
+
+# THROWAWAY dev identity, committed like everything under keys/toon/. Hex.
+# Its public key — a DIFFERENT pubkey from the first provider's, which is what
+# makes the directory show two providers and what a `standby_set` names — is
+# 43ef6de449699be1aeaa5858eb46a342d1fdcfb3cc0d75c60e6c521513a15e5e.
+nostr_private_key = "c460e425474bcffcc8f175b25dd7c397ada6ad7fedc8b720d59f93b6064e441c"
+
+# The same Relay Set as the first provider: a standby watches the primary's
+# Liveness on the PRIMARY's relays (spec §7), so the two providers sharing one
+# relay is what makes a takeover observable in this sandbox at all.
+relay_set = ["ws://relay:7100"]
+
+gateway_url_pattern = "http://envoy:3000/raw/{txid}"
+capabilities = []
+
+# ── The Provider Directory (TOON_Network spec §4) ────────────────────────────
+# The sealing key is this provider's OWN connector's, copied verbatim from
+# `curl -s http://localhost:3250/ilp/identity | jq -r .publicKey` — never the
+# first connector's. A tenant seals its spawn to whatever the Profile names
+# (ADR 0011), so a copy-paste of the wrong key sends money to the wrong node.
+connector_url = "http://provider2-connector:3000/ilp"
+connector_seal_key = "0x0425cbbf2705472c6919bbfe113679383075d6c8be52e493edb0d195bc56080f200fc55124baa0c897579af9687bef60dd01f2aa90d370f7e88eeb6d7213fff7b4"
+
+isolation = "shared-kernel"
+
+# The same 30 s cadence as the first provider, and for the same reason. It is
+# also the clock the takeover timeline is measured in (five cadences of
+# Liveness expiry, one of trigger, two to settle — about four minutes here),
+# which is why the `warm` tier below sells a 600 s Lease Interval.
+liveness_cadence_s = 30
+
+# This provider's OWN payer for relay writes: the `directory-publisher2`
+# service, on ACCOUNT INDEX 2 of the committed test phrase. Two payers sharing
+# one wallet share one channel's nonce watermark and the loser of that race
+# has every later claim refused — so the second provider's publisher holds a
+# second wallet and a second channel.
+publish_url = "http://directory-publisher2:8081/publish"
+
+http_bind_addr = "0.0.0.0:8080"
+handler_base_url = "http://provider2:8080"
+
+# Loopback-only, exactly as in conf/provider.toml: `docker compose exec
+# provider2 toon-provider evict ...` runs inside this container.
+operator_bind_addr = "127.0.0.1:8090"
+operator_url = "http://127.0.0.1:8090"
+
+# DISJOINT FROM THE FIRST PROVIDER'S, on every axis — both providers create
+# their workloads on the same host daemon, so an overlap would be two
+# providers fighting over one container name and one host port:
+#   provider   ids 1000-1099, SSH 40000-40099, port blocks 41000-42599
+#   provider2  ids 1100-1199, SSH 43000-43099, port blocks 44000-45599
+# (16 published ports per id, counted from workload_id_range_start.)
+workload_id_range_start = 1100
+workload_id_range_end = 1199
+ssh_port_start = 43000
+workload_port_start = 44000
+
+# Its own volume (`provider2-state`), so the two lease tables never mix.
+lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# What provider2-connector settles in, straight out of conf/connector-provider2.toml.
+[[settlement]]
+chain = "solana"
+token = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[[settlement]]
+chain = "evm:31337"
+token = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+# The same `basic` and `smoke` tiers as the first provider, at the same prices,
+# so every Milestone 1 helper works against this provider with nothing but a
+# provider argument (`make smoke-provider2`) — and `warm`, the tier that
+# prices Warm Standbys. KEEP `basic` FIRST for the same reason as there.
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 180
+price = 1000
+capabilities = []
+capacity = 4
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
+
+[[listings]]
+name = "smoke"
+version = 1
+arch = "amd64"
+lease_interval_s = 30
+price = 1000
+capabilities = []
+capacity = 2
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
+
+# `warm` — THE TIER THAT SELLS WARM STANDBYS (spec §7, TOON_Network #34), and
+# the one `make smoke-m3` buys on both providers. Identical in
+# conf/provider.toml, because a Standby Set is one tier bought twice: the
+# primary pays `price` on `.spawn`, the standby pays `standby_price` on
+# `.standby`, and after a Takeover the winner charges `price` on `.extend`.
+#
+# The 600 s Lease Interval is the point of the tier. A standby reservation
+# must OUTLIVE THE TAKEOVER TIMELINE — at this sandbox's 30 s cadence, five
+# cadences for the primary's Liveness to expire, one to trigger and two to
+# settle is about four minutes — or the reservation would lapse mid-takeover
+# and the smoke would be measuring the sweep instead of the protocol.
+#
+# `standby_price` is what makes the two standby routes exist at all: the
+# provider's own `routes` command prints a `.standby` and a `.standby.extend`
+# row at this price for a listing that sets it, and prints neither for a
+# listing that does not (a tier that prices no standby sells none). Never 0 —
+# that would sell held capacity for nothing. Capacity 2: a set needs one slot
+# here and the smoke may leave a reservation behind for a 600 s interval.
+[[listings]]
+name = "warm"
+version = 1
+arch = "amd64"
+lease_interval_s = 600
+price = 1000
+standby_price = 400
+capabilities = []
+capacity = 2
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
