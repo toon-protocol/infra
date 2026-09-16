@@ -217,16 +217,20 @@ step(`7. the tenant ends the lease: ${TERMINATE_ROUTE}, and nothing of it outliv
 if (!access) {
   bad('no lease to terminate');
 } else {
+  const t1 = Date.now();
   const ended = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }) });
   const body = ended.fulfilled && ended.status === 200 ? ended.json() : null;
-  assert(jstr(body?.state) === jstr({ ended: 'termination' }), `the provider answered ${ended.status ?? ended.code} ${jstr(body?.state)}`);
+  assert(jstr(body?.state) === jstr({ ended: 'termination' }),
+    `the provider answered ${ended.fulfilled ? ended.status : `${ended.code} (refusedBy ${ended.refusedBy}) ${ended.message ?? ''}`} ${jstr(body?.state)} after ${Date.now() - t1} ms — the whole teardown happens inside this request`);
   if (workload) {
     const name = workload.name;
     assert(await workloadGone(name, 30), `${name} is gone from the host daemon`);
     const gone = await waitFor(async () => (!exists('container', sidecar) && !exists('volume', `${name}-run`)
       && !exists('volume', `${name}-docker`) && !exists('network', `${name}-net`)) || null, 30);
     assert(gone === true, `the sidecar, both volumes and the network are gone`);
-    const sliceGone = await waitFor(async () => (!existsSync(sliceOf(name)) || null), 15);
+    // systemd collects the emptied slice on its own schedule, some seconds
+    // after its last scope; the provider also asks for it to go.
+    const sliceGone = await waitFor(async () => (!existsSync(sliceOf(name)) || null), 60);
     assert(sliceGone === true, `${sliceOf(name)} is gone`);
   }
 }
