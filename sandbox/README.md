@@ -299,7 +299,7 @@ then has the primary find the Takeover at startup and stand down — `status`
 `stopped`, no access — leaving exactly one running copy on the host daemon.
 Every book is closed to the unit (both peer books, the hub's client book,
 the publisher's relay units) and both leases are ended by the tenant. Buys
-the 600 s `warm` tier on both providers; about eight minutes, four of them
+the 600 s `warm` tier on both providers; five to six minutes, four of them
 the takeover timeline. It stops and restarts the FIRST provider's container,
 so run it alone. `TOON_M3_STANDBY_ONLY=1` runs the reservation side against
 provider2 alone for a first provider that does not sell `warm`, and its

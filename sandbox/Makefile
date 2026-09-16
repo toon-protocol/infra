@@ -366,7 +366,7 @@ smoke-m2:
 ## spawn and the post-Takeover extension, the two billed refusals, and ONE
 ## g.toon.relay unit for the Takeover on directory-publisher2's channel —
 ## and both leases are ended by the tenant. Buys the 600 s `warm` tier on
-## both providers; about eight minutes, four of them the takeover timeline
+## both providers; five to six minutes, four of them the takeover timeline
 ## (conf/provider2.toml says why). It stops and restarts the FIRST provider's
 ## container, so nothing else should be spawning on it meanwhile.
 ## TOON_M3_STANDBY_ONLY=1 runs the reservation side against provider2 alone
