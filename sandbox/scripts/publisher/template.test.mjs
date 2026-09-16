@@ -10,9 +10,14 @@ import { templateFromEvent, expandTemplate } from '../lib/template.mjs';
 const PUBLISHER = '2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991';
 
 /**
- * The values of the M2-1 wire fixture, TOON_Network
+ * The M2-1 wire fixture, TOON_Network
  * docs/spec/fixtures/wire/registry.template.json (issue #19) — the
  * independent statement of the shape a Template has.
+ *
+ * What is load-bearing is the SHAPE: the kind, the two tags, and the order
+ * of the content's keys. The digest is the fixture's placeholder and is
+ * regenerated whenever the fixtures are, so it is copied here rather than
+ * read across repositories, and a change to it means nothing to these tests.
  */
 const FIXTURE_CONTENT = {
   version: 1,
