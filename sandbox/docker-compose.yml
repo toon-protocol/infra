@@ -43,6 +43,17 @@ name: toon-sandbox
 #                                          packet can reach without a peer
 #               relay-connector            the hub itself
 #               open-toon-solana-channels  opens the hub's Solana channels
+#               provider, provider-connector
+#                                          the compute provider (TOON_Network
+#                                          Milestone 1) and its own connector,
+#                                          peered to the hub — the sandbox's
+#                                          Level 2 example that needs no
+#                                          sibling checkout beyond ../../provider
+#               directory-publisher        that provider's payer for RELAY
+#                                          WRITES: its Profile, Listings and
+#                                          Liveness are PAID g.toon.relay
+#                                          packets, never the free ephemeral
+#                                          lane (TOON_Network ADR 0007)
 #             Everything else — the AR.IO gateway + Turbo bundler, the store,
 #             gas-station and Anyone credentials-issuer subsystems and their
 #             three peering connectors — stays out (the `credentials` profile
@@ -618,6 +629,7 @@ services:
   #             g.toon.gastation        ──peering──▶ gas-connector   ──▶ gas-station:3300/gas
   #             g.anyone.credentials    ──peering──▶ anytoon-connector ──▶ claim-minter:8080 ──▶ issuer:3000
   #             g.anyone.credentials.keys ──peering──▶ anytoon-connector ──▶ issuer:3000/v1/keys/ (price 0 there)
+  #             g.toon.provider.*       ──peering──▶ provider-connector ──▶ provider:8080/… (spawn/extend paid, the rest free)
   #   any client ──ws──▶ relay:7100 (free reads, host :7100)
   #
   # CROSS-CHAIN, SAME-ASSET: the client leg (smoke -> hub) settles on ANVIL
@@ -1151,6 +1163,123 @@ services:
     restart: unless-stopped
     logging: *chain-logging
 
+  # ── The compute provider (TOON_Network Milestone 1) ──────────────────────
+  # `toon-provider`, built from the provider sibling checkout: a tenant pays
+  # `g.toon.provider.basic.v1.spawn` and gets a running container reachable
+  # over SSH with its own key. The app is a plain HTTP app behind ITS OWN
+  # connector (README §5 Level 2, copied from the store-connector shape); it
+  # reads no X-TOON-* header, so it takes the peer role.
+  #
+  # THE DOCKER SOCKET IS MOUNTED, and that is the whole deployment shape: the
+  # provider shells out to the docker CLI, so its workloads run as siblings
+  # on the HOST daemon (named toon-<id>), their SSH forwards and ports are
+  # published on the host, and conf/provider.toml's public_ip is 127.0.0.1
+  # from the host's point of view. The image is pulled by the daemon by
+  # reference@digest. Handler port 8080 is UNPUBLISHED, like every other
+  # app's paid port here — only provider-connector dials it.
+  provider:
+    profiles: ['payments', 'full']
+    build:
+      # The provider sibling checkout (toon-protocol/provider). Relative so
+      # the file stays portable; only `payments` and `full` render it.
+      context: ${PROVIDER_CONTEXT:-../../provider}
+    volumes:
+      - ./conf/provider.toml:/etc/toon-provider/provider.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The lease table: the only record that a lease exists. A named volume
+      # so a `docker compose restart provider` strands nothing.
+      - provider-state:/var/lib/toon-provider
+    expose:
+      - '8080' # PRIVATE, only provider-connector dials this
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The provider's payer for RELAY WRITES (TOON_Network #6). The provider's
+  # Profile, Listings and Liveness are paid packets on g.toon.relay (ADR 0007
+  # — never the free g.toon.relay.ephemeral lane, whose rate limit is keyed by
+  # remote address and so shared by everyone behind one connector). Paying one
+  # means holding a payment channel, signing a balance proof per packet and
+  # sealing to the terminating connector; @toon-protocol/client is the proven
+  # implementation of that and is not a Rust crate, so `toon-provider` states
+  # WHAT to publish and this sidecar decides HOW it is paid for. The provider's
+  # Nostr key never reaches it: it holds money, not identity.
+  #
+  # It pays through the HUB's client edge, exactly as scripts/smoke-toon.mjs's
+  # buyer does — a client channel, not a peering — on ACCOUNT INDEX 1 of the
+  # same committed test phrase so it holds its own wallet and its own channel.
+  # Two payers sharing one channel share one nonce watermark and the loser of
+  # that race has every later claim refused.
+  directory-publisher:
+    profiles: ['payments', 'full']
+    build:
+      context: ${PROVIDER_CONTEXT:-../../provider}
+      dockerfile: tools/publisher/Dockerfile
+    environment:
+      TOON_CONNECTOR_URL: http://relay-connector:3000
+      TOON_CHAIN: solana
+      TOON_RPC_URL: http://solana-validator:8899
+      # anvil's published test phrase, like every other key here.
+      TOON_MNEMONIC: 'test test test test test test test test test test test junk'
+      TOON_ACCOUNT_INDEX: '1'
+      TOON_DEPOSIT: '10000000' # 10 mock USDC at 6 dp; a write costs 1 unit
+      TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
+      # Relay READ url (what conf/provider.toml publishes) -> the PAID ILP
+      # destination that writes to it (conf/connector-relay.toml, price 1).
+      RELAY_WRITE_ROUTES: '{"ws://relay:7100":"g.toon.relay"}'
+      # A client dials the endpoint a node's SELF-DESCRIPTION advertises, not
+      # the URL it was configured with. This hub advertises
+      # http://127.0.0.1:3200/ilp so the HOST-run smokes can reach it; a
+      # container on this network reaches the same node at relay-connector:3000.
+      # Sandbox-only: in production the advertised endpoint is the real one.
+      TOON_ENDPOINT_REWRITE: '{"http://127.0.0.1:3200":"http://relay-connector:3000"}'
+    volumes:
+      # The channel watermark. A named volume so a restart keeps it, and
+      # `make clean` wipes it with the chain — a watermark that outlives its
+      # validator refuses every later claim.
+      - directory-publisher-state:/var/lib/toon-publisher
+    expose:
+      - '8081' # PRIVATE, only the provider dials this
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+      seed-toon-solana:
+        condition: service_completed_successfully
+      relay-connector:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  provider-connector:
+    profiles: ['payments', 'full']
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-provider.toml:/app/config/connector.toml:ro
+      - ./keys/toon/provider-connector:/app/data:ro
+      - provider-connector-state:/app/state
+    ports:
+      - '3240:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      seed-toon-evm:
+        condition: service_completed_successfully
+      seed-toon-solana:
+        condition: service_completed_successfully
+      provider:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
   # The hub. Starts after all three accepting peers are healthy (it dials them; a
   # peering whose far side is not serving answers T01 rather than failing
   # loudly, so bring-up order matters for a deterministic first smoke).
@@ -1189,6 +1318,11 @@ services:
         condition: service_healthy
         required: false
       anytoon-connector:
+        condition: service_healthy
+        required: false
+      # On `payments` and `full`; `credentials` leaves it out, hence the
+      # same required:false downgrade as the three above.
+      provider-connector:
         condition: service_healthy
         required: false
     restart: unless-stopped
@@ -1361,6 +1495,11 @@ volumes:
   store-connector-state:
   gas-connector-state:
   anytoon-connector-state:
+  # The directory publisher's channel watermark (see that service).
+  directory-publisher-state:
+  provider-connector-state:
+  # The provider's lease table (see the `provider` service).
+  provider-state:
   # The issuer's signed epoch keyring + the minter/issuer proxy pair, written
   # by the issuer-keys job. Dev key material; dies with `make clean`.
   anytoon-keys:

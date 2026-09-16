@@ -1,0 +1,128 @@
+# The sandbox provider (toon-provider, built from the ../../provider sibling
+# checkout). One file, no environment variables — see that repo's
+# provider.example.toml for every key. Mounted read-only at
+# /etc/toon-provider/provider.toml by the `provider` compose service.
+#
+# The app runs INSIDE compose but its workloads run on the HOST daemon (the
+# service mounts /var/run/docker.sock), so every SSH forward and published
+# port lands on the host and `public_ip` is the host's own loopback: the
+# smoke test dials 127.0.0.1:<ssh_port>.
+
+backend = "docker"
+provider_name = "TOON Sandbox Provider"
+
+# Every route is a suffix of this: g.toon.provider.basic.v1.spawn, .extend
+# (and the same pair for the `smoke` listing below), plus the free
+# g.toon.provider.availability / .status / .terminate.
+ilp_address = "g.toon.provider"
+
+public_ip = "127.0.0.1"
+
+# THROWAWAY dev identity, committed like everything under keys/toon/. Hex.
+# Its public key (what a Lease Request's `p` tag must name) is
+# b78bca6ec5631d2dc9bdbff28bce4c3e3423f449a8e43009845390e7536de953;
+# scripts/smoke-provider.mjs derives it from this line.
+nostr_private_key = "498e723f94204af41bc15fb391d1f42481193ca903fdcc302d928f7a8fbfbb12"
+
+# The Relay Set: the sandbox relay, by the address the compose network reaches
+# it on for READS. Writes to it are paid packets on a different address — see
+# RELAY_WRITE_ROUTES on the `directory-publisher` service.
+relay_set = ["ws://relay:7100"]
+capabilities = []
+
+# ── The Provider Directory (TOON_Network spec §4) ────────────────────────────
+# What the Provider Profile tells a tenant about reaching and paying this
+# provider. The URL is a location hint; the sealing key is what a tenant
+# actually seals its spawn to and refuses to proceed without (ADR 0011), so it
+# is copied VERBATIM from the connector's own self-description —
+# `curl -s http://localhost:3240/ilp/identity | jq -r .publicKey` — including
+# the 0x, so a tenant's comparison is byte-for-byte.
+connector_url = "http://provider-connector:3000/ilp"
+connector_seal_key = "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188"
+
+# This sandbox sells containers on a shared host daemon.
+isolation = "shared-kernel"
+
+# SHORT on purpose, like lease_interval_s: `make smoke-directory` waits out a
+# cadence to prove Liveness is REPLACED rather than accumulated, and 30 s is a
+# wait you can sit through. Each event expires 5 x 30 = 150 s out (ADR 0007).
+liveness_cadence_s = 30
+
+# Where directory events go to be PAID FOR: the `directory-publisher` service,
+# which holds a Solana mock-USDC channel against the hub and buys one
+# g.toon.relay write per event. The provider app itself holds no money.
+publish_url = "http://directory-publisher:8081/publish"
+
+# The connector dials the app by compose service name.
+http_bind_addr = "0.0.0.0:8080"
+handler_base_url = "http://provider:8080"
+
+# The operator endpoint (`POST /operator/evict`, used by `toon-provider
+# evict`) — loopback only, and left at the defaults on purpose: `docker
+# compose exec provider toon-provider evict ...` runs INSIDE this same
+# container, so 127.0.0.1 already reaches it. Not published as a compose
+# port and never should be — reaching it takes no signature and no payment.
+operator_bind_addr = "127.0.0.1:8090"
+operator_url = "http://127.0.0.1:8090"
+
+# 100 workload ids -> SSH forwards 40000..40099, port blocks from 41000
+# (16 per id, so up to 42599). Host ports, published by the host daemon.
+workload_id_range_start = 1000
+workload_id_range_end = 1099
+ssh_port_start = 40000
+workload_port_start = 41000
+
+lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# What provider-connector settles in, straight out of conf/connector-provider.toml.
+[[settlement]]
+chain = "solana"
+token = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[[settlement]]
+chain = "evm:31337"
+token = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+# Two tiers. `basic` is the one every ticket-level smoke buys (smoke-provider,
+# smoke-eviction) and the one smoke-directory reads back; a SHORT interval on
+# purpose, so a lease left to expire is reaped in three minutes and the stack
+# is one you can re-run. The price is what conf/connector-provider.toml's
+# spawn/extend rows charge, and the hub adds its 100 uUSDC fee on top
+# (conf/connector-relay.toml). KEEP IT FIRST: smoke-directory.mjs asserts its
+# numbers against the first [[listings]] block.
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 180
+price = 1000
+capabilities = []
+capacity = 4
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
+
+# `smoke` — SANDBOX-ONLY, bought by `make smoke-m1` (the Milestone 1 acceptance
+# test, scripts/smoke-milestone1.mjs). Same price and resources as `basic`,
+# same code path — the ONLY difference is a 30 s Lease Interval, so "spawn,
+# extend, wait for expiry" is a ~90 s wait rather than six minutes, and a
+# lease this smoke leaves behind on an aborted run stops counting against
+# capacity within a minute instead of skewing the next run. Its rows are in
+# both connector tomls beside basic's. Capacity 2: the acceptance test holds
+# at most one lease at a time, and a second slot means a straggler from an
+# aborted run can never make the next run answer no_capacity.
+[[listings]]
+name = "smoke"
+version = 1
+arch = "amd64"
+lease_interval_s = 30
+price = 1000
+capabilities = []
+capacity = 2
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1

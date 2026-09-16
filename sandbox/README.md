@@ -139,8 +139,10 @@ hold the detailed findings).
   `claim-minter/` is used — the issuer itself is the upstream image, pulled
   and run unmodified. The `payments` profile never builds it
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
-  3210, 3220, 3230, 3300, 3400, 7100 — the `payments` profile only needs
-  8545, 8899, 8900, 3200 and 7100; `credentials` needs those five plus 3230
+  3210, 3220, 3230, 3240, 3300, 3400, 7100 — the `payments` profile only
+  needs 8545, 8899, 8900, 3200, 3240 and 7100 (plus 40000–42599 for the
+  provider's workload SSH forwards and ports); `credentials` needs the
+  first five plus 3230
 - **Full stack only** — `*.localhost` resolving to loopback (default on
   modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
 
@@ -178,7 +180,7 @@ make up-payments     # docker compose --profile payments up -d --build
 make smoke-payments  # payment-layer proof only
 ```
 
-Seven services instead of twenty-nine:
+Ten services instead of twenty-nine:
 
 | in `payments` | why |
 |---|---|
@@ -188,7 +190,23 @@ Seven services instead of twenty-nine:
 | `seed-toon-solana` | the Solana mock USDC mint, ATAs and SOL |
 | `relay` | `g.toon.relay` is the hub's only TERMINATED route — the one destination a paid packet can reach with no peer running |
 | `relay-connector` | the hub itself, client edge on **3200** |
-| `open-toon-solana-channels` | opens + collateralises the hub's two Solana peering channels |
+| `open-toon-solana-channels` | opens + collateralises the hub's Solana peering channels |
+| `provider` + `provider-connector` | the TOON_Network compute provider and the connector terminating `g.toon.provider.*` (client edge **3240**; peered to the hub) |
+| `directory-publisher` | the provider's payer for its relay writes (Profile, Listings, Liveness) |
+
+**The compute provider** (TOON_Network Milestone 1) lives on this profile
+too, and has four smokes of its own, all runnable back to back in any order:
+`make smoke-provider` (one paid spawn through the hub, SSH in, the books,
+a billed replay, a tenant-signed terminate), `make smoke-directory` (the
+Profile, Listings and Liveness read back off the relay, paid writes only),
+`make smoke-eviction` (the operator command and its Eviction Notice), and
+**`make smoke-m1` — Milestone 1's acceptance test**: the whole lease
+lifecycle (directory → availability → paid spawn → paid extend → expiry →
+claim books to the unit), once paying through the hub and once paying the
+provider connector directly at :3240, with the provider's answers compared
+between the two. It buys the sandbox-only `smoke` listing
+(`conf/provider.toml`, a 30 s Lease Interval) and takes three to four
+minutes; the provider repo's README describes what it proves.
 
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
@@ -363,6 +381,9 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
+| `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval) and the sandbox-only `smoke` (30 s) — `make smoke-m1` is the milestone's acceptance test | — |
+| `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the Solana channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
@@ -385,9 +406,11 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    │        (uUSDC on SOLANA, at par)           └─▶ store:3300/store (kind:5094/5095)
    ├─ g.toon.gastation ──[peering relay-gas]──▶ gas-connector :3220
    │        (uUSDC on SOLANA, at par)           └─▶ gas-station:3300/gas (kind:5096 + 5098)
-   └─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
-       *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
-       floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
+   ├─ g.anyone.credentials ──[peering relay-anytoon]──▶ anytoon-connector :3230
+   │   *** ANYONE on ANVIL — CONVERTED ***      ├─▶ claim-minter:8080 ──▶ issuer:3000  (paid)
+   │   floor(amount x TWAP) - fee               └─▶ issuer:3000/v1/keys/              (free)
+   └─ g.toon.provider.* ──[peering relay-provider]──▶ provider-connector :3240
+            (uUSDC on SOLANA, at par)              └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
                  ▲
                  └── rate polled from two real Uniswap v3 pools on the same
                      anvil, kept live by the swap-driver service (§6.7)
@@ -411,8 +434,8 @@ for and the ANYONE the hub signs for are the same wire format carrying
 integers 10^12 apart.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220**,
-  anytoon **3230** (all `GET /ilp` self-describing; the operator surface
-  rides the same port).
+  anytoon **3230**, provider **3240** (all `GET /ilp` self-describing; the
+  operator surface rides the same port).
 - The apps' PAID handler ports (relay 3100, store 3300, gas-station 3300)
   are **unpublished** — the only route to them is a paid packet through a
   connector, and the relay leans on exactly that (it skips schnorr

@@ -46,8 +46,8 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-hs hs-address logs ps \
-        require-store-context require-anytoon-context
+        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
+        smoke-eviction smoke-m1 smoke-hs hs-address logs ps require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -124,8 +124,9 @@ up: require-store-context require-anytoon-context
 	$(COMPOSE) up -d --build
 
 ## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
-## the relay + the hub + the Solana channel-open job (7 services). No gateway,
-## no bundler, no store, no gas station — and no store sibling checkout.
+## the relay + the hub + the Solana channel-open job + the compute provider,
+## its connector and its directory publisher (10 services). No gateway, no
+## bundler, no store, no gas station — and no store sibling checkout.
 up-payments: COMPOSE_PROFILE = payments
 up-payments:
 	$(COMPOSE) up -d --build
@@ -266,6 +267,59 @@ smoke-payments:
 ## No store, gateway, bundler or gas-station assertions.
 smoke-credentials:
 	TOON_SMOKE_CREDENTIALS_ONLY=1 node scripts/smoke-toon.mjs
+
+## compute-provider proof for `make up-payments` (or `make up`): a tenant
+## opens a Solana mock-USDC channel against the hub, signs a Lease Request
+## with a fresh Nostr key, pays g.toon.provider.basic.v1.spawn through the
+## hub (sealed to the provider's own connector), and the answer names a
+## container that is running on the host and reachable over SSH with the
+## tenant's key; both connectors' books grow by their prices, and a replay
+## of the same request is refused (and still billed). The workload is left
+## to expire (conf/provider.toml lease_interval_s) unless the script removes
+## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
+smoke-provider:
+	node scripts/smoke-provider.mjs
+
+## provider-directory proof for `make up-payments` (or `make up`): the
+## provider's Profile, its Listing and its Liveness are read back off the
+## sandbox relay at :7100 by author and #L, the Listing is filterable by its
+## #l isolation and arch labels (the RELAY does the search, not the tenant),
+## Liveness carries an expiration five cadences out and is REPLACED rather
+## than accumulated on the next cadence, and every write was a PAID
+## g.toon.relay packet on the directory publisher's own Solana channel —
+## never the free g.toon.relay.ephemeral lane. It waits out one cadence
+## (conf/provider.toml liveness_cadence_s), so it takes about a minute.
+smoke-directory:
+	node scripts/smoke-directory.mjs
+
+## eviction proof for `make up-payments` (or `make up`): a tenant pays for its
+## own lease, `docker compose exec provider toon-provider evict ...` stops it
+## through the provider's loopback-only operator endpoint (never a published
+## port), the container is gone, the free status route reports
+## `Ended(eviction)`, and a signed Eviction Notice naming the workload id and
+## reason is readable on the sandbox relay. The lease is always evicted
+## before the script exits, so — unlike smoke-provider's raw `docker rm -f` —
+## it never leaves a lease running for smoke-directory to count.
+smoke-eviction:
+	node scripts/smoke-eviction.mjs
+
+## MILESTONE 1 ACCEPTANCE TEST (TOON_Network #1 / #9) for `make up-payments`
+## (or `make up`): the whole lease lifecycle, twice. Per run: Profile,
+## Listings and an unexpired Liveness read back off the relay; the free
+## availability route end to end (0 arrives, the provider's book does not
+## move); a paid spawn to a running, SSH-reachable workload; a paid extend
+## that grows expires_at by exactly one Lease Interval; status; the sweep
+## destroying the workload at expiry and status reporting ended by expiry;
+## Liveness counting the lease and recovering; and every claim book grown by
+## exactly the route prices. Once paying THROUGH THE HUB (client channel
+## against :3200, sealed to the provider connector, hub client book + provider
+## peer book asserted) and once paying the PROVIDER CONNECTOR DIRECTLY (client
+## channel against :3240, no fee, its client book asserted) — then the two
+## runs' answer shapes and lifecycles are compared. Buys the sandbox-only
+## `smoke` listing (conf/provider.toml, 30 s Lease Interval); three to four
+## minutes. TOON_M1_LISTING=basic runs it on the three-minute tier instead.
+smoke-m1:
+	node scripts/smoke-milestone1.mjs
 
 ## hidden-service proof for `make up-hs`: a client dials this sandbox's
 ## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,

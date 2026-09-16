@@ -1,7 +1,7 @@
 # =============================================================================
 # relay-connector — the HUB. Terminates the relay's paid write routes and
-# FORWARDS g.toon.store / g.toon.gastation / g.anyone.credentials over three
-# ILP-over-HTTP peerings.
+# FORWARDS g.toon.store / g.toon.gastation / g.anyone.credentials /
+# g.toon.provider.* over four ILP-over-HTTP peerings.
 # =============================================================================
 # Shape copied from the connector repo's proven multi-node topologies
 # (connector/local/two-hop + local/mixed-chain — the repo's own CI-exercised
@@ -137,6 +137,58 @@ prefix = "g.anyone.credentials.keys"
 peer_id = "relay-anytoon"
 price = 110
 
+# ── Forwarded: the compute provider, over the relay-provider peering ─────────
+# Same token at par (mock USDC on Solana), so plain ADR 0028 arithmetic: hub
+# price = the provider's price + the peering's fee (100). The provider's own
+# rows are GENERATED (`toon-provider routes`, pasted into
+# conf/connector-provider.toml): spawn and extend at the listing price, and
+# three FREE provider-wide rows at 0. A listing change is a new version and
+# new rows on both nodes (TOON_Network ADR 0009).
+#
+# THE FREE ROWS ARE PRICED 100 HERE, NOT 0, for the reason the
+# g.anyone.credentials.keys row above spells out: this hop subtracts its fee
+# from what the packet carries, so a 0 here would forward a negative amount
+# and refuse R01 every honest request. 100 - 100 == 0 arrives, which is what
+# a free route asks for. And every row is written out because prefix matching
+# is longest-wins: without its own row, g.toon.provider.status would fall
+# onto nothing at all (g.toon.provider itself is not a route).
+[[routes]]
+prefix = "g.toon.provider.basic.v1.spawn"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.basic.v1.extend"
+peer_id = "relay-provider"
+price = 1100
+
+# The sandbox-only `smoke` listing (conf/provider.toml): same price, a 30 s
+# Lease Interval, bought by `make smoke-m1`.
+[[routes]]
+prefix = "g.toon.provider.smoke.v1.spawn"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.smoke.v1.extend"
+peer_id = "relay-provider"
+price = 1100
+
+[[routes]]
+prefix = "g.toon.provider.availability"
+peer_id = "relay-provider"
+price = 100
+
+[[routes]]
+prefix = "g.toon.provider.status"
+peer_id = "relay-provider"
+price = 100
+
+[[routes]]
+prefix = "g.toon.provider.terminate"
+peer_id = "relay-provider"
+price = 100
+
 # ── The peerings ─────────────────────────────────────────────────────────────
 # Only the dialing side has an endpoint; http:// scheme selects ILP-over-HTTP
 # carriage, and on HTTP the dialer is structurally the payer.
@@ -148,6 +200,11 @@ fee = 100
 [[peers]]
 id = "relay-gas"
 endpoint = "http://gas-connector:3000/ilp"
+fee = 100
+
+[[peers]]
+id = "relay-provider"
+endpoint = "http://provider-connector:3000/ilp"
 fee = 100
 
 # The converting peering. BOTH numbers on this row are in ANYONE base units,
@@ -217,6 +274,19 @@ counterparty_key = "5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q" # gas-connecto
 peer_id = "relay-gas"
 channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
 client_edge_url = "http://gas-connector:3000/ilp"
+
+# The provider peering: same Solana shape as the two above, opened by the
+# same job against the provider-connector's committed settlement key
+# (keys/toon/provider-connector, mnemonic index 38).
+[[peer_channels]]
+peer_id = "relay-provider"
+channel_account = "87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn"
+counterparty_key = "6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA" # provider-connector Solana settlement
+
+[[pay_channels]]
+peer_id = "relay-provider"
+channel_account = "87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn"
+client_edge_url = "http://provider-connector:3000/ilp"
 
 # The ANYONE peering, and the reason this file has a `[[tokens]]` block at all.
 # A DIFFERENT SHAPE, not a different spelling: `channel_id` is an EVM channel

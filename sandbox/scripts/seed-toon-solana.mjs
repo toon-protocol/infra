@@ -13,7 +13,9 @@
 //      settlement backend submits a real ATA-create + simulated
 //      InitializeChannel at startup — an unfunded key is a refuse-to-boot)
 //   4. airdrop SOL to the gas station's fee payer (keys/toon/gas-fee-payer.json)
-//   5. fund THE BUYER — the smoke test's own Solana identity. New with the
+//   5. fund THE BUYER — the smoke test's own Solana identity — and THE
+//      DIRECTORY PUBLISHER, the compute provider's payer for relay writes,
+//      which needs the same SOL + ATA for the same reason. New with the
 //      cross-asset flip: the client leg used to settle on anvil, where a payer
 //      needs nothing seeded (mock USDC is mintable and anvil hands out ETH),
 //      but a Solana channel needs its payer to already hold SOL *and* an ATA
@@ -49,7 +51,7 @@ const SYSTEM = address('11111111111111111111111111111111');
 const TOKEN = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = address('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR');
-const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector'];
+const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector', 'provider-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
@@ -60,6 +62,14 @@ const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // name here rather than as an unfunded-wallet mystery.
 const BUYER = address('oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96');
 const BUYER_USDC = 1_000_000_000n; // 1000 USDC — the smoke deposits 10 of it
+// THE DIRECTORY PUBLISHER — the compute provider's own payer for relay writes
+// (the `directory-publisher` service; provider/tools/publisher). Account
+// index 1 of the SAME phrase, so it is deterministic like the buyer but holds
+// its OWN wallet and its OWN channel: two processes sharing one channel share
+// one nonce watermark, and the loser of that race has every later claim
+// refused. Derived by `deriveFullIdentity(mnemonic, { accountIndex: 1 })`.
+const PUBLISHER = address('AqynRZwvVqUPRwRJXvm6odUb3t93fDjnWe3p6BeuUFxD');
+const PUBLISHER_USDC = 1_000_000_000n; // 1000 USDC — it deposits 10 of it
 
 const rpc = createSolanaRpc(RPC_URL);
 const rpcSubscriptions = createSolanaRpcSubscriptions(WS_URL);
@@ -102,16 +112,21 @@ async function ata(owner) {
 {
   const mintInfo = await rpc.getAccountInfo(mintKp.address, { encoding: 'base64' }).send();
   if (mintInfo.value !== null) {
-    // The BUYER's ATA is checked too, and not only the relay's: a chain seeded
-    // by an older revision of this script has the mint and the connectors but
-    // no buyer, and skipping on the relay alone would leave the smoke unable
-    // to open its channel on a stack that looks seeded.
+    // EVERY node's ATA is checked, and the BUYER's: a chain seeded by an
+    // older revision of this script has the mint and the connectors it knew
+    // about, but not a node added since (the provider-connector was) and not
+    // necessarily the buyer — and a connector whose settlement key holds no
+    // SOL refuses to boot, so skipping on the relay alone would leave a new
+    // node unbootable on a stack that looks seeded.
     const funded = async (owner) => {
       const bal = await rpc.getTokenAccountBalance(await ata(owner)).send().catch(() => null);
       return bal !== null && BigInt(bal.value.amount) > 0n;
     };
-    if (await funded(nodeSigners['relay-connector'].address) && await funded(BUYER)) {
-      console.log('[seed-toon-solana] mint + funded connector/buyer ATAs already exist — nothing to do.');
+    const allFunded = (await Promise.all(
+      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER].map(funded),
+    )).every(Boolean);
+    if (allFunded) {
+      console.log('[seed-toon-solana] mint + funded connector/buyer/publisher ATAs already exist — nothing to do.');
       process.exit(0);
     }
   }
@@ -135,6 +150,7 @@ const airdropTargets = [
   ['usdc-authority', authority.address],
   ['gas-fee-payer', gasFeePayer.address],
   ['buyer (the smoke test)', BUYER],
+  ['directory-publisher (the provider’s relay-write payer)', PUBLISHER],
   ...NODES.map((n) => [n, nodeSigners[n].address]),
 ];
 for (const [who, addr] of airdropTargets) {
@@ -232,6 +248,16 @@ for (const n of NODES) {
   const buyerAta = await ata(BUYER);
   await sendIxs(authority, [createAtaIx(buyerAta, BUYER), mintToIx(buyerAta, BUYER_USDC)],
     `buyer: ATA + 1000 USDC (${BUYER})`);
+}
+
+// ── 5. the directory publisher's own ATA ──────────────────────────────────
+// Same story as the buyer, for a different wallet: the compute provider's
+// relay writes are PAID packets (TOON_Network ADR 0007), and the process that
+// pays them opens its own Solana channel against the hub at startup.
+{
+  const publisherAta = await ata(PUBLISHER);
+  await sendIxs(authority, [createAtaIx(publisherAta, PUBLISHER), mintToIx(publisherAta, PUBLISHER_USDC)],
+    `directory-publisher: ATA + 1000 USDC (${PUBLISHER})`);
 }
 
 console.log('\n[seed-toon-solana] done.');
