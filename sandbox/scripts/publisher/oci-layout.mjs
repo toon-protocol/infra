@@ -84,7 +84,19 @@ const str = (buf, start, len) => {
   const end = buf.indexOf(0, start) === -1 ? start + len : Math.min(buf.indexOf(0, start), start + len);
   return buf.toString('utf8', start, end).trim();
 };
-const octal = (buf, start, len) => {
+/**
+ * A tar numeric field. Normally NUL-terminated octal, but a size that does not
+ * fit — a member of 8 GiB or more, which a big layer can be — is written as
+ * base 256 with the top bit of the first byte set. Reading that as octal would
+ * give 0 and desynchronize the whole header walk.
+ */
+const numeric = (buf, start, len) => {
+  if (buf[start] & 0x80) {
+    let value = BigInt(buf[start] & 0x7f);
+    for (let i = start + 1; i < start + len; i++) value = (value << 8n) | BigInt(buf[i]);
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`a tar member of ${value} bytes is too large to index`);
+    return Number(value);
+  }
   const text = str(buf, start, len).replace(/[^0-7]/g, '');
   return text === '' ? 0 : parseInt(text, 8);
 };
@@ -102,7 +114,7 @@ function openTarLayout(file) {
       if (readSync(fd, header, 0, BLOCK, offset) < BLOCK) break;
       if (header[0] === 0) break; // the end-of-archive blocks
       const name = longName ?? [str(header, 345, 155), str(header, 0, 100)].filter(Boolean).join('/');
-      const size = octal(header, 124, 12);
+      const size = numeric(header, 124, 12);
       const type = String.fromCharCode(header[156]);
       longName = null;
       offset += BLOCK;
@@ -111,7 +123,7 @@ function openTarLayout(file) {
         const nameBuf = Buffer.alloc(size);
         readSync(fd, nameBuf, 0, size, offset);
         longName = nameBuf.toString('utf8').replace(/\0+$/, '');
-      } else if (type === '0' || type === '\0' || type === '') {
+      } else if (type === '0' || type === '\0') {
         members.set(name.replace(/^\.\//, ''), { offset, size });
       }
       offset += Math.ceil(size / BLOCK) * BLOCK;

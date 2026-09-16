@@ -117,6 +117,12 @@ declaration wins over a blob that is also in the layout — declaring a base
 layer is exactly how you say "do not store these bytes again". Only one bare
 repository is allowed; a second is ambiguous and refused.
 
+The bare form is the loose one: it speaks for whatever the layout happens not
+to hold, so a layer left out of an export by accident becomes an `oci` claim
+nobody checked. It is therefore never silent — every blob it claimed is named
+on stderr before the publish, and `planImage` returns them as `claimed`, for
+the publisher to recognise or not.
+
 ### What is refused, before anything is paid for
 
 The entry's `blobs` MUST be complete for the digest (spec §8.1), so the whole
@@ -126,10 +132,14 @@ publish is refused — nothing uploaded, nothing published — when:
 - an index or manifest is missing from the layout, even when it is declared
   upstream: its bytes are needed to list what it references;
 - a blob's bytes do not hash to the digest they are filed under, or its size
-  disagrees with the descriptor that references it;
-- a blob already has a Blob Record on the relay but no store copy txid is
-  known on this host (it was published elsewhere), so the entry could not
-  cite it.
+  disagrees with the descriptor that references it.
+
+A blob that ANOTHER publisher already stored is not a refusal: its Blob
+Record is on the relay, but which store upload holds that record's copy is
+only in the uploader's ledger, so the publisher uploads the same signed
+record once more — one data item, no part re-uploaded — and cites that copy.
+Every blob is verified by digest wherever it is stored, so a record from any
+signer is safe to cite (ADR 0006). The report marks those `recopied`.
 
 ## `image-verify` — read an entry back as a provider would
 
@@ -138,8 +148,10 @@ Free. Finds the entry on the relay by its address (kind 30434, author,
 the image digest, then fetches every `toon-store` blob's Blob Record at
 `GATEWAY/raw/<blob_record_txid>` and checks it is a signed kind 30435 record
 for that digest whose parts add up to the blob's size. `oci` blobs are
-reported and not fetched. Exit 0 when every check passes. #26's smoke reads
-the entry back the same way.
+reported and not fetched; a source type this reader does not know is a FAILED
+check rather than a skipped blob, because the entry claims to be complete for
+the digest. Exit 0 when every check passes. #26's smoke reads the entry back
+the same way.
 
 ## As a library
 
@@ -162,7 +174,7 @@ if (!r.skipped) await io.remember(r.digest.slice(7), r.record.store_txid);
 const image = await publishImage({ path, name, tag, secretKey, upstream, io });
 // image = { address: '30434:<pubkey>:<name>:<tag>', d, digest, media_type,
 //           blobs: [{ digest, size, media_type, source }],
-//           stored: [{ digest, skipped, parts, blob_record_txid, event_id }],
+//           stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
 //           entry: { event_id, event } }
 
 await io.close();
@@ -172,7 +184,9 @@ const entry = await findImageEntryOnRelay(pubkey, `${name}:${tag}`);  // free
 `publishImage` opens and closes the layout itself; pass an already-open one
 as `layout` instead of `path` to reuse it. `planImage({ layout, name, tag,
 upstream })` is the same decision without publishing — what `--dry-run`
-prints, and what refuses an incomplete image.
+prints, and what refuses an incomplete image; hand the result back as `plan`
+to publish exactly what you showed the publisher, and so that the refusal
+lands before a payment channel is opened (which is what the CLI does).
 
 `io` is `{ store.upload(bytes, contentType) -> txid, relay.publish(event),
 relay.findBlobRecord(hex) -> { event, store_txid } | null, remember(hex,

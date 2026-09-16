@@ -9,9 +9,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
+import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { K_BLOB, TOON_LABEL } from './blob.mjs';
-import { publishImage, resolveUpstream, imageEntryTemplate, K_IMAGE } from './image.mjs';
+import { publishImage, planImage, resolveUpstream, imageEntryTemplate, K_IMAGE } from './image.mjs';
+import { openLayout } from './oci-layout.mjs';
 
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const jsonBlob = (o) => Buffer.from(JSON.stringify(o), 'utf8');
@@ -308,6 +309,12 @@ test('a bare `--upstream <repo>` claims every blob the layout does not hold', as
 
   assert.deepEqual(sourceOf(report, layers[0].digest), { type: 'oci', registry: 'ghcr.io', repository: 'toon-protocol/base' });
   for (const held of [manifest, config, layers[1]]) assert.equal(sourceOf(report, held.digest).type, 'toon-store');
+
+  // The bare form speaks for blobs nothing checked, so the plan names exactly
+  // which ones it claimed — a layer left out of the export by accident must
+  // not slip through as an upstream claim unremarked.
+  const plan = planImage({ layout: openLayout(dir), name: 'app', tag: 'v1', upstream: ['ghcr.io/toon-protocol/base'] });
+  assert.deepEqual(plan.claimed.map((x) => x.digest), [layers[0].digest]);
 });
 
 test('two bare `--upstream` repositories are refused as ambiguous', async () => {
@@ -406,4 +413,31 @@ test('the entry serializes exactly as the M2-1 `registry.image_entry` wire fixtu
     template.content,
     '{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","media_type":"application/vnd.oci.image.index.v1+json","blobs":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","size":1234,"media_type":"application/vnd.oci.image.manifest.v1+json","source":{"type":"oci","registry":"registry-1.docker.io","repository":"library/alpine"}},{"digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","size":235520,"media_type":"application/vnd.oci.image.layer.v1.tar+gzip","source":{"type":"toon-store","blob_record_txid":"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk"}}]}',
   );
+});
+
+test('a blob another publisher stored is not re-uploaded: its record is copied to the store once and cited', async () => {
+  const b = blobs();
+  const layer = bytes(900, 44);
+  const { manifest, layers } = b.image([layer]);
+  const io = fakeIo();
+  // The relay knows the record; this host's ledger does not know which store
+  // upload holds its copy, because another publisher made it.
+  const elsewhere = finalizeEvent({
+    kind: K_BLOB, created_at: 1_700_000_000,
+    tags: [['d', layers[0].digest], ['x', layers[0].digest.slice('sha256:'.length)], ['L', TOON_LABEL]],
+    content: JSON.stringify({ digest: layers[0].digest, size: layer.length, part_size: 102400, parts: [{ txid: 'z'.repeat(43), sha256: sha(layer), size: layer.length }] }),
+  }, generateSecretKey());
+  io.records.set(layers[0].digest.slice('sha256:'.length), { event: elsewhere, store_txid: null });
+
+  const report = await publishImage({ path: layout(b, [manifest]), name: 'app', tag: 'v1', secretKey: generateSecretKey(), io });
+
+  const line = report.stored.find((s) => s.digest === layers[0].digest);
+  assert.equal(line.skipped, true, 'the parts are not stored again');
+  assert.equal(line.recopied, true);
+  assert.equal(io.uploads.some((u) => u.bytes.equals(layer)), false, 'the layer bytes were never uploaded');
+  // Exactly one upload for it: the record's own copy, the same signed event.
+  const copy = io.uploads.find((u) => u.bytes.toString('utf8') === JSON.stringify(elsewhere));
+  assert.ok(copy && copy.contentType === 'application/json');
+  assert.equal(sourceOf(report, layers[0].digest).blob_record_txid, copy.txid);
+  assert.equal(io.published.some((e) => e.kind === K_BLOB && e.id === elsewhere.id), false, 'the record is not republished');
 });

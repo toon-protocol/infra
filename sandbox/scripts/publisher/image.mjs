@@ -16,9 +16,9 @@
 //
 // Two seams, and nothing else: the OCI layout on disk (oci-layout.mjs) and
 // the paid `io` of blob.mjs. See image.test.mjs for the fakes of both.
-import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
+import { finalizeEvent, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { K_IMAGE, TOON_LABEL } from '../lib/provider-smoke.mjs';
-import { publishBlob, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES } from './blob.mjs';
+import { publishBlob, hexOf, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES } from './blob.mjs';
 import { openLayout, isIndex, isManifest } from './oci-layout.mjs';
 
 export { K_IMAGE, TOON_LABEL };
@@ -67,9 +67,11 @@ export function resolveUpstream(specs = []) {
   const byDigest = new Map();
   let fallback = null;
   for (const spec of specs) {
+    // Whichever separator comes first decides the form, so a layout path
+    // holding an '@' is not mistaken for a digest.
     const blobAt = spec.indexOf('@');
     const pathAt = spec.indexOf('=');
-    if (blobAt > 0) {
+    if (blobAt > 0 && (pathAt < 0 || blobAt < pathAt)) {
       const digest = spec.slice(blobAt + 1);
       if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`--upstream ${spec}: "${digest}" is not a sha256 digest`);
       byDigest.set(digest, parseRepository(spec.slice(0, blobAt), spec));
@@ -141,18 +143,23 @@ function selectRoot(layout, rootDigest) {
 /**
  * What publishing `<name>:<tag>` from `layout` would put in the entry, decided
  * before anything is paid for:
- *   { d, digest, media_type, root, blobs: [{ digest, size, media_type, source }] }
- * where a `toon-store` source still has a null `blob_record_txid`. Throws when
- * the blob list would be incomplete, naming every blob at fault.
+ *   { d, digest, media_type, root, blobs: [{ digest, size, media_type, source }], claimed }
+ * where a `toon-store` source still has a null `blob_record_txid`, and
+ * `claimed` is the subset a BARE `--upstream <repo>` spoke for — blobs the
+ * layout does not hold and nothing else vouched for, which the caller should
+ * put in front of the publisher rather than pass over. Throws when the blob
+ * list would be incomplete, naming every blob at fault.
  */
 export function planImage({ layout, name, tag, upstream = [], rootDigest }) {
-  const declared = Array.isArray(upstream) ? resolveUpstream(upstream) : upstream;
+  const declared = resolveUpstream(upstream);
   const root = selectRoot(layout, rootDigest);
   const walked = walkImage(layout, root);
 
   const faults = [];
+  const claimed = [];
   const blobs = walked.map((blob) => {
     const held = layout.has(blob.digest);
+    const byBareRepository = !held && !declared.byDigest.has(blob.digest) && declared.fallback;
     const upstreamAt = declared.byDigest.get(blob.digest) ?? (held ? null : declared.fallback);
     if (blob.unreadable) {
       faults.push(`${blob.digest} (${blob.media_type}) is not in the layout, so the blobs it references cannot be listed` +
@@ -165,7 +172,9 @@ export function planImage({ layout, name, tag, upstream = [], rootDigest }) {
     const source = upstreamAt
       ? { type: 'oci', registry: upstreamAt.registry, repository: upstreamAt.repository }
       : { type: 'toon-store', blob_record_txid: null };
-    return { digest: blob.digest, size: blob.size, media_type: blob.media_type, source };
+    const listed = { digest: blob.digest, size: blob.size, media_type: blob.media_type, source };
+    if (byBareRepository) claimed.push(listed);
+    return listed;
   });
 
   if (faults.length > 0) {
@@ -173,7 +182,7 @@ export function planImage({ layout, name, tag, upstream = [], rootDigest }) {
       faults.map((f) => `  - ${f}`).join('\n') +
       '\n  Declare them with --upstream <registry>/<repository>[@<digest>] or export a layout that holds them.');
   }
-  return { d: `${name}:${tag}`, digest: root.digest, media_type: root.mediaType, root, blobs };
+  return { d: `${name}:${tag}`, digest: root.digest, media_type: root.mediaType, root, blobs, claimed };
 }
 
 /** The unsigned Image Registry entry for `plan` (spec §8.1). */
@@ -181,7 +190,7 @@ export function imageEntryTemplate({ plan, createdAt }) {
   return {
     kind: K_IMAGE,
     created_at: createdAt,
-    tags: [['d', plan.d], ['x', plan.digest.slice('sha256:'.length)], ['L', TOON_LABEL]],
+    tags: [['d', plan.d], ['x', hexOf(plan.digest)], ['L', TOON_LABEL]],
     content: JSON.stringify({
       digest: plan.digest,
       media_type: plan.media_type,
@@ -194,50 +203,53 @@ export function imageEntryTemplate({ plan, createdAt }) {
  * Publish `<name>:<tag>` from the OCI layout at `path` (or an already-open
  * `layout`): store every blob that is not upstream through #20's part upload,
  * then publish the entry. Resolves to
- *   { address, d, digest, media_type, blobs, stored: [{ digest, skipped, parts, blob_record_txid, event_id }],
+ *   { address, d, digest, media_type, blobs,
+ *     stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
  *     entry: { event_id, event } }
- * Nothing is uploaded or published if the blob list would be incomplete, or
- * if a blob's existing Blob Record cannot be cited.
+ * Nothing is uploaded or published if the blob list would be incomplete.
  */
 export async function publishImage({
-  path, layout: given, name, tag, secretKey, upstream = [], rootDigest, io,
+  path, layout: given, plan: planned, name, tag, secretKey, upstream = [], rootDigest, io,
   partSize = DEFAULT_PART_SIZE, dataItemMax = DATA_ITEM_MAX_BYTES,
   now = () => Math.floor(Date.now() / 1000), log = () => {},
 }) {
   const layout = given ?? openLayout(path);
   try {
-    const plan = planImage({ layout, name, tag, upstream, rootDigest });
+    // A caller that has already planned — the CLI, so that an incomplete
+    // image is refused before a payment channel is opened — hands it back.
+    const plan = planned ?? planImage({ layout, name, tag, upstream, rootDigest });
     const toStore = plan.blobs.filter((b) => b.source.type === 'toon-store');
-
-    // A blob already recorded by ANOTHER host is found on the relay but its
-    // store copy's txid is not: the record is signed before it is uploaded,
-    // so only the uploader's ledger knows it (toon-io.mjs). The entry cannot
-    // cite what it does not know, so this is settled with free relay reads
-    // before the first paid upload rather than half way through.
-    for (const blob of toStore) {
-      const hex = blob.digest.slice('sha256:'.length);
-      const existing = await io.relay.findBlobRecord(hex);
-      if (existing && !existing.store_txid) {
-        throw new Error(`${blob.digest} already has a Blob Record on the relay (${existing.event.id}) but no store copy txid is known here, ` +
-          `so the entry cannot cite it. Publish from the host that stored it, or re-store the blob against a relay that does not have it.`);
-      }
-    }
 
     const stored = [];
     for (const blob of toStore) {
-      const bytes = layout.read(blob.digest);
-      const report = await publishBlob({ bytes, secretKey, partSize, dataItemMax, io, now });
+      const hex = hexOf(blob.digest);
+      const report = await publishBlob({ bytes: layout.read(blob.digest), secretKey, partSize, dataItemMax, io, now });
       if (report.digest !== blob.digest) throw new Error(`the layout served ${report.digest} for ${blob.digest}`);
-      // The record was signed before its store copy existed, so which upload
+
+      // A record is signed before its store copy exists, so which upload
       // holds that copy is remembered beside the event, in the publisher's
-      // ledger; the next entry to cite this blob reads the txid back there.
-      if (!report.skipped) await io.remember?.(blob.digest.slice('sha256:'.length), report.record.store_txid);
-      blob.source.blob_record_txid = report.record.store_txid;
+      // ledger (toon-io.mjs). A blob ANOTHER publisher stored is found on the
+      // relay with no txid in this host's ledger; rather than refuse the
+      // image, the same signed record is uploaded once more — one data item,
+      // no part re-uploaded — so the entry has a copy to cite. Every blob is
+      // verified by digest wherever it is stored, so a record from any signer
+      // is safe to cite (ADR 0006).
+      let storeTxid = report.record.store_txid;
+      let recopied = false;
+      if (storeTxid === null) {
+        if (!verifyEvent(report.record.event)) {
+          throw new Error(`the relay's Blob Record for ${blob.digest} (${report.record.event_id}) is not correctly signed`);
+        }
+        storeTxid = await io.store.upload(Buffer.from(JSON.stringify(report.record.event), 'utf8'), 'application/json');
+        recopied = true;
+      }
+      await io.remember?.(hex, storeTxid);
+      blob.source.blob_record_txid = storeTxid;
       stored.push({
-        digest: blob.digest, skipped: report.skipped, parts: report.parts?.length ?? null,
-        blob_record_txid: report.record.store_txid, event_id: report.record.event_id,
+        digest: blob.digest, skipped: report.skipped, recopied, parts: report.parts?.length ?? null,
+        blob_record_txid: storeTxid, event_id: report.record.event_id,
       });
-      log(`${report.skipped ? 'kept  ' : 'stored'} ${blob.digest} (${blob.size} bytes) -> ${report.record.store_txid}`);
+      log(`${report.skipped ? (recopied ? 'copied' : 'kept  ') : 'stored'} ${blob.digest} (${blob.size} bytes) -> ${storeTxid}`);
     }
 
     const event = finalizeEvent(imageEntryTemplate({ plan, createdAt: now() }), secretKey);

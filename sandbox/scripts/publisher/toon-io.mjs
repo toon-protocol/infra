@@ -46,19 +46,22 @@ export function rememberRecord(digestHex, storeTxid) {
   writeFileSync(LEDGER, JSON.stringify(ledger, null, 2) + '\n');
 }
 
-/** The newest Blob Record on the relay for `hex`, or null. */
-export async function findBlobRecordOnRelay(hex) {
-  const events = await relayRead({ kinds: [K_BLOB], '#x': [hex] }, `blob-${hex.slice(0, 8)}`);
+/**
+ * The newest event `filter` matches, or null. An addressable kind is replaced
+ * on the relay, but a relay may still hold an older copy (or two publishers
+ * may race), so the reader decides rather than trusting the order it got.
+ */
+async function newestMatching(filter, label) {
+  const events = await relayRead(filter, label);
   if (events.length === 0) return null;
   return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
 }
 
+/** The newest Blob Record on the relay for `hex`, or null. */
+export const findBlobRecordOnRelay = (hex) => newestMatching({ kinds: [K_BLOB], '#x': [hex] }, `blob-${hex.slice(0, 8)}`);
+
 /** The newest Image Registry entry on the relay at `30434:<pubkey>:<d>`, or null. */
-export async function findImageEntryOnRelay(pubkey, d) {
-  const events = await relayRead({ kinds: [K_IMAGE], authors: [pubkey], '#d': [d] }, `image-${d}`);
-  if (events.length === 0) return null;
-  return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
-}
+export const findImageEntryOnRelay = (pubkey, d) => newestMatching({ kinds: [K_IMAGE], authors: [pubkey], '#d': [d] }, `image-${d}`);
 
 /**
  * The paid `io` for blob.mjs, plus `close()`. `secretKey` signs the kind:5094
