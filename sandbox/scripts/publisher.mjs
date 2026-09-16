@@ -16,13 +16,43 @@
 //       #x, its copy and every part from the gateway's /raw/, checking every
 //       hash. Free — nothing is paid.
 //
+//   node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex>
+//           [--upstream <spec>]... [--root <sha256:hex>] [--dry-run]
+//       Publish the Image Registry entry for a locally built image (issue
+//       #21). <layout> is an OCI image layout: a directory, or the tar
+//       `docker save --platform linux/amd64 <image> -o image.tar` writes.
+//       Every blob reachable from the image digest — the index if there is
+//       one, every manifest, every config and every layer — is listed with
+//       its source. A blob declared upstream is listed as `oci`; every other
+//       blob is stored by `blob` above and listed as `toon-store` citing its
+//       Blob Record's store txid. An image whose blob list would be
+//       incomplete is refused before anything is paid for. --dry-run prints
+//       that list and stops. Republishing the same <name>:<tag> moves the tag.
+//
+//       --upstream says which blobs are already public, in one of three
+//       forms (none of them calls the registry):
+//         <registry>/<repository>@sha256:<hex>  this one blob
+//         <registry>/<repository>=<layout>      every blob of that layout,
+//                                               e.g. `docker save alpine:3.22`
+//         <registry>/<repository>               every blob the image
+//                                               references but the layout
+//                                               does not hold
+//
+//   node scripts/publisher.mjs image-verify <30434:pubkey:name:tag>
+//       Read an entry back the way a provider would: from the relay by its
+//       address, then every toon-store blob's Blob Record from the gateway's
+//       /raw/<blob_record_txid>. Free — nothing is paid.
+//
 // --key may also come from PUBLISHER_KEY. URLs: HUB_URL, STORE_EDGE_URL,
 // GATEWAY_URL, RELAY_WS (defaults are the sandbox's host-side ports).
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { getPublicKey, verifyEvent } from 'nostr-tools/pure';
+import { hasTag } from './lib/provider-smoke.mjs';
 import { publishBlob, planBlob, sha256Hex, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
-import { openToonIo, rememberRecord, readLedger, findBlobRecordOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
+import { publishImage, planImage, parseRef, K_IMAGE, TOON_LABEL } from './publisher/image.mjs';
+import { openLayout } from './publisher/oci-layout.mjs';
+import { openToonIo, readLedger, findBlobRecordOnRelay, findImageEntryOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
 
 const log = (m) => console.error(`  ${m}`);
 const EVENT_FIELDS = ['id', 'pubkey', 'kind', 'created_at', 'content', 'sig'];
@@ -55,7 +85,7 @@ async function blob(positionals, values) {
   const io = await openToonIo({ secretKey, log });
   try {
     const report = await publishBlob({ bytes, secretKey, partSize, dataItemMax, io });
-    if (!report.skipped) rememberRecord(report.digest.slice('sha256:'.length), report.record.store_txid);
+    if (!report.skipped) await io.remember(report.digest.slice('sha256:'.length), report.record.store_txid);
     const { event, ...record } = report.record;
     console.log(JSON.stringify({ ...report, record }, null, 2));
   } finally {
@@ -98,12 +128,93 @@ async function blobVerify(positionals) {
   process.exit(failed === 0 ? 0 : 1);
 }
 
+async function image(positionals, values) {
+  const [path, ref] = positionals;
+  if (!path || !ref) usage();
+  const { name, tag } = parseRef(ref);
+  const secretKey = secretKeyFrom(values.key ?? process.env.PUBLISHER_KEY);
+  const upstream = values.upstream ?? [];
+  const opts = {
+    path, name, tag, upstream, rootDigest: values.root,
+    partSize: Number(values['part-size'] ?? DEFAULT_PART_SIZE),
+    dataItemMax: Number(values['data-item-max'] ?? DATA_ITEM_MAX_BYTES),
+  };
+
+  // The plan is made — and an incomplete blob list refused — before a channel
+  // is opened or anything is paid for.
+  const layout = openLayout(path);
+  let plan;
+  try {
+    plan = planImage({ layout, ...opts });
+  } finally {
+    layout.close();
+  }
+  const pay = plan.blobs.filter((b) => b.source.type === 'toon-store');
+  log(`publisher ${getPublicKey(secretKey)}; ${path} ${name}:${tag} is ${plan.digest} (${plan.media_type})`);
+  log(`${plan.blobs.length} blobs: ${pay.length} through the TOON store, ${plan.blobs.length - pay.length} upstream`);
+  if (values['dry-run']) {
+    console.log(JSON.stringify({ address: `${K_IMAGE}:${getPublicKey(secretKey)}:${name}:${tag}`, ...plan, root: undefined }, null, 2));
+    return;
+  }
+
+  const io = await openToonIo({ secretKey, log });
+  try {
+    const report = await publishImage({ ...opts, secretKey, io, log });
+    const { event, ...entry } = report.entry;
+    console.log(JSON.stringify({ ...report, entry }, null, 2));
+  } finally {
+    await io.close();
+  }
+}
+
+async function imageVerify(positionals) {
+  const address = positionals[0] ?? '';
+  const parts = address.split(':');
+  if (parts.length < 4 || Number(parts[0]) !== K_IMAGE || !/^[0-9a-f]{64}$/.test(parts[1])) usage();
+  const [, pubkey, ...rest] = parts;
+  const d = rest.join(':');
+
+  const event = await findImageEntryOnRelay(pubkey, d);
+  if (!event) throw new Error(`no kind ${K_IMAGE} Image Registry entry at ${address} on the relay`);
+  const checks = [];
+  const check = (cond, what) => { checks.push({ ok: cond, what }); log(`${cond ? 'ok  ' : 'FAIL'} ${what}`); };
+  const content = JSON.parse(event.content);
+  const hex = content.digest?.slice('sha256:'.length);
+
+  check(hasTag(event, ['d', d]) && hasTag(event, ['x', hex]) && hasTag(event, ['L', TOON_LABEL]),
+    `entry ${event.id} is d=${d}, x=${hex}, L=${TOON_LABEL}`);
+  check(verifyEvent(event), `signed by ${pubkey}`);
+  check(content.blobs?.some((b) => b.digest === content.digest), `the ${content.blobs?.length} blobs include the image digest ${content.digest}`);
+
+  for (const blob of content.blobs ?? []) {
+    if (blob.source?.type === 'oci') {
+      log(`skip ${blob.digest} is upstream at ${blob.source.registry}/${blob.source.repository}`);
+      continue;
+    }
+    const txid = blob.source?.blob_record_txid;
+    const record = JSON.parse((await readRaw(txid)).toString('utf8'));
+    const recorded = JSON.parse(record.content);
+    check(
+      record.kind === K_BLOB && verifyEvent(record) && recorded.digest === blob.digest && recorded.size === blob.size &&
+        recorded.parts.reduce((n, p) => n + p.size, 0) === blob.size,
+      `${blob.digest} (${blob.size} bytes, ${blob.media_type}): Blob Record at ${GATEWAY}/raw/${txid}, ${recorded.parts?.length} parts`,
+    );
+  }
+
+  const failed = checks.filter((c) => !c.ok).length;
+  console.log(JSON.stringify({ address, event_id: event.id, digest: content.digest, blobs: content.blobs?.length, checks: checks.length, failed }, null, 2));
+  process.exit(failed === 0 ? 0 : 1);
+}
+
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { key: { type: 'string' }, 'part-size': { type: 'string' }, 'data-item-max': { type: 'string' } },
+  options: {
+    key: { type: 'string' }, 'part-size': { type: 'string' }, 'data-item-max': { type: 'string' },
+    upstream: { type: 'string', multiple: true }, root: { type: 'string' }, 'dry-run': { type: 'boolean' },
+  },
 });
 const [command, ...rest] = positionals;
-const commands = { blob, 'blob-verify': blobVerify };
+const commands = { blob, 'blob-verify': blobVerify, image, 'image-verify': imageVerify };
 if (!commands[command]) usage();
 commands[command](rest, values).then(
   () => process.exit(0),

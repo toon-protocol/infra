@@ -9,6 +9,7 @@
 //   relay.findBlobRecord a FREE NIP-01 read at the relay, by `#x`, plus the
 //                       local ledger that remembers which store txid holds
 //                       each record's copy (the event cannot carry its own)
+//   remember            the write side of that ledger, free and local
 //
 // Prices and routes are the sandbox's: conf/connector-relay.toml forwards
 // g.toon.store to the store connector at {base 1000, per_kib 10} and sells
@@ -17,7 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { sendJob } from '@toon-protocol/client';
 import { buildBlobStorageRequest } from '@toon-protocol/core';
-import { ROOT, HUB, RELAY_WS, openChannel, relayRead } from '../lib/provider-smoke.mjs';
+import { ROOT, HUB, RELAY_WS, K_IMAGE, openChannel, relayRead } from '../lib/provider-smoke.mjs';
 import { K_BLOB } from './blob.mjs';
 
 export const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
@@ -48,6 +49,13 @@ export function rememberRecord(digestHex, storeTxid) {
 /** The newest Blob Record on the relay for `hex`, or null. */
 export async function findBlobRecordOnRelay(hex) {
   const events = await relayRead({ kinds: [K_BLOB], '#x': [hex] }, `blob-${hex.slice(0, 8)}`);
+  if (events.length === 0) return null;
+  return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
+}
+
+/** The newest Image Registry entry on the relay at `30434:<pubkey>:<d>`, or null. */
+export async function findImageEntryOnRelay(pubkey, d) {
+  const events = await relayRead({ kinds: [K_IMAGE], authors: [pubkey], '#d': [d] }, `image-${d}`);
   if (events.length === 0) return null;
   return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
 }
@@ -90,7 +98,11 @@ export async function openToonIo({ secretKey, log = () => {} }) {
       return event ? { event, store_txid: readLedger()[hex] ?? null } : null;
     },
   };
-  return { store, relay, close: async () => client.close?.() };
+  // The ledger write, behind the same seam: a publisher that stores a blob
+  // notes which store upload holds its record's copy, so a later Image
+  // Registry entry can cite it (image.mjs).
+  const remember = async (digestHex, storeTxid) => rememberRecord(digestHex, storeTxid);
+  return { store, relay, remember, close: async () => client.close?.() };
 }
 
 /** GET {gateway}/raw/{txid}, retried while the gateway is still indexing the upload. */

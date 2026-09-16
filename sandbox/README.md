@@ -219,8 +219,29 @@ the store so an Image Registry entry can cite that copy's txid. A blob the
 relay already records is skipped. `node scripts/publisher.mjs blob-verify
 sha256:<hex>` reads it all back the way a provider would (relay by `#x`,
 the copy and every part at the gateway's `/raw/<txid>`, every hash
-checked) and pays nothing. `make test` runs the publisher's unit tests
-against fakes; see `scripts/publisher/README.md`.
+checked) and pays nothing.
+
+`node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex>` puts a
+locally built image on the network: point it at an OCI image layout — a
+directory, or the tar `docker save --platform linux/amd64 <image> -o
+image.tar` writes — and it walks every blob reachable from the image digest
+(the index if there is one, every manifest, every config and every layer),
+stores the ones that are not already public through `blob` above, and
+publishes the **Image Registry entry** (kind 30434, `d = <name>:<tag>`,
+`x` = the digest hex) that makes `<npub>/<name>:<tag>` resolve. Say which
+blobs are already public with `--upstream <registry>/<repository>` — as
+`…@sha256:<hex>` for one blob, `…=<layout>` for every blob of a base image
+export (`docker save busybox:latest -o base.tar`), or bare for every blob
+the layout does not hold — and those are listed as `oci` sources instead of
+being paid for. No form of `--upstream` calls the registry. An image whose
+blob list would be incomplete is refused before anything is paid for, and
+`--dry-run` prints the list without publishing. Republishing the same
+`<name>:<tag>` moves the tag. `node scripts/publisher.mjs image-verify
+30434:<pubkey>:<name>:<tag>` reads the entry back from the relay and every
+`toon-store` blob's Blob Record from the gateway, free.
+
+`make test` runs the publisher's unit tests against fakes and real OCI
+layouts in a temp directory; see `scripts/publisher/README.md`.
 
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
