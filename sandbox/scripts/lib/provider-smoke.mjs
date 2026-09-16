@@ -382,6 +382,26 @@ export async function openChannel(connector, storeName = 'channels.json', deposi
  * fresh sshd. Returns { ok, user } — `ok` when the marker came back, `user` the remote
  * account that answered — or { err } with the last stderr line when every attempt failed.
  */
+/**
+ * `ssh -i <tenant key> -p <ssh_port> tenant@<host> <command>` once sshd answers (`sshInto`
+ * first, so a fresh sshd is waited for the same way). Returns { ok: true, out } with the
+ * command's stdout, or { ok: false, out, err } with its stderr's last line on a non-zero exit.
+ */
+export async function sshRun(tenant, access, command) {
+  const opened = await sshInto(tenant, access);
+  if (opened.ok !== true) return { ok: false, out: '', err: opened.err ?? 'ssh never succeeded' };
+  try {
+    const out = execFileSync('ssh', [
+      '-i', tenant.keyPath, '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+      '-o', 'LogLevel=ERROR', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+      '-p', String(access.ssh_port), `${SSH_USER}@${access.host}`, command,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+    return { ok: true, out };
+  } catch (e) {
+    return { ok: false, out: String(e.stdout ?? ''), err: String(e.stderr ?? e.message).trim().split('\n').pop() };
+  }
+}
+
 export async function sshInto(tenant, access, attempts = 20) {
   let lastErr = '';
   for (let i = 0; i < attempts; i++) {
