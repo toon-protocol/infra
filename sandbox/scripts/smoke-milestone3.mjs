@@ -11,46 +11,52 @@
 //
 //   0.  the stack is up; both connectors terminate the `warm` routes at the
 //       committed prices (spawn/extend at `price`, standby/standby.extend at
-//       `standby_price`) and the hub forwards each at price + its fee; both
-//       providers' `warm` Listings on the relay carry `standby_price`, and
-//       both Livenesses say the full `warm` capacity (nothing reserved yet)
-//   1.  the SPAWN, one signed Lease Request with two `p` tags: the primary
+//       `standby_price`) and the hub forwards each at price + its fee
+//   0b. both providers' `warm` Listings on the relay carry `standby_price`
+//       (THE GATE: a first provider that sells no `warm` cannot be this
+//       set's primary, and the smoke stops there rather than buying
+//       something else), and each Liveness has a `warm` slot to sell
+//   1.  a tenant channel against the hub, and every book's baseline: the
+//       hub's client book, both peer books, and the second provider's
+//       directory publisher's own channel, read right after a Liveness
+//   2.  the SPAWN, one signed Lease Request with two `p` tags: the primary
 //       answers role primary WITH access, its workload runs on the host
 //       daemon in the first provider's id range and SSH opens with the
 //       tenant's key; the standby answers role standby with NO access and
-//       the same expires_at arithmetic (one standby payment, one interval);
-//       status on the standby says `reserved`; the standby's next Liveness
+//       the same expires_at arithmetic (one standby payment, one interval)
+//       and starts nothing; status on it says `reserved`; its next Liveness
 //       has available.warm one lower — a reservation is a lease
-//   2.  the RESERVATION's price: `.standby.extend` adds one interval at
+//   3.  the RESERVATION's price: `.standby.extend` adds one interval at
 //       standby_price; `.extend` on it is refused 409 not_running — and
 //       BILLED, at the running price (one route, one price: ADR 0003)
-//   3.  the primary's CONTAINER IS STOPPED (`docker compose stop provider`):
+//   4.  the primary's CONTAINER IS STOPPED (`docker compose stop provider`):
 //       its Liveness stops being replaced and expires five cadences after
 //       its last publication; one cadence of continuous silence later the
 //       standby announces a TAKEOVER — kind 30433, d = the workload id,
 //       content { workload_id, primary }, signed by the second provider —
 //       to the primary's Relay Set (this one relay), read back here by the
-//       provider's own settle filter; two cadences after that it settles the
-//       race, wins (the only claimant) and starts the workload FROM THE
-//       IMAGE in ITS OWN id range: a running toon-11xx container reachable
-//       over SSH with the tenant's key; status on the standby says running,
-//       role still standby, access present, takeover.winner = its pubkey,
-//       expires_at unchanged (winning buys no time)
-//   4.  the WINNER's price: `.extend` at the full price adds one interval;
+//       provider's own settle filter
+//   5.  two cadences after that it settles the race, wins (the only
+//       claimant) and starts the workload FROM THE IMAGE in ITS OWN id
+//       range: a running toon-11xx container reachable over SSH with the
+//       tenant's key; status on the standby says running, role still
+//       standby, access present, takeover.winner = its pubkey, expires_at
+//       unchanged (winning buys no time)
+//   6.  the WINNER's price: `.extend` at the full price adds one interval;
 //       `.standby.extend` is refused 409 not_standby — and billed
-//   5.  the primary's container is STARTED again: at startup it finds the
+//   7.  the primary's container is STARTED again: at startup it finds the
 //       Takeover on its own Relay Set, stops its container and marks the
 //       lease taken over — status says `stopped`, role primary, no access —
 //       and EXACTLY ONE copy of the workload is running on the host daemon:
 //       the standby's; the primary's container exists, exited
-//   6.  the BOOKS, to the unit: the second provider's peer book grew by
+//   8.  the BOOKS, to the unit: the second provider's peer book grew by
 //       standby_price x 2 (reservation + its extension) + price (the
 //       post-Takeover extension) + the two billed refusals; the first
 //       provider's by the full spawn price and nothing else; the hub's client
 //       book on the tenant's channel by every packet at the hub's prices; and
 //       the second provider's directory publisher paid ONE MORE g.toon.relay
-//       unit than its Liveness cadence accounts for — the Takeover event
-//   7.  the tenant ends both leases through the free terminate routes
+//       unit than its Liveness cadences account for — the Takeover event
+//   9.  the tenant ends both leases through the free terminate routes
 //
 // TIMELINE, at the sandbox's 30 s cadence (conf/provider*.toml): stop → the
 // primary's Liveness expires (five cadences after the last publication, so
@@ -60,7 +66,7 @@
 // budgeted at eight. The `warm` tier's 600 s Lease Interval is what lets the
 // reservation outlive that, and `.standby.extend` in step 2 doubles it.
 //
-// TOON_M3_STANDBY_ONLY=1 runs steps 0–2, the books and the terminate against
+// TOON_M3_STANDBY_ONLY=1 runs steps 0–3, 8 and 9 against
 // the SECOND PROVIDER ALONE — the same code, with the first provider named in
 // the set but never paid — for a sandbox whose first provider does not (yet)
 // sell `warm`. It proves the reservation side only and SAYS SO in its verdict;
