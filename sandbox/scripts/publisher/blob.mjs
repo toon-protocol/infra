@@ -40,6 +40,13 @@ export const maxPartSize = (dataItemMax = DATA_ITEM_MAX_BYTES) => dataItemMax - 
 
 export const sha256Hex = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+/** The hex of a `sha256:<hex>` digest — what an `x` tag and a `#x` filter carry. */
+export function hexOf(digest) {
+  const hex = /^sha256:([0-9a-f]{64})$/.exec(digest)?.[1];
+  if (!hex) throw new Error(`not a sha256 digest: ${digest}`);
+  return hex;
+}
+
 /** `bytes` cut into `partSize` pieces, the last one shorter. An empty blob has no parts. */
 export function splitParts(bytes, partSize) {
   const parts = [];

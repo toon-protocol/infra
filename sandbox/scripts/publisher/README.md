@@ -8,12 +8,15 @@ back through the local gateway. Not a tenant product.
 ```
 node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520]
 node scripts/publisher.mjs blob-verify sha256:<hex>
+node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex> [--upstream <spec>]... [--root <digest>] [--dry-run]
+node scripts/publisher.mjs image-verify 30434:<pubkey>:<name>:<tag>
 make test
 ```
 
 `--key` (or `PUBLISHER_KEY`) is the publisher's Nostr secret key, 64 hex. It
-signs the Blob Record. URLs default to the sandbox's host-side ports and can
-be moved with `HUB_URL`, `STORE_EDGE_URL`, `GATEWAY_URL`, `RELAY_WS`.
+signs the Blob Record and the Image Registry entry. URLs default to the
+sandbox's host-side ports and can be moved with `HUB_URL`, `STORE_EDGE_URL`,
+`GATEWAY_URL`, `RELAY_WS`.
 
 ## `blob` — a file into the TOON store, with its Blob Record (#20)
 
@@ -57,24 +60,136 @@ same signed event, fetches every part at `GATEWAY/raw/<txid>` and checks its
 size and sha256, reassembles and checks the blob digest. Exit 0 when every
 check passes.
 
+## `image` — an Image Registry entry from a local image (#21)
+
+Spec §8.1, ADR 0006. `<layout>` is an **OCI image layout**: a directory
+(`oci-layout`, `index.json`, `blobs/sha256/<hex>`) or the tar `docker save`
+writes, which is the same thing tarred. With the containerd image store
+`docker save` keeps the registry's own compressed layer bytes, so a base
+layer's digest in the export is the digest that layer has upstream.
+
+```
+docker build --platform linux/amd64 -t demo:v1 .
+docker save demo:v1 --platform linux/amd64 -o demo.tar
+node scripts/publisher.mjs image demo.tar demo:v1 --key <hex> \
+    --upstream registry-1.docker.io/library/busybox=base.tar
+```
+
+The publisher walks every blob reachable from the image digest — the index
+if there is one, then each manifest, its config and its layers, depth first
+and deduplicated — and decides each blob's source. Blobs that are not
+upstream go through `blob` above, one at a time; then the entry is signed and
+published as a paid `g.toon.relay` write:
+
+```
+kind 30434, d = "<name>:<tag>", x = <digest hex>, L = toon.network
+{ "digest": "sha256:…", "media_type": "…",
+  "blobs": [ { "digest": "sha256:…", "size": n, "media_type": "…",
+               "source": { "type": "toon-store", "blob_record_txid": "…" } },
+             { …, "source": { "type": "oci", "registry": "…", "repository": "…" } } ] }
+```
+
+The command prints the entry address `30434:<pubkey>:<name>:<tag>`, the
+digest, every blob with its source, and what each stored blob cost (`skipped`
+when the relay already had its Blob Record). `--dry-run` prints that list
+and stops, before a channel is opened. Republishing the same `<name>:<tag>`
+moves the tag: same `d`, new `x`, and the relay keeps the newer entry.
+
+`--root <digest>` picks one image out of a layout that holds several (an
+export of two tags); without it such a layout is refused with the list.
+
+### Which blobs are upstream
+
+`--upstream` is repeatable and says which blobs are already public, so the
+publisher does not pay to re-store them. **No form of it calls the upstream
+registry** — the sandbox has no outbound network guarantee, and a registry
+round trip at publish time would be a new way to fail for a fact the
+publisher already knows.
+
+| Form | Means |
+| --- | --- |
+| `<registry>/<repository>@sha256:<hex>` | that one blob is upstream |
+| `<registry>/<repository>=<layout>` | every blob the OCI layout at `<layout>` holds is upstream — `docker save busybox:latest -o base.tar` and point at it |
+| `<registry>/<repository>` | every blob the image *references* but the layout does not hold is upstream |
+
+An explicit form (`@` or `=`) wins over the bare one, and an upstream
+declaration wins over a blob that is also in the layout — declaring a base
+layer is exactly how you say "do not store these bytes again". Only one bare
+repository is allowed; a second is ambiguous and refused.
+
+The bare form is the loose one: it speaks for whatever the layout happens not
+to hold, so a layer left out of an export by accident becomes an `oci` claim
+nobody checked. It is therefore never silent — every blob it claimed is named
+on stderr before the publish, and `planImage` returns them as `claimed`, for
+the publisher to recognise or not.
+
+### What is refused, before anything is paid for
+
+The entry's `blobs` MUST be complete for the digest (spec §8.1), so the whole
+publish is refused — nothing uploaded, nothing published — when:
+
+- a blob is neither in the layout nor declared upstream;
+- an index or manifest is missing from the layout, even when it is declared
+  upstream: its bytes are needed to list what it references;
+- a blob's bytes do not hash to the digest they are filed under, or its size
+  disagrees with the descriptor that references it.
+
+A blob that ANOTHER publisher already stored is not a refusal: its Blob
+Record is on the relay, but which store upload holds that record's copy is
+only in the uploader's ledger, so the publisher uploads the same signed
+record once more — one data item, no part re-uploaded — and cites that copy.
+Every blob is verified by digest wherever it is stored, so a record from any
+signer is safe to cite (ADR 0006). The report marks those `recopied`.
+
+## `image-verify` — read an entry back as a provider would
+
+Free. Finds the entry on the relay by its address (kind 30434, author,
+`#d`), checks `d`, `x`, the label, the signature and that `blobs` contains
+the image digest, then fetches every `toon-store` blob's Blob Record at
+`GATEWAY/raw/<blob_record_txid>` and checks it is a signed kind 30435 record
+for that digest whose parts add up to the blob's size. `oci` blobs are
+reported and not fetched; a source type this reader does not know is a FAILED
+check rather than a skipped blob, because the entry claims to be complete for
+the digest. Exit 0 when every check passes. #26's smoke reads the entry back
+the same way.
+
 ## As a library
 
-`scripts/publisher/blob.mjs` is the logic and `scripts/publisher/toon-io.mjs`
-the paid I/O behind its one seam; the commands for Image Registry entries
-(#21) and Templates (#25) build on the same pieces:
+`blob.mjs` and `image.mjs` are the logic, `oci-layout.mjs` reads the image
+off the disk, and `toon-io.mjs` is the paid I/O behind the one seam both
+share. Templates (#25) and the M2 smoke (#26) build on the same pieces:
 
 ```js
 import { publishBlob } from './publisher/blob.mjs';
-import { openToonIo, rememberRecord } from './publisher/toon-io.mjs';
+import { publishImage, planImage, parseRef, imageAddress } from './publisher/image.mjs';
+import { openToonIo, findImageEntryOnRelay } from './publisher/toon-io.mjs';
 
 const io = await openToonIo({ secretKey });          // one client, one channel
+
 const r = await publishBlob({ bytes, secretKey, partSize, io });
 // r = { skipped, digest, size, part_size, parts: [{ txid, sha256, size }],
 //       record: { event_id, store_txid, event } }
-if (!r.skipped) rememberRecord(r.digest.slice(7), r.record.store_txid);
+if (!r.skipped) await io.remember(r.digest.slice(7), r.record.store_txid);
+
+const image = await publishImage({ path, name, tag, secretKey, upstream, io });
+// image = { address: '30434:<pubkey>:<name>:<tag>', d, digest, media_type,
+//           blobs: [{ digest, size, media_type, source }],
+//           stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
+//           entry: { event_id, event } }
+
 await io.close();
+const entry = await findImageEntryOnRelay(pubkey, `${name}:${tag}`);  // free
 ```
 
+`publishImage` opens and closes the layout itself; pass an already-open one
+as `layout` instead of `path` to reuse it. `planImage({ layout, name, tag,
+upstream })` is the same decision without publishing — what `--dry-run`
+prints, and what refuses an incomplete image; hand the result back as `plan`
+to publish exactly what you showed the publisher, and so that the refusal
+lands before a payment channel is opened (which is what the CLI does).
+
 `io` is `{ store.upload(bytes, contentType) -> txid, relay.publish(event),
-relay.findBlobRecord(hex) -> { event, store_txid } | null }`; the tests in
-`blob.test.mjs` drive `publishBlob` with in-memory fakes of exactly that.
+relay.findBlobRecord(hex) -> { event, store_txid } | null, remember(hex,
+storeTxid) }`; the tests in `blob.test.mjs` and `image.test.mjs` drive both
+publishers with in-memory fakes of exactly that, and `image.test.mjs` writes
+real OCI layouts (and a real tar) to a temp directory for the other seam.
