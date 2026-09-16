@@ -21,6 +21,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
 export const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 export const PROVIDER_EDGE = process.env.PROVIDER_EDGE_URL ?? 'http://localhost:3240';
+export const PROVIDER2_EDGE = process.env.PROVIDER2_EDGE_URL ?? 'http://localhost:3250';
 export const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
 export const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 export const RELAY_WS = process.env.RELAY_WS ?? 'ws://localhost:7100';
@@ -36,6 +37,10 @@ export const BUYER_SOL = 'oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96';
 // opened by the open-toon-solana-channels job.
 export const PROVIDER_SOL = '6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA';
 export const PROVIDER_CHANNEL = '87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn';
+// The SECOND provider's peering (TOON_Network #34): its own settlement key and
+// its own PDA, named by conf/connector-provider2.toml and the hub's own toml.
+export const PROVIDER2_SOL = 'CUCCqWMWMhwcHrZnxouDdwgRuUCd4MoSXx11zkfpLN4a';
+export const PROVIDER2_CHANNEL = 'Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF';
 // The relay-store peering channel: the PDA conf/connector-store.toml's
 // [[peer_channels]] row names, where the store connector books what the hub
 // has paid it for g.toon.store uploads.
@@ -63,12 +68,6 @@ export const K_BLOB = 30435; // addressable: Blob Record (Milestone 2)
 export const K_TEMPLATE = 30436; // addressable: Template (Milestone 2)
 export const TOON_LABEL = 'toon.network';
 
-// The free provider-wide routes and the paid per-listing-version ones.
-export const AVAILABILITY_ROUTE = 'g.toon.provider.availability';
-export const STATUS_ROUTE = 'g.toon.provider.status';
-export const TERMINATE_ROUTE = 'g.toon.provider.terminate';
-export const spawnRoute = (listing, version) => `g.toon.provider.${listing}.v${version}.spawn`;
-export const extendRoute = (listing, version) => `g.toon.provider.${listing}.v${version}.extend`;
 
 // The workload image: a small public sshd, PINNED BY DIGEST — the provider
 // pulls `reference@digest`, so the daemon verifies the bytes and picks the
@@ -82,45 +81,116 @@ export const IMAGE = {
 };
 export const SSH_USER = 'tenant';
 
-// ── conf/provider.toml, the source of truth for prices, keys and listings ──
-export const providerConf = readFileSync(join(ROOT, 'conf', 'provider.toml'), 'utf8');
+// ── the providers, each its own config file ───────────────────────────────
+// The sandbox runs TWO compute providers (TOON_Network #34): `provider` behind
+// provider-connector on :3240, and `provider2` behind provider2-connector on
+// :3250, each with its own Nostr identity, its own peering channel and its own
+// directory publisher. So every lookup a smoke makes about "the provider" —
+// its client edge, its channel, its pubkey, its prices, its route names — is a
+// question about WHICH ONE, and every helper below takes a provider.
+//
+// It is an ARGUMENT WITH A DEFAULT, not a new required parameter: the default
+// is the first provider, so everything Milestone 1 and 2 wrote keeps reading
+// (and meaning) exactly what it did. `PROVIDERS.provider2`, or the string
+// 'provider2', asks the same question of the second one.
 /** The first `key = value` scalar in `text` (a bare or quoted value, up to whitespace or a comment), or null. */
 const tomlScalar = (text, key) =>
   text.match(new RegExp(`^\\s*${key}\\s*=\\s*"?([^"\\s#]+)"?`, 'm'))?.[1] ?? null;
-/** The first `key = value` line of conf/provider.toml (top-level keys only: listing fields come from `listings()`). */
-export function confValue(key) {
-  const value = tomlScalar(providerConf, key);
-  if (value === null) throw new Error(`conf/provider.toml has no ${key} line`);
-  return value;
+
+function readProvider({ service, connectorNode, confFile, edge, sol, channel }) {
+  const conf = readFileSync(join(ROOT, 'conf', confFile), 'utf8');
+  const confValue = (key) => {
+    const value = tomlScalar(conf, key);
+    if (value === null) throw new Error(`conf/${confFile} has no ${key} line`);
+    return value;
+  };
+  const listings = () =>
+    conf.split(/^\[\[listings\]\]\s*$/m).slice(1).map((block) => {
+      const field = (key) => {
+        const value = tomlScalar(block, key);
+        if (value === null) throw new Error(`a [[listings]] block in conf/${confFile} has no ${key}`);
+        return value;
+      };
+      // `standby_price` is OPTIONAL by design (spec §7): a tier that prices no
+      // Warm Standby has no such line and sells no standby route at all, which
+      // is why this one field is read with `?? null` rather than demanded.
+      const standby = tomlScalar(block, 'standby_price');
+      return {
+        name: field('name'),
+        version: Number(field('version')),
+        arch: field('arch'),
+        lease_interval_s: Number(field('lease_interval_s')),
+        price: BigInt(field('price')),
+        standby_price: standby === null ? null : BigInt(standby),
+        capacity: Number(field('capacity')),
+      };
+    });
+  const addr = confValue('ilp_address');
+  return {
+    service, connectorNode, confFile, conf, edge, sol, channel,
+    ilpAddress: addr,
+    confValue,
+    listings,
+    /** One listing by name, or throw — a smoke buying a tier this provider does not sell is a smoke bug. */
+    listing: (name) => {
+      const l = listings().find((x) => x.name === name);
+      if (!l) throw new Error(`conf/${confFile} has no [[listings]] block named ${name}`);
+      return l;
+    },
+    pubkey: getPublicKey(Uint8Array.from(Buffer.from(confValue('nostr_private_key'), 'hex'))),
+    // Every route is a suffix of this provider's own ILP address, so the same
+    // call names a different route at each provider — which is the point.
+    availabilityRoute: `${addr}.availability`,
+    statusRoute: `${addr}.status`,
+    terminateRoute: `${addr}.terminate`,
+    spawnRoute: (listing, version) => `${addr}.${listing}.v${version}.spawn`,
+    extendRoute: (listing, version) => `${addr}.${listing}.v${version}.extend`,
+    // The two Warm Standby routes (spec §7). They exist only for a tier that
+    // sets `standby_price`; the connector terminates neither for one that
+    // does not.
+    standbyRoute: (listing, version) => `${addr}.${listing}.v${version}.standby`,
+    standbyExtendRoute: (listing, version) => `${addr}.${listing}.v${version}.standby.extend`,
+  };
 }
-/** Every `[[listings]]` block, in file order, as { name, version, arch, lease_interval_s, price, capacity }. */
-export function listings() {
-  const blocks = providerConf.split(/^\[\[listings\]\]\s*$/m).slice(1);
-  return blocks.map((block) => {
-    const field = (key) => {
-      const value = tomlScalar(block, key);
-      if (value === null) throw new Error(`a [[listings]] block in conf/provider.toml has no ${key}`);
-      return value;
-    };
-    return {
-      name: field('name'),
-      version: Number(field('version')),
-      arch: field('arch'),
-      lease_interval_s: Number(field('lease_interval_s')),
-      price: BigInt(field('price')),
-      capacity: Number(field('capacity')),
-    };
-  });
+
+export const PROVIDERS = {
+  provider: readProvider({
+    service: 'provider', connectorNode: 'provider-connector', confFile: 'provider.toml',
+    edge: PROVIDER_EDGE, sol: PROVIDER_SOL, channel: PROVIDER_CHANNEL,
+  }),
+  provider2: readProvider({
+    service: 'provider2', connectorNode: 'provider2-connector', confFile: 'provider2.toml',
+    edge: PROVIDER2_EDGE, sol: PROVIDER2_SOL, channel: PROVIDER2_CHANNEL,
+  }),
+};
+/** The first provider: what every helper here means by "the provider" unless told otherwise. */
+export const PROVIDER = PROVIDERS.provider;
+/** A provider from a name ('provider2'), a provider object, or nothing (the first). */
+export function providerOf(which = PROVIDER) {
+  if (typeof which !== 'string') return which;
+  const p = PROVIDERS[which];
+  if (!p) throw new Error(`no such provider ${which} — known: ${Object.keys(PROVIDERS).join(', ')}`);
+  return p;
 }
-/** One listing by name, or throw — a smoke buying a listing the provider does not sell is a smoke bug. */
-export function listing(name) {
-  const l = listings().find((x) => x.name === name);
-  if (!l) throw new Error(`conf/provider.toml has no [[listings]] block named ${name}`);
-  return l;
-}
-export const PROVIDER_PUBKEY = getPublicKey(
-  Uint8Array.from(Buffer.from(confValue('nostr_private_key'), 'hex')),
-);
+
+// ── conf/provider.toml, the source of truth for prices, keys and listings ──
+// The first provider's, by default; pass a provider for the second's.
+export const providerConf = PROVIDER.conf;
+export const confValue = (key, which) => providerOf(which).confValue(key);
+/** Every `[[listings]]` block, in file order, as { name, version, arch, lease_interval_s, price, standby_price, capacity }. */
+export const listings = (which) => providerOf(which).listings();
+export const listing = (name, which) => providerOf(which).listing(name);
+export const PROVIDER_PUBKEY = PROVIDER.pubkey;
+
+// The free provider-wide routes and the paid per-listing-version ones.
+export const AVAILABILITY_ROUTE = PROVIDER.availabilityRoute;
+export const STATUS_ROUTE = PROVIDER.statusRoute;
+export const TERMINATE_ROUTE = PROVIDER.terminateRoute;
+export const spawnRoute = (listing, version, which) => providerOf(which).spawnRoute(listing, version);
+export const extendRoute = (listing, version, which) => providerOf(which).extendRoute(listing, version);
+export const standbyRoute = (listing, version, which) => providerOf(which).standbyRoute(listing, version);
+export const standbyExtendRoute = (listing, version, which) =>
+  providerOf(which).standbyExtendRoute(listing, version);
 
 // ── the reporter: ok / FAIL lines, a tally, and one exit ──────────────────
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -169,7 +239,12 @@ export async function waitFor(probe, seconds, everyMs = 500) {
 // ── the connectors' own books (the same readers as scripts/smoke-toon.mjs) ─
 export const bearer = (node) =>
   readFileSync(join(ROOT, 'keys', 'toon', node, 'operator-bearer.token'), 'utf8').trim();
-export const edgeOf = { 'relay-connector': HUB, 'provider-connector': PROVIDER_EDGE, 'store-connector': STORE_EDGE };
+export const edgeOf = {
+  'relay-connector': HUB,
+  'provider-connector': PROVIDER_EDGE,
+  'provider2-connector': PROVIDER2_EDGE,
+  'store-connector': STORE_EDGE,
+};
 export async function claims(node) {
   const res = await fetch(`${edgeOf[node]}/claims`, { headers: { authorization: `Bearer ${bearer(node)}` } });
   if (!res.ok) throw new Error(`${node} GET /claims -> ${res.status}`);
@@ -256,8 +331,9 @@ export async function newestMatching(filter, label) {
 export const tagValues = (event, name) => event.tags.filter((t) => t[0] === name).map((t) => t.slice(1));
 export const hasTag = (event, cells) =>
   event.tags.some((t) => t.length >= cells.length && cells.every((c, i) => t[i] === c));
-/** The directory filters for this provider: by author and the toon.network label. */
-export const directoryFilter = (kind) => ({ kinds: [kind], authors: [PROVIDER_PUBKEY], '#L': [TOON_LABEL] });
+/** The directory filters for one provider: by author and the toon.network label. */
+export const directoryFilter = (kind, which) =>
+  ({ kinds: [kind], authors: [providerOf(which).pubkey], '#L': [TOON_LABEL] });
 
 // ── Solana payment-channel account layout ─────────────────────────────────
 // Offsets from the connector's packages/solana-program/src/state.rs (see the
@@ -333,13 +409,19 @@ export function newTenant(keyName) {
     sshPublicKey: readFileSync(`${keyPath}.pub`, 'utf8').trim(),
   };
 }
-/** A signed Lease Request: kind K_LEASE_REQUEST, p = the provider, op, an expiration `ttl` seconds out. */
-export function leaseRequest(tenant, op, content, ttl = 120) {
+/**
+ * A signed Lease Request: kind K_LEASE_REQUEST, p = the provider it is
+ * addressed to, op, an expiration `ttl` seconds out. The `p` tag is the whole
+ * reason this takes a provider: a provider refuses a request naming another
+ * provider's key, so a Standby Set's members each get their own copy — same
+ * tenant, same workload id, one `p` tag each.
+ */
+export function leaseRequest(tenant, op, content, ttl = 120, which) {
   const now = nowSec();
   return finalizeEvent({
     kind: K_LEASE_REQUEST,
     created_at: now,
-    tags: [['p', PROVIDER_PUBKEY], ['op', op], ['expiration', String(now + ttl)]],
+    tags: [['p', providerOf(which).pubkey], ['op', op], ['expiration', String(now + ttl)]],
     content: JSON.stringify(content),
   }, tenant.secret);
 }

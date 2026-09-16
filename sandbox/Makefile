@@ -46,8 +46,9 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-directory \
-        smoke-eviction smoke-m1 smoke-m2 smoke-ci smoke-hs hs-address logs ps test require-store-context require-anytoon-context
+        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-ci smoke-hs hs-address \
+        logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -124,9 +125,10 @@ up: require-store-context require-anytoon-context
 	$(COMPOSE) up -d --build
 
 ## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
-## the relay + the hub + the Solana channel-open job + the compute provider,
-## its connector and its directory publisher (10 services). No gateway, no
-## bundler, no store, no gas station — and no store sibling checkout.
+## the relay + the hub + the Solana channel-open job + BOTH compute providers,
+## each with its own connector and its own directory publisher (13 services).
+## No gateway, no bundler, no store, no gas station — and no store sibling
+## checkout.
 up-payments: COMPOSE_PROFILE = payments
 up-payments:
 	$(COMPOSE) up -d --build
@@ -279,6 +281,17 @@ smoke-credentials:
 ## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
 smoke-provider:
 	node scripts/smoke-provider.mjs
+
+## THE SAME SMOKE, AGAINST THE SECOND PROVIDER (TOON_Network #34): the same
+## script, the same helpers, one provider argument. It proves the second
+## provider is a provider in its own right and not a copy sharing the first's
+## surfaces — a tenant seals to provider2-connector's own edge (:3250), pays
+## g.toon.provider2.basic.v1.spawn through the hub, reaches the workload over
+## SSH on a port out of the second provider's own range, and the money lands
+## in the second peering's own channel. Buys the 180 s `basic` tier, so a run
+## left half-finished frees its slot in three minutes.
+smoke-provider2:
+	TOON_SMOKE_PROVIDER=provider2 node scripts/smoke-provider.mjs
 
 ## provider-directory proof for `make up-payments` (or `make up`): the
 ## provider's Profile, its Listing and its Liveness are read back off the
