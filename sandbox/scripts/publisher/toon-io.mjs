@@ -23,10 +23,10 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { sendJob } from '@toon-protocol/client';
 import { buildBlobStorageRequest } from '@toon-protocol/core';
-import { ROOT, HUB, RELAY_WS, K_IMAGE, newestMatching, openChannel } from '../lib/provider-smoke.mjs';
+import { ROOT, HUB, RELAY_WS, K_IMAGE, STORE_EDGE, newestMatching, openChannel } from '../lib/provider-smoke.mjs';
 import { K_BLOB } from './blob.mjs';
 
-export const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
+export { STORE_EDGE };
 export const GATEWAY = process.env.GATEWAY_URL ?? 'http://localhost:3000';
 export const STORE_ROUTE = 'g.toon.store';
 export const RELAY_ROUTE = 'g.toon.relay';
@@ -61,11 +61,18 @@ export const findImageEntryOnRelay = (pubkey, d) => newestMatching({ kinds: [K_I
 /**
  * The paid `io` for blob.mjs, plus `close()`. `secretKey` signs the kind:5094
  * job requests (the store does not care who; the publisher's own key keeps the
- * audit trail in one place).
+ * audit trail in one place). A caller that already holds a client on the
+ * hub channel (a smoke that is also the tenant) passes it as `client`: the
+ * channel store admits one client at a time, and that caller keeps the
+ * closing of it — `close()` is then a no-op.
  */
-export async function openToonIo({ secretKey, log = () => {} }) {
-  const { client, opened } = await openChannel(HUB);
-  log(`paying ${HUB} on channel ${opened.channelId ?? '(id unreported)'}`);
+export async function openToonIo({ secretKey, log = () => {}, client: given }) {
+  let client = given;
+  if (!client) {
+    const opened = await openChannel(HUB);
+    client = opened.client;
+    log(`paying ${HUB} on channel ${opened.opened.channelId ?? '(id unreported)'}`);
+  }
   const store = {
     async upload(bytes, contentType) {
       const request = buildBlobStorageRequest({ blobData: Buffer.from(bytes), contentType, bid: STORE_BID }, secretKey);
@@ -100,7 +107,7 @@ export async function openToonIo({ secretKey, log = () => {} }) {
   // notes which store upload holds its record's copy, so a later Image
   // Registry entry can cite it (image.mjs).
   const remember = async (digestHex, storeTxid) => rememberRecord(digestHex, storeTxid);
-  return { store, relay, remember, close: async () => client.close?.() };
+  return { store, relay, remember, close: async () => (given ? undefined : client.close?.()) };
 }
 
 /** GET {gateway}/raw/{txid}, retried while the gateway is still indexing the upload. */
