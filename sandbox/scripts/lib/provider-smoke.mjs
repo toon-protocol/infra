@@ -358,7 +358,11 @@ export async function openChannel(connector, storeName = 'channels.json', deposi
   return { client, opened };
 }
 
-/** `ssh -i <tenant key> -p <ssh_port> tenant@<host> 'echo toon-ssh-ok; id -un'`, retried for a fresh sshd. Returns { out } or { err }. */
+/**
+ * `ssh -i <tenant key> -p <ssh_port> tenant@<host> 'echo toon-ssh-ok; id -un'`, retried for a
+ * fresh sshd. Returns { ok, user } — `ok` when the marker came back, `user` the remote
+ * account that answered — or { err } with the last stderr line when every attempt failed.
+ */
 export async function sshInto(tenant, access, attempts = 20) {
   let lastErr = '';
   for (let i = 0; i < attempts; i++) {
@@ -368,7 +372,8 @@ export async function sshInto(tenant, access, attempts = 20) {
         '-o', 'LogLevel=ERROR', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
         '-p', String(access.ssh_port), `${SSH_USER}@${access.host}`, 'echo toon-ssh-ok; id -un',
       ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      return { out };
+      const [marker, user = ''] = out.trim().split('\n');
+      return { ok: marker === 'toon-ssh-ok', user };
     } catch (e) {
       lastErr = String(e.stderr ?? e.message).trim().split('\n').pop();
       await sleep(2000);

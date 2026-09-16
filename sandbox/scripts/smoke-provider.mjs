@@ -164,8 +164,8 @@ if (access) {
 step("5. SSH into the workload with the tenant's key");
 if (access) {
   const ssh = await sshInto(tenant, access);
-  assert(ssh.out?.includes('toon-ssh-ok'),
-    ssh.out ? `ssh -p ${access.ssh_port} ${SSH_USER}@${access.host}: ${ssh.out.trim().replace('\n', ', user ')}` : `ssh never succeeded: ${ssh.err}`);
+  assert(ssh.ok === true,
+    ssh.err ? `ssh never succeeded: ${ssh.err}` : `ssh -p ${access.ssh_port} ${SSH_USER}@${access.host}: toon-ssh-ok, user ${ssh.user}`);
 }
 
 // ── 6. the money ─────────────────────────────────────────────────────────

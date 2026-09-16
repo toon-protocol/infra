@@ -185,12 +185,17 @@ async function runVariant(v) {
   ok(`channel ${opened.channelId} against ${v.edgeName} (status ${opened.status ?? 'open'})`);
   const channelKey = `solana:${opened.channelId}`;
   const books = await v.books(channelKey);
-  const before = await books.read();
-  console.log(`  books before: ${books.describe(before)}`);
   let freeCalls = 0;
   let paidCalls = 0;
   const sendOpts = { ...(v.sealTo ? { sealTo: v.sealTo } : {}), timeoutMs: 120_000 };
   const send = (route, body) => client.send(route, { body }, sendOpts);
+  // The tenant channel is shared by every run. A packet an earlier, aborted run
+  // sent that the hub gave up on (T01) can still be fulfilled and booked later,
+  // and the connector applies such a claim on the channel's NEXT packet. One
+  // uncounted free packet first, so the baseline below holds nothing pending.
+  await send(AVAILABILITY_ROUTE, { listing: L.name, version: L.version, image: IMAGE });
+  const before = await books.read();
+  console.log(`  books before (after one warm-up packet): ${books.describe(before)}`);
   // What the tenant's claim must look like on this leg, and how many of each
   // kind reached the provider — the books are asserted against these counts.
   const assertFreeClaim = (sent, what) => {
@@ -268,8 +273,8 @@ async function runVariant(v) {
   }
   if (access) {
     const ssh = await sshInto(tenant, access);
-    assert(ssh.out?.includes('toon-ssh-ok'),
-      ssh.out ? `ssh -p ${access.ssh_port} ${SSH_USER}@${access.host}: ${ssh.out.trim().replace('\n', ', user ')}` : `ssh never succeeded: ${ssh.err}`);
+    assert(ssh.ok === true,
+      ssh.err ? `ssh never succeeded: ${ssh.err}` : `ssh -p ${access.ssh_port} ${SSH_USER}@${access.host}: toon-ssh-ok, user ${ssh.user}`);
   }
   const status = await send(STATUS_ROUTE, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }) });
   if (!status.fulfilled) {
