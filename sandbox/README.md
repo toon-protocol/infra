@@ -230,6 +230,27 @@ to the unit from what each packet was charged. Three spawns of the `smoke`
 listing, each ended by the tenant; about two minutes. `make smoke-m1`
 still passes afterwards.
 
+**`make smoke-ci` — the `ci` listing** (TOON_Network #14, spec §4.4 and
+Appendix A.1, `scripts/smoke-ci.mjs`): the tier that grants `docker`. The
+`ci` Listing on the relay carries `["t","docker"]` and A.1's content (2000
+millicores, 4 GiB, 10 GB, amd64, 5000 uUSDC per 600 s); a tenant pays
+`g.toon.provider.ci.v1.spawn` through the hub and gets the sshd workload
+plus, beside it on the host daemon, the provider's own **privileged
+`toon-<id>-dind` sidecar** — a Docker daemon of the lease's own, whose
+socket the workload mounts at `/var/run/docker.sock` through a per-lease
+volume. The smoke checks the shape on the host (the workload is
+unprivileged and mounts no socket file; both containers sit under the
+lease's cgroup slice `toon.slice/toon-<id>.slice`, whose `cpu.max` and
+`memory.max` are the tier's limits, so the workload, the daemon and every
+nested container are bounded as one unit), then over SSH as the tenant's
+non-root user drives the socket with `curl`: the daemon's id is not the
+host daemon's, it pulls `hello-world` (a nested pull is the lease's own
+egress) and runs it. A tenant-signed terminate then removes the workload,
+the sidecar, both volumes, the network and the slice. Needs only the
+payments profile; about a minute. The target pre-pulls the pinned dind
+image so the spawn does not pay for it. A run aborted mid-way leaves its
+lease for the sweep (600 s), counting against the tier's capacity of 2.
+
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
 FULL stack (`make up`): the store, the gateway and the relay. `node
@@ -451,7 +472,7 @@ strand every buyer's configuration silently; in a sandbox it is expected.
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
 | `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (paid) + `g.anyone.credentials.keys` (free) | 3230 (client edge) |
 | `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
-| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval) and the sandbox-only `smoke` (30 s) — `make smoke-m1` and `make smoke-m2` are the milestones' acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
+| `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2` and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
 | `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the Solana channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
