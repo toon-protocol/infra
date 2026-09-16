@@ -11,6 +11,10 @@
 //                       each record's copy (the event cannot carry its own)
 //   remember            the write side of that ledger, free and local
 //
+// and, beside the seam, three free address lookups the verify commands and
+// the tenant-side Template expander read with: findBlobRecordOnRelay,
+// findImageEntryOnRelay, findTemplateOnRelay.
+//
 // Prices and routes are the sandbox's: conf/connector-relay.toml forwards
 // g.toon.store to the store connector at {base 1000, per_kib 10} and sells
 // g.toon.relay at 1; every packet also pays the hub's cut.
@@ -18,7 +22,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { sendJob } from '@toon-protocol/client';
 import { buildBlobStorageRequest } from '@toon-protocol/core';
-import { ROOT, HUB, RELAY_WS, K_IMAGE, openChannel, relayRead } from '../lib/provider-smoke.mjs';
+import { ROOT, HUB, RELAY_WS, K_IMAGE, K_TEMPLATE, openChannel, relayRead } from '../lib/provider-smoke.mjs';
 import { K_BLOB } from './blob.mjs';
 
 export const STORE_EDGE = process.env.STORE_EDGE_URL ?? 'http://localhost:3210';
@@ -62,6 +66,9 @@ export const findBlobRecordOnRelay = (hex) => newestMatching({ kinds: [K_BLOB], 
 
 /** The newest Image Registry entry on the relay at `30434:<pubkey>:<d>`, or null. */
 export const findImageEntryOnRelay = (pubkey, d) => newestMatching({ kinds: [K_IMAGE], authors: [pubkey], '#d': [d] }, `image-${d}`);
+
+/** The newest Template on the relay at `30436:<pubkey>:<d>`, or null. Free. */
+export const findTemplateOnRelay = (pubkey, d) => newestMatching({ kinds: [K_TEMPLATE], authors: [pubkey], '#d': [d] }, `template-${d}`);
 
 /**
  * The paid `io` for blob.mjs, plus `close()`. `secretKey` signs the kind:5094

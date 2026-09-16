@@ -10,6 +10,8 @@ node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-
 node scripts/publisher.mjs blob-verify sha256:<hex>
 node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex> [--upstream <spec>]... [--root <digest>] [--dry-run]
 node scripts/publisher.mjs image-verify 30434:<pubkey>:<name>:<tag>
+node scripts/publisher.mjs template <file> <name> --key <hex> [--dry-run]
+node scripts/publisher.mjs template-verify 30436:<pubkey>:<name> [--value NAME=VALUE]...
 make test
 ```
 
@@ -153,16 +155,119 @@ check rather than a skipped blob, because the entry claims to be complete for
 the digest. Exit 0 when every check passes. #26's smoke reads the entry back
 the same way.
 
+## `template` — a Template published, and expanded tenant-side (#25)
+
+Spec §8.3, ADR 0004. A **Template** is a published description of a spawn: an
+image by content address, its ports, where it keeps state, the settings its
+author fixed and the names a tenant may supply. `<file>` is that content as
+JSON and `<name>` becomes the `d` tag:
+
+```
+kind 30436, d = "<name>", L = toon.network
+{ "version": 1,
+  "image": { "digest": "sha256:…", "registry_entry": { "address": "30434:…", "relay": "ws://…" } },
+  "ports": [ { "container_port": 8080, "protocol": "tcp" } ],
+  "data_path": "/data",
+  "env_fixed": { "MODE": "production" },
+  "env_tenant": [ "SITE_TITLE" ],
+  "min_resources": { "cpu_millicores": 500, "memory_mb": 256, "storage_gb": 4 } }
+```
+
+No `x` tag: a Template is found by name, and the digest it carries is the
+image's, not its own. It is one paid `g.toon.relay` write and nothing else —
+no store upload, no blob. The command prints the address
+`30436:<pubkey>:<name>`; `--dry-run` prints the event it would sign and stops.
+Republishing the same `<name>` REPLACES the Template, the way an addressable
+event is replaced.
+
+The content is rebuilt field by field in §8.3's order before it is signed, so
+a hand-written JSON file in any key order makes the same event as the wire
+fixture.
+
+### What a Template may not say
+
+**A Template grants nothing** (ADR 0004): capabilities come from the
+provider's Listing, and only from there. So a content field that looks like a
+privilege — `privileged`, `capabilities`, `devices`, `mounts`,
+`runtime_flags`, `docker`, … — is refused, and so is any other field spec §8.3
+does not define, nested ones included. An image named by an upstream
+`reference` is refused too: a Template names its image by content address, or
+a mutable tag someone else controls could repoint what a tenant runs.
+
+That check is the **reader's**, `../lib/template.mjs`, imported here rather
+than restated: the publisher refuses to sign exactly what the tenant-side
+expander would refuse to expand, so a Template nobody could run is never
+published either.
+
+## Expanding one: `../lib/template.mjs` (tenant-side)
+
+The provider NEVER reads a Template (spec §8.3). A tenant reads one, supplies
+the settings its author left open, and signs the resulting spawn itself:
+
+```js
+import { readTemplate, expandTemplate, expandTemplateFromRelay } from './lib/template.mjs';
+
+const t = await readTemplate('30436:<pubkey>:static-site');   // free; null if none
+const spawn = expandTemplate(t, {
+  values: { SITE_TITLE: 'Hello' },   // one per env_tenant name
+  workloadId, sshPublicKey,
+  volumeGb: 4,                       // optional; see data_path below
+});
+// { workload_id, image, env, ports, volume_gb?, ssh_public_key, template }
+
+const { template, spawn } = await expandTemplateFromRelay(address, { values, workloadId, sshPublicKey });
+```
+
+The spawn is only the fields §6.2 allows, so a Template can never smuggle a
+privilege into one: `image` exactly as the Template names it, its `ports`,
+`env` = `env_fixed` merged with the tenant's values, and `template` = the
+Template's own address, which the provider keeps with the lease and reports in
+`status` without ever acting on it.
+
+**Everything that could go wrong is an error BEFORE anything is paid:** a
+missing tenant value (named), a value the Template never opened, a
+capability-like or undefined field, an `env_tenant` name `env_fixed` already
+fixes, a `workload_id` that is not 32 bytes of hex or an `ssh_public_key` that
+is not one OpenSSH line. A spawn refused at the provider is a spawn the tenant
+was billed for (ADR 0003), so none of these is worth finding there.
+
+### How `data_path` maps onto a spawn
+
+A spawn has `volume_gb` and **no mount path** (spec §6.2); the provider mounts
+a workload's volume at a path of its own, `/data` (`spawn::VOLUME_MOUNT_PATH`).
+So:
+
+| Template | Spawn |
+|---|---|
+| no `data_path` | no `volume_gb` — the workload is stateless |
+| `data_path: "/data"` | `volume_gb` = the caller's `volumeGb`, else `min_resources.storage_gb`, else 1 |
+| any other `data_path` | **refused**, naming both paths |
+
+The Template says *that* the workload keeps state and the tenant says *how
+much*; the path is the provider's. A Template that keeps state somewhere else
+is refused rather than silently expanded, because the spawn has no field to
+carry the difference and the workload would find its state missing from a
+directory it was told it had.
+
+## `template-verify` — read one back as a tenant would
+
+Free. Finds the Template on the relay by its address, checks `d`, the label
+and the signature, runs the reader's own shape check, and — with a `--value
+NAME=VALUE` for each `env_tenant` name — prints the spawn content it expands
+to. Nothing is paid and no spawn is sent anywhere. Exit 0 when every check
+passes.
+
 ## As a library
 
-`blob.mjs` and `image.mjs` are the logic, `oci-layout.mjs` reads the image
-off the disk, and `toon-io.mjs` is the paid I/O behind the one seam both
-share. Templates (#25) and the M2 smoke (#26) build on the same pieces:
+`blob.mjs`, `image.mjs` and `template.mjs` are the logic, `oci-layout.mjs`
+reads the image off the disk, and `toon-io.mjs` is the paid I/O behind the one
+seam they share. The M2 smoke (#26) builds on the same pieces:
 
 ```js
 import { publishBlob } from './publisher/blob.mjs';
 import { publishImage, planImage, parseRef, imageAddress } from './publisher/image.mjs';
-import { openToonIo, findImageEntryOnRelay } from './publisher/toon-io.mjs';
+import { publishTemplate } from './publisher/template.mjs';
+import { openToonIo, findImageEntryOnRelay, findTemplateOnRelay } from './publisher/toon-io.mjs';
 
 const io = await openToonIo({ secretKey });          // one client, one channel
 
@@ -177,8 +282,12 @@ const image = await publishImage({ path, name, tag, secretKey, upstream, io });
 //           stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
 //           entry: { event_id, event } }
 
+const t = await publishTemplate({ name: 'static-site', content, secretKey, io });
+// t = { address: '30436:<pubkey>:static-site', name, template: { event_id, event } }
+
 await io.close();
 const entry = await findImageEntryOnRelay(pubkey, `${name}:${tag}`);  // free
+const tpl = await findTemplateOnRelay(pubkey, 'static-site');         // free
 ```
 
 `publishImage` opens and closes the layout itself; pass an already-open one
@@ -190,6 +299,9 @@ lands before a payment channel is opened (which is what the CLI does).
 
 `io` is `{ store.upload(bytes, contentType) -> txid, relay.publish(event),
 relay.findBlobRecord(hex) -> { event, store_txid } | null, remember(hex,
-storeTxid) }`; the tests in `blob.test.mjs` and `image.test.mjs` drive both
-publishers with in-memory fakes of exactly that, and `image.test.mjs` writes
-real OCI layouts (and a real tar) to a temp directory for the other seam.
+storeTxid) }`; the tests in `blob.test.mjs`, `image.test.mjs` and
+`template.test.mjs` drive all three publishers with in-memory fakes of exactly
+that, and `image.test.mjs` writes real OCI layouts (and a real tar) to a temp
+directory for the other seam. The expander needs no seam at all —
+`../lib/template.test.mjs` hands `expandTemplate` a Template and reads the
+spawn it produced.
