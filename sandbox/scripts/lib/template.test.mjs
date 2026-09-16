@@ -117,8 +117,17 @@ test('a data_path the provider does not mount at is refused before anything is p
 });
 
 test('the tenant sizes the volume; the Template only says it wants one', () => {
+  // §6.2 caps volume_gb at the LISTING's storage_gb, and only the tenant has
+  // chosen a listing. The Template's min_resources is the floor its author
+  // expects, so it stands in — and when neither says a size, nobody has.
   assert.equal(expand(fixtureTemplate(), { volumeGb: 2 }).volume_gb, 2);
-  assert.equal(expand(fixtureTemplate({ min_resources: undefined })).volume_gb, 1, 'a floor of one GiB when nothing says more');
+  assert.equal(expand(fixtureTemplate()).volume_gb, 4, 'the floor its author named');
+  assert.throws(() => expand(fixtureTemplate({ min_resources: undefined })), /volumeGb/);
+});
+
+test('an image registry entry address has the four fields §6.2 gives it', () => {
+  const short = { digest: DIGEST, registry_entry: { address: `30434:${PUBLISHER}:web`, relay: 'ws://r:7100' } };
+  assert.throws(() => expand(fixtureTemplate({ image: short })), /name.*tag/);
 });
 
 test('a spawn the provider would refuse on sight is refused here instead', () => {

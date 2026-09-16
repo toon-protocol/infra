@@ -186,9 +186,9 @@ fixture.
 
 ### What a Template may not say
 
-**A Template grants nothing** (ADR 0004): capabilities come from the
-provider's Listing, and only from there. So a content field that looks like a
-privilege — `privileged`, `capabilities`, `devices`, `mounts`,
+**A Template grants nothing** (ADR 0004): capabilities come only from the
+provider's Listing. So a content field that would be a capability if it were
+honoured — `privileged`, `capabilities`, `devices`, `mounts`,
 `runtime_flags`, `docker`, … — is refused, and so is any other field spec §8.3
 does not define, nested ones included. An image named by an upstream
 `reference` is refused too: a Template names its image by content address, or
@@ -219,7 +219,7 @@ const { template, spawn } = await expandTemplateFromRelay(address, { values, wor
 ```
 
 The spawn is only the fields §6.2 allows, so a Template can never smuggle a
-privilege into one: `image` exactly as the Template names it, its `ports`,
+capability into one: `image` exactly as the Template names it, its `ports`,
 `env` = `env_fixed` merged with the tenant's values, and `template` = the
 Template's own address, which the provider keeps with the lease and reports in
 `status` without ever acting on it.
@@ -241,14 +241,24 @@ So:
 | Template | Spawn |
 |---|---|
 | no `data_path` | no `volume_gb` — the workload is stateless |
-| `data_path: "/data"` | `volume_gb` = the caller's `volumeGb`, else `min_resources.storage_gb`, else 1 |
+| `data_path: "/data"` | `volume_gb` = the caller's `volumeGb`, else the Template's `min_resources.storage_gb` |
+| `data_path: "/data"`, and neither says a size | **refused** — nobody said how large |
 | any other `data_path` | **refused**, naming both paths |
 
-The Template says *that* the workload keeps state and the tenant says *how
-much*; the path is the provider's. A Template that keeps state somewhere else
-is refused rather than silently expanded, because the spawn has no field to
-carry the difference and the workload would find its state missing from a
-directory it was told it had.
+The Template says *that* the workload keeps state, the tenant says *how much*,
+and the path is the provider's. §6.2 caps `volume_gb` at the **listing's**
+`storage_gb`, which only the tenant has chosen, so the size is the tenant's
+call; `min_resources.storage_gb` stands in as the floor the author expects
+(§8.3 reads `min_resources` as advice for choosing a listing), and when
+neither says a size the expansion is refused rather than guessed.
+
+A Template that keeps state somewhere else is refused rather than silently
+expanded: the spawn has no field to carry the difference, and the workload
+would find its state missing from a directory it was told it had. The
+provider's own Template shape says as much — "a tenant expanding this into a
+spawn turns it into `volume_gb`; the path itself is the provider's
+(`spawn::VOLUME_MOUNT_PATH`)" — and `expandTemplate` takes `mountPath` for the
+provider that one day mounts elsewhere.
 
 ## `template-verify` — read one back as a tenant would
 
@@ -268,7 +278,8 @@ seam they share. The M2 smoke (#26) builds on the same pieces:
 import { publishBlob } from './publisher/blob.mjs';
 import { publishImage, planImage, parseRef, imageAddress } from './publisher/image.mjs';
 import { publishTemplate } from './publisher/template.mjs';
-import { openToonIo, findImageEntryOnRelay, findTemplateOnRelay } from './publisher/toon-io.mjs';
+import { openToonIo, findImageEntryOnRelay } from './publisher/toon-io.mjs';
+import { findTemplateOnRelay } from './lib/template.mjs';
 
 const io = await openToonIo({ secretKey });          // one client, one channel
 

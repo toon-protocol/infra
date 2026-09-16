@@ -4,28 +4,34 @@
 // The provider NEVER reads a Template. A tenant reads one, supplies the
 // settings its author left open, and signs the resulting spawn itself — so a
 // template author is never trusted by anyone but the tenant who chose them,
-// and a Template can grant no privilege the tenant could not have asked for
+// and a Template can grant no capability the tenant could not have asked for
 // by hand.
 //
 // That is the whole of what this module enforces:
 //
 //   - the expansion emits ONLY the fields spec §6.2 allows a spawn, so a
-//     Template can never smuggle a runtime flag, a host mount, a device or a
-//     capability into one (ADR 0004);
+//     Template can never smuggle a runtime flag, a host mount, a device
+//     mapping or a capability into one — the four §6.2 names (ADR 0004);
 //   - a Template whose content carries such a field — or any field §8.3 does
 //     not define — is refused HERE, before the tenant pays for anything;
 //   - a tenant value the Template never asked for, or one it asked for and
 //     the tenant did not give, is likewise an error before payment.
-import { findTemplateOnRelay } from '../publisher/toon-io.mjs';
+import { K_TEMPLATE, K_IMAGE, newestMatching } from './provider-smoke.mjs';
 
-export const K_TEMPLATE = 30436;
-export const K_IMAGE = 30434;
+export { K_TEMPLATE };
 
-/// Where the provider mounts a workload's persistent volume. A spawn has
-/// `volume_gb` and NO mount path (spec §6.2), so a Template's `data_path` is
-/// expanded into "ask for a volume" — the path itself is the provider's, and
-/// a Template that names a different one would be describing a workload this
-/// provider cannot run.
+/**
+ * Where the provider mounts a workload's persistent volume. A spawn has
+ * `volume_gb` and NO mount path (spec §6.2), so a Template's `data_path` is
+ * expanded into "ask for a volume" and nothing else — the path itself is the
+ * provider's. The provider says so in its own words: "A tenant expanding this
+ * into a spawn turns it into `volume_gb`; the path itself is the provider's
+ * (`spawn::VOLUME_MOUNT_PATH`)" (toon-provider src/nostr/image_events.rs,
+ * issue #19), and that constant is `/data`.
+ *
+ * It is a parameter of `expandTemplate` (`mountPath`) rather than a law, for
+ * the provider that one day mounts elsewhere.
+ */
 export const VOLUME_MOUNT_PATH = '/data';
 
 /** The address a Template is read back at: `30436:<pubkey>:<name>`. */
@@ -78,7 +84,7 @@ const RESOURCE_FIELDS = ['cpu_millicores', 'memory_mb', 'storage_gb', 'gpu'];
 const ENTRY_FIELDS = ['address', 'relay'];
 
 /**
- * The fields that would be a PRIVILEGE if any of them were honoured. None is
+ * The fields that would be a CAPABILITY if any of them were honoured. None is
  * part of §8.3, so the closed list above already refuses them; they are named
  * so the refusal can say WHY rather than "unknown field", which is the
  * difference between a template author fixing a typo and one learning that
@@ -95,11 +101,11 @@ const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 function refuseUnknown(value, allowed, where) {
   const unknown = Object.keys(value).filter((k) => !allowed.includes(k));
   if (unknown.length === 0) return;
-  const privileges = unknown.filter((k) => CAPABILITY_LIKE.includes(k.toLowerCase()));
-  if (privileges.length > 0) {
+  const asCapabilities = unknown.filter((k) => CAPABILITY_LIKE.includes(k.toLowerCase()));
+  if (asCapabilities.length > 0) {
     throw new Error(
-      `${where}: ${privileges.join(', ')} — a Template grants no capability (ADR 0004, spec §8.3). ` +
-        'Privileges come from the provider\'s Listing, so a Template that asks for one describes a spawn no provider would run.',
+      `${where}: ${asCapabilities.join(', ')} — a Template grants no capability (ADR 0004, spec §8.3). ` +
+        'Capabilities come only from the provider\'s Listing, so a Template that asks for one describes a spawn no provider would run.',
     );
   }
   throw new Error(`${where}: ${unknown.join(', ')} ${unknown.length > 1 ? 'are not fields' : 'is not a field'} spec §8.3 defines (${allowed.join(', ')})`);
@@ -127,7 +133,9 @@ export function checkTemplateContent(content) {
     const entry = content.image.registry_entry;
     if (!isObject(entry)) throw new Error('image.registry_entry is { address, relay }');
     refuseUnknown(entry, ENTRY_FIELDS, 'this Template\'s image.registry_entry carries');
-    if (!new RegExp(`^${K_IMAGE}:[0-9a-f]{64}:.+$`).test(entry.address ?? '')) {
+    // Four colon-separated fields, because an Image Registry entry's `d` is
+    // itself `<name>:<tag>` (spec §6.2, §8.1).
+    if (!new RegExp(`^${K_IMAGE}:[0-9a-f]{64}:.+:.+$`).test(entry.address ?? '')) {
       throw new Error(`image.registry_entry.address must be an Image Registry entry, ${K_IMAGE}:<pubkey>:<name>:<tag>, not ${JSON.stringify(entry.address)}`);
     }
     if (typeof entry.relay !== 'string' || entry.relay === '') throw new Error('image.registry_entry.relay must name a relay to look the entry up on');
@@ -176,7 +184,8 @@ export function checkTemplateContent(content) {
  *
  *   expandTemplate(template, { values, workloadId, sshPublicKey, volumeGb })
  *
- * `template` is `{ address, content }` — what `readTemplate` returns.
+ * `template` is what `readTemplate` and `templateFromEvent` return: its
+ * `address` and its `content` are the two fields read here.
  */
 export function expandTemplate(template, { values = {}, workloadId, sshPublicKey, volumeGb, mountPath = VOLUME_MOUNT_PATH } = {}) {
   const content = checkTemplateContent(template?.content);
@@ -205,7 +214,20 @@ export function expandTemplate(template, { values = {}, workloadId, sshPublicKey
     template: template.address,
   };
   if (content.data_path !== undefined) {
-    spawn.volume_gb = volumeGb ?? content.min_resources?.storage_gb ?? 1;
+    // The Template says the workload keeps state; the TENANT says how much,
+    // because §6.2 caps `volume_gb` at the LISTING's storage_gb and only the
+    // tenant has chosen a listing. `min_resources.storage_gb` is the floor
+    // its author expects (§8.3 reads min_resources as advice for choosing a
+    // listing), so it stands in when the tenant named no size — and when
+    // neither says one, nobody has, and guessing would be inventing a bill.
+    const size = volumeGb ?? content.min_resources?.storage_gb;
+    if (size === undefined) {
+      throw new Error(
+        `this Template keeps state at ${content.data_path} but names no min_resources.storage_gb: ` +
+          'say how large the volume should be (volumeGb), within the storage_gb of the listing you are buying (spec §6.2)',
+      );
+    }
+    spawn.volume_gb = size;
   }
   return orderSpawn(spawn);
 }
@@ -235,17 +257,25 @@ function checkValues(content, values) {
   }
 }
 
-/** The spawn's fields in the order spec §6.2 tabulates them. */
+/**
+ * The fields an expansion emits, in the order spec §6.2 tabulates them. It is
+ * the whole list on purpose: a Template overrides no entrypoint and joins no
+ * Standby Set, so there is nothing else a Template could put in a spawn.
+ */
 function orderSpawn(spawn) {
-  const order = ['workload_id', 'image', 'env', 'ports', 'volume_gb', 'ssh_public_key', 'entrypoint', 'args', 'template'];
+  const order = ['workload_id', 'image', 'env', 'ports', 'volume_gb', 'ssh_public_key', 'template'];
   return Object.fromEntries(order.filter((k) => spawn[k] !== undefined).map((k) => [k, spawn[k]]));
 }
 
 // ── reading one off the relay ─────────────────────────────────────────────
-// Free: a NIP-01 read, like every other directory lookup. Kept apart from
-// `expandTemplate` so the decision above can be tested without a relay, and
-// so a tenant that already has the event (from a smoke, from a cache) never
-// pays a round trip to expand it.
+// Free: a NIP-01 read, like every other directory lookup, so it needs none of
+// the publisher's paid `io`. Kept apart from `expandTemplate` so the decision
+// above can be tested without a relay, and so a tenant that already has the
+// event (from a smoke, from a cache) never pays a round trip to expand it.
+
+/** The newest Template on the relay at `30436:<pubkey>:<d>`, or null. Free. */
+export const findTemplateOnRelay = (pubkey, d) =>
+  newestMatching({ kinds: [K_TEMPLATE], authors: [pubkey], '#d': [d] }, `template-${d}`);
 
 /**
  * The Template at `30436:<pubkey>:<name>` as the relay holds it, or null.

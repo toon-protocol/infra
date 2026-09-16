@@ -72,9 +72,9 @@ import { hasTag } from './lib/provider-smoke.mjs';
 import { publishBlob, planBlob, sha256Hex, hexOf, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
 import { publishImage, planImage, parseRef, imageAddress, K_IMAGE, TOON_LABEL } from './publisher/image.mjs';
 import { openLayout } from './publisher/oci-layout.mjs';
-import { publishTemplate, templateEventTemplate } from './publisher/template.mjs';
-import { expandTemplate, templateFromEvent, parseTemplateAddress, K_TEMPLATE, VOLUME_MOUNT_PATH } from './lib/template.mjs';
-import { openToonIo, readLedger, findBlobRecordOnRelay, findImageEntryOnRelay, findTemplateOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
+import { publishTemplate, templateEvent } from './publisher/template.mjs';
+import { readTemplate, expandTemplate, parseTemplateAddress, K_TEMPLATE, VOLUME_MOUNT_PATH } from './lib/template.mjs';
+import { openToonIo, readLedger, findBlobRecordOnRelay, findImageEntryOnRelay, readRaw, GATEWAY } from './publisher/toon-io.mjs';
 
 const log = (m) => console.error(`  ${m}`);
 /**
@@ -264,7 +264,7 @@ async function template(positionals, values) {
 
   // The shape check is the READER's (lib/template.mjs), run before a channel
   // is opened: a Template no tenant could expand is never published.
-  const unsigned = templateEventTemplate({ name, content, createdAt: 0 });
+  const unsigned = templateEvent({ name, content, createdAt: 0 });
   const pubkey = getPublicKey(secretKey);
   log(`publisher ${pubkey}; ${file} as ${K_TEMPLATE}:${pubkey}:${name}`);
   log(`image ${content.image.digest}${content.image.registry_entry ? ` via ${content.image.registry_entry.address}` : ' (by digest alone)'}`);
@@ -286,50 +286,50 @@ async function template(positionals, values) {
 
 async function templateVerify(positionals, values) {
   const address = positionals[0] ?? '';
-  let named;
   try {
-    named = parseTemplateAddress(address);
+    parseTemplateAddress(address);
   } catch {
     usage();
   }
-  const event = await findTemplateOnRelay(named.pubkey, named.name);
-  if (!event) throw new Error(`no kind ${K_TEMPLATE} Template at ${address} on the relay`);
   const { check, report } = checklist();
 
-  check(hasTag(event, ['d', named.name]) && hasTag(event, ['L', TOON_LABEL]), `template ${event.id} is d=${named.name}, L=${TOON_LABEL}`);
-  check(verifyEvent(event), `signed by ${named.pubkey}`);
-  // `templateFromEvent` is the tenant's own reader: it refuses a capability
-  // field, an undefined field and a mutable image reference (ADR 0004).
+  // `readTemplate` is the TENANT's reader: it finds the newest Template at
+  // the address, and refuses a capability field, a field §8.3 does not
+  // define, and an image named by a mutable upstream reference (ADR 0004).
   let template = null;
   try {
-    template = templateFromEvent(event);
+    template = await readTemplate(address);
+    if (!template) throw new Error(`no kind ${K_TEMPLATE} Template at ${address} on the relay`);
     check(true, `content is a Template spec §8.3 defines: image ${template.content.image.digest}, ${template.content.ports.length} ports, ${template.content.env_tenant.length} tenant settings`);
   } catch (e) {
-    check(false, `content: ${e.message}`);
+    check(false, e.message);
+    report({ address });
+    return;
   }
+  const event = template.event;
+  check(hasTag(event, ['d', template.name]) && hasTag(event, ['L', TOON_LABEL]), `template ${event.id} is d=${template.name}, L=${TOON_LABEL}`);
+  check(verifyEvent(event), `signed by ${template.publisher}`);
 
   // With a --value for each of its names, expand it: what a tenant would
   // sign. Nothing is sent to any provider.
+  const given = Object.fromEntries((values.value ?? []).map((v) => {
+    const at = v.indexOf('=');
+    if (at <= 0) throw new Error(`--value ${v}: expected NAME=VALUE`);
+    return [v.slice(0, at), v.slice(at + 1)];
+  }));
   let spawn = null;
-  if (template) {
-    const given = Object.fromEntries((values.value ?? []).map((v) => {
-      const at = v.indexOf('=');
-      if (at <= 0) throw new Error(`--value ${v}: expected NAME=VALUE`);
-      return [v.slice(0, at), v.slice(at + 1)];
-    }));
-    try {
-      spawn = expandTemplate(template, {
-        values: given,
-        workloadId: randomBytes(32).toString('hex'),
-        sshPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGRyeS1ydW4tcGxhY2Vob2xkZXIta2V5 template-verify',
-      });
-      check(spawn.template === address, `expands to a spawn naming ${address}: env ${Object.keys(spawn.env).join(', ') || '(none)'}${spawn.volume_gb ? `, a ${spawn.volume_gb} GiB volume at ${VOLUME_MOUNT_PATH}` : ''}`);
-    } catch (e) {
-      check(false, `expanding it: ${e.message}`);
-    }
+  try {
+    spawn = expandTemplate(template, {
+      values: given,
+      workloadId: randomBytes(32).toString('hex'),
+      sshPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGRyeS1ydW4tcGxhY2Vob2xkZXIta2V5 template-verify',
+    });
+    check(spawn.template === address, `expands to a spawn naming ${address}: env ${Object.keys(spawn.env).join(', ') || '(none)'}${spawn.volume_gb ? `, a ${spawn.volume_gb} GiB volume at ${VOLUME_MOUNT_PATH}` : ''}`);
+  } catch (e) {
+    check(false, `expanding it: ${e.message}`);
   }
 
-  report({ address, event_id: event.id, name: named.name, spawn });
+  report({ address, event_id: event.id, name: template.name, spawn });
 }
 
 const { values, positionals } = parseArgs({

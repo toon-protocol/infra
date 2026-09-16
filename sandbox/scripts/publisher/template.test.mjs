@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
-import { publishTemplate, templateEventTemplate, K_TEMPLATE, TOON_LABEL } from './template.mjs';
+import { publishTemplate, templateEvent, K_TEMPLATE, TOON_LABEL } from './template.mjs';
 import { templateFromEvent, expandTemplate } from '../lib/template.mjs';
 
 const PUBLISHER = '2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991';
@@ -40,7 +40,7 @@ const fakeIo = () => {
 };
 
 test('a Template serializes exactly as the M2-1 `registry.template` wire fixture does', () => {
-  const event = templateEventTemplate({ name: 'static-site', content: FIXTURE_CONTENT, createdAt: 1_700_000_000 });
+  const event = templateEvent({ name: 'static-site', content: FIXTURE_CONTENT, createdAt: 1_700_000_000 });
 
   assert.equal(event.kind, K_TEMPLATE);
   // No `x` tag: a Template is found by name, and the digest it carries is
@@ -62,7 +62,7 @@ test('a Template written in any key order publishes in the fixture\'s', () => {
     version: 1,
   };
 
-  assert.equal(templateEventTemplate({ name: 'static-site', content: shuffled, createdAt: 1 }).content, FIXTURE_JSON);
+  assert.equal(templateEvent({ name: 'static-site', content: shuffled, createdAt: 1 }).content, FIXTURE_JSON);
 });
 
 test('publishing signs it, writes it to the relay once, and reports its address', async () => {

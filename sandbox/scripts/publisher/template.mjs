@@ -27,7 +27,7 @@ export { K_TEMPLATE, TOON_LABEL, templateAddress };
  * that a hand-written JSON file and the wire fixture make the same event
  * whatever order their keys happen to be in.
  */
-export function templateEventTemplate({ name, content, createdAt }) {
+export function templateEvent({ name, content, createdAt }) {
   checkName(name);
   checkTemplateContent(content);
   const image = { digest: content.image.digest };
@@ -72,7 +72,7 @@ function checkName(name) {
  * Nothing is published if the content is not one a tenant could expand.
  */
 export async function publishTemplate({ name, content, secretKey, io, now = () => Math.floor(Date.now() / 1000) }) {
-  const unsigned = templateEventTemplate({ name, content, createdAt: now() });
+  const unsigned = templateEvent({ name, content, createdAt: now() });
   const event = finalizeEvent(unsigned, secretKey);
   await io.relay.publish(event);
   return {

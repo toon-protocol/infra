@@ -237,6 +237,17 @@ export async function relayReadUntil(filter, label, seconds) {
   }, seconds);
   return events ?? [];
 }
+/**
+ * The newest event `filter` matches, or null. An addressable kind is replaced
+ * on the relay, but a relay may still hold an older copy (or two publishers
+ * may race), so the reader decides rather than trusting the order it got.
+ */
+export async function newestMatching(filter, label) {
+  const events = await relayRead(filter, label);
+  if (events.length === 0) return null;
+  return events.reduce((newest, e) => (e.created_at > newest.created_at ? e : newest));
+}
+
 export const tagValues = (event, name) => event.tags.filter((t) => t[0] === name).map((t) => t.slice(1));
 export const hasTag = (event, cells) =>
   event.tags.some((t) => t.length >= cells.length && cells.every((c, i) => t[i] === c));
