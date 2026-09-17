@@ -15,9 +15,10 @@
 #   feed the committed channel ids, so they must be identical everywhere):
 #     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30
 #     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-39
-#       (28/37 are the anytoon-connector's, 29/38 the provider-connector's and
-#        30/39 the SECOND provider's, provider2-connector; 27 was already spent
-#        on the gas relayer below, which is why the EVM index skips it)
+#       (28/37 are the anytoon-connector's, 29/38 the provider-connector's,
+#        30/39 the SECOND provider's, provider2-connector, and 31/40 the HIDDEN
+#        provider's, provider-hs-connector; 27 was already spent on the gas
+#        relayer below, which is why the EVM index skips it)
 #     gas-evm-relayer.key          EVM secp256k1, index 27 — the gas station's
 #                                  DEDICATED kind:5098 relayer; its 0x-prefixed
 #                                  value is embedded in conf/gas-station.conf
@@ -64,7 +65,7 @@ CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.08.28.1
 
 i=0
 for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 \
-           provider-connector:29:38 provider2-connector:30:39; do
+           provider-connector:29:38 provider2-connector:30:39 provider-hs-connector:31:40; do
   IFS=: read -r node ei si <<<"$pair"
   mkdir -p "$KEYS/$node"
   for k in signer.key operator-send.key operator-bearer.token; do

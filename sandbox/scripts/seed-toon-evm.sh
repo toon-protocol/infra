@@ -80,6 +80,9 @@ fund gas-connector gas-connector
 fund anytoon-connector anytoon-connector
 fund provider-connector provider-connector
 fund provider2-connector provider2-connector
+# The HIDDEN provider's connector (TOON_Network #43, the `hs` profile). Funded
+# on every profile like every other node: the chain is seeded once and cold.
+fund provider-hs-connector provider-hs-connector
 
 # The kind:5098 relayer (the gas station's DEDICATED EVM wallet — it holds
 # native gas only and pays for relayed ERC-2771 forward requests). The anvil
