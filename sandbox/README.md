@@ -458,13 +458,46 @@ make smoke-hs   # buy one bundle over the circuit, chain RPC included
 > (`anytoon` splits `make hs-e2e` out of `make local-e2e` for the same reason,
 > and the connector repo keeps its hidden-service rehearsals off CI.)
 
-Three extra services, all `hs`-only:
+Eight extra services, all `hs`-only. Three are the **anytoon ingress**:
 
 | in `hs` | what |
 |---|---|
 | `anon` | the daemon, **v0.4.10.2 built from source-of-truth release binaries** (§6.6). Generates this sandbox's `.anyone` address, publishes a descriptor for it, forwards what arrives |
 | `hs-ingress` | a two-port `socat` forwarder; owns the network namespace `anon` shares, so the daemon's config can name `127.0.0.1` (§6.6) |
 | `anon-client` | a SOCKS5 proxy on `127.0.0.1:19050` — the buyer's way onto the network, and nothing else. On its own compose network with **no route to any other service** |
+
+...and five are **the hidden provider** (`g.toon.provider-hs`, TOON_Network
+Milestone 4), a third compute provider that is hidden the way spec §10 and
+ADR 0008 define it — no published host, a connector reachable only at an
+`.anyone` address, every workload's egress through `anon`, and its own
+settlement RPC:
+
+| in `hs` | what |
+|---|---|
+| `anon-hs` | its own daemon, and the only one here that does three jobs: the address in front of its connector, a **cookie-authenticated control port** (one `.anyone` address per lease), and the **SOCKS + transparent-proxy egress** its own process and its workloads leave through. `conf/anonrc-hs` |
+| `hs-provider-ingress` | a three-port `socat` forwarder for the targets that must be resolved per connection — `anvil`, the hub and the relay (§6.8) |
+| `provider-hs` | the provider app with `hidden = true` (`conf/provider-hs.toml`), workload ids **1200-1299**, SSH **46000-46099**, ports **47000-48599** — disjoint from the other two providers, which share this one host daemon |
+| `provider-hs-connector` | its connector, terminating `g.toon.provider-hs.*`. **No `ports:` line at all**: one address, over a circuit |
+| `directory-publisher-hs` | its relay-write payer, on **account index 3** (index 1 and 2 are the other two providers'), dialling through `anon` because a hidden provider's directory writes must not name this host |
+
+**Nothing of the hidden provider is published to the host** — no client edge, no
+control port, no SOCKS port. `make hs-address` prints both addresses; the hidden
+provider's is the second one, and `http://<addr>.anyone/ilp` through
+`127.0.0.1:19050` is the only way to its client edge:
+
+```bash
+make hs-address
+curl --socks5-hostname 127.0.0.1:19050 http://<addr>.anyone/ilp   # its self-description
+```
+
+§6.8 is how it is put together. A tenant buying from it **pays it directly** —
+there is no hub peering, by decision (spec Appendix A): it opens a client channel against that edge over its
+own SOCKS proxy, and settles on `http://<addr>.anyone:8545`, the same `anvil`
+this sandbox runs, on the same circuit. Account indices are the scarce thing
+here: `0` is `make smoke`'s buyer, `1`/`2`/`3` the three directory publishers,
+`5` `smoke-hs`'s own buyer (§6.6), so **a hidden-provider buyer should take
+index 6** and mint its own mock USDC from anvil's funder like every other payer
+here.
 
 What `make smoke-hs` proves, in one paid purchase:
 
@@ -1417,6 +1450,171 @@ anything down.
 docker compose --profile full logs -f swap-driver   # one line a minute
 ```
 
+### 6.8 The hidden provider (`hs` profile)
+
+Read §2's *Hidden-service ingress* first. §6.6 is the anytoon ingress; this is
+the **third compute provider**, `g.toon.provider-hs`, and it is the sandbox's
+rehearsal of spec §10 / ADR 0008: a provider that publishes no host, sells from
+an `.anyone` address, routes every workload's egress through `anon`, and reads
+its chain on its own private RPC. `make up` renders none of it.
+
+**Its daemon does three jobs, where the anytoon one does a third of one.**
+`conf/anonrc-hs`, and every surface on it is reachable inside the project's own
+networks and nowhere else:
+
+| surface | where | for |
+|---|---|---|
+| `ControlPort` | `172.30.1.2:9051`, `CookieAuthentication 1` | `toon-provider` creating one `.anyone` address per lease (`ADD_ONION … Flags=Detach`) and destroying it at lease end |
+| `SocksPort` | `172.30.1.2:9050` | the provider's OWN outbound — relay reads and writes, image fetches — and its publisher's |
+| `TransPort` / `DNSPort` | `10.203.0.2:9040` / `:5353` | every hidden workload's only route out |
+
+**Every one of them is bound to one address, never `0.0.0.0`.** The first two
+are on `hs-provider`, the network the daemon shares with the provider and its
+publisher; the last two are on `hs-egress`, the network it shares with every
+tenant's workload. A control port bound on `0.0.0.0` would be a control port a
+**tenant's own image** could dial, and the whole apparatus below exists because
+tenant images are not trusted.
+
+**The cookie is on a volume of its own.** `CookieAuthFile` is
+`/var/lib/anon/control/control_auth_cookie` — *not* the default beside the
+DataDirectory — because the volume that holds it is mounted **read-only into
+the provider container at the same path**, and the DataDirectory beside it
+holds the private key of this provider's address. The provider needs the first
+and has no business with the second, so they are two volumes (`anon-hs-control`
+and `anon-hs-data`). `conf/provider-hs.toml`'s `[anon.control]` names that path.
+Proving it by hand:
+
+```bash
+docker compose --profile hs exec provider-hs sh -c '
+  C=$(od -An -tx1 -v /var/lib/anon/control/control_auth_cookie | tr -d " \n")
+  printf "AUTHENTICATE %s\r\nGETINFO version\r\nQUIT\r\n" "$C" | curl -s telnet://172.30.1.2:9051'
+```
+
+**Two pinned networks, and pinning is the mechanism rather than a convenience.**
+The rest of this file avoids fixed IPs on purpose (§6.6); here a fixed address
+*is* the contract:
+
+| network | docker name | what |
+|---|---|---|
+| `hs-egress` | `toon-sandbox_hs-egress`, `internal: true`, `10.203.0.0/24` | every hidden workload attaches here, with `anon-hs` at **10.203.0.2** as gateway and resolver. `conf/provider-hs.toml`'s `[anon.egress]` names both — and it names the **prefixed** name, because the provider attaches workloads through the HOST daemon, which knows no compose keys |
+| `hs-provider` | `toon-hs-provider`, `172.30.1.0/24` | `anon-hs` (.2, and where its control and SOCKS ports are bound), `provider-hs-connector` (.3), `hs-provider-ingress` (.4) — so `conf/anonrc-hs` can name its targets as IP literals, which always parse |
+
+An **internal** network gets no NAT and Docker installs **no default route** in
+a container on it, so a workload there can reach `10.203.0.0/24` and nothing
+else until something gives it one. The provider's own namespace-owner sidecar is
+what does: it sets `default via 10.203.0.2` and the resolver with it, and
+`anon-hs`'s `iptables` rules (installed by its entrypoint, which is why that
+container has `NET_ADMIN`) do the rest —
+
+```
+nat/PREROUTING -s 10.203.0.0/24                    -p udp --dport 53 -j REDIRECT --to-ports 5353
+nat/PREROUTING -s 10.203.0.0/24                    -p tcp --dport 53 -j REDIRECT --to-ports 5353
+nat/PREROUTING -s 10.203.0.0/24 ! -d 10.203.0.0/24 -p tcp --syn     -j REDIRECT --to-ports 9040
+INPUT          -s 10.203.0.0/24 -p tcp --dport 9040 -j ACCEPT
+INPUT          -s 10.203.0.0/24 -p tcp --dport 5353 -j ACCEPT
+INPUT          -s 10.203.0.0/24 -p udp --dport 5353 -j ACCEPT
+INPUT          -s 10.203.0.0/24                     -j DROP
+```
+
+— so a workload needs no proxy settings, cannot opt out, and has no second
+route to try. The two halves are both load-bearing: the REDIRECTs put its
+traffic on a circuit, and the `INPUT` pair leaves the TransPort and the DNSPort
+as the **only** two things it can reach on the daemon (a redirected packet
+arrives at `INPUT` already rewritten, which is why the ACCEPTs come first and
+why the DROP does not swallow them). Checking the whole path by hand, with any
+image:
+
+```bash
+docker run -d --name probe --network toon-sandbox_hs-egress --dns 10.203.0.2 debian:bookworm-slim sleep 600
+docker run --rm --network container:probe --cap-add NET_ADMIN alpine ip route add default via 10.203.0.2
+docker exec probe bash -c 'exec 3<>/dev/tcp/api.ipify.org/80; printf "GET / HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n" >&3; cat <&3' | tail -1
+docker rm -f probe
+```
+
+The address that comes back is an `anon` exit, and it is not this host's.
+(`nslookup` works too, but note the daemon answers **AAAA with NXDOMAIN** —
+musl's resolver, and so an alpine image, reads that as "no such host". A glibc
+image resolves fine. It is a property of the daemon, not of this sandbox.)
+
+**A hidden lease is three containers**, not one (TOON_Network #41):
+`toon-<id>-egress` owns the network namespace on `hs-egress` and sets the single
+route out, `toon-<id>` is the tenant's workload sharing that namespace, and
+`toon-<id>-ingress` republishes the lease's SSH forward and ports on the host —
+which is what the daemon's `ADD_ONION` targets reach, at
+`anon.forward_host = 172.17.0.1` (docker0: this host, as the daemon's container
+sees it). The two sidecars run one pinned Alpine, and `make up-hs` **pre-pulls
+it** so the first hidden spawn does not pay for the pull inside a tenant's
+lease.
+
+**Two virtual ports on the provider's address** (`conf/anonrc-hs`) — and two
+more on the *anytoon* daemon's (`conf/anonrc`), which is the part worth reading
+twice:
+
+| address | virtual port | forwards to | why |
+|---|---|---|---|
+| the hidden provider's | `80` | `provider-hs-connector:3000` (pinned `.3`) | the client edge a tenant pays through |
+| the hidden provider's | `8545` | `anvil:8545` | the tenant's chain RPC, same address, same circuit — §6.6 says why that is not optional |
+| **the anytoon daemon's** | `3200` | `relay-connector:3000` | the hub, as the hidden provider's publisher reaches it |
+| **the anytoon daemon's** | `7100` | `relay:7100` | the relay, as the hidden provider reads and writes it |
+
+The last two exist because of what hiding a provider's *own* outbound means: it
+dials every relay and its payer's connector through `socks5h`, and `anon` builds
+no circuit to a private address — `relay:7100` and `relay-connector:3000` are
+private on this compose network. In a deployment the hub and the relays are on
+clearnet and an exit reaches them; this sandbox has no clearnet, so the same
+shape is rehearsed by giving them a virtual port. The packets still leave over a
+circuit and arrive naming nothing about this host, which is the property under
+test.
+
+**They are on the other daemon's address for a reason you will otherwise
+discover the hard way.** A daemon dialling *its own* hidden service is the one
+overlay path that does not reliably build: the path restrictions that keep a
+rendezvous anonymous exclude the relays it is already using, and it sits in
+`waiting for circuit` until it gives up (`Tried for 120 seconds to get a
+connection to [scrubbed]:3200. Giving up.`). It works often enough to look
+correct for an hour and then stops after a restart. Two daemons, an ordinary
+client-to-service circuit, and the property under test is unchanged.
+
+**Three rendered files, not one** (`scripts/hs-provider-address.sh`, run by
+`make up-hs` and by `make hs-address`):
+
+| rendered | what it fixes up |
+|---|---|
+| `conf/.rendered/connector-provider-hs.toml` | the `[node]` endpoints — a client dials what a node publishes |
+| `conf/.rendered/provider-hs.toml` | `connector_url` (the Profile's, which `hidden = true` refuses unless it is `.anyone`) **and** `relay_set`, at port 7100 |
+| `conf/.rendered/hs-provider.env` | the publisher's `TOON_CONNECTOR_URL`, `TOON_ENDPOINT_REWRITE` and `RELAY_WRITE_ROUTES` |
+
+The second and third of those carry **the anytoon daemon's** address, not the
+hidden provider's — which is why the script reads two hostnames and why
+`make hs-address` prints both.
+
+The publisher's env file has one wrinkle worth knowing before it surprises you:
+`TOON_CONNECTOR_URL` is the hub's **compose name**, and the `.anyone` hub is
+reached by `TOON_ENDPOINT_REWRITE` instead. `@toon-protocol/client` refuses to
+be *configured* with a hidden-service connector unless it was handed
+`socksProxy`, and this publisher deliberately hands it a carriage instead (the
+library's own option refuses a proxy beside a clearnet connector, and for a
+hidden *provider* covering the clearnet hop is the whole point). The rewrite is
+applied to every request the carriage makes, so the configured URL stays
+clearnet-shaped and every actual packet goes to the overlay.
+
+**Start the publisher before the provider.** `docker-compose.yml` orders them
+that way on purpose. A hidden provider dials its publisher *directly* when
+`publish_url` is on a private address and *through `anon`* when it is not — and
+it decides which **once, at startup, by resolving that name**. A publisher that
+has not started yet does not resolve, so the provider settles on "not private"
+and asks the daemon for a circuit to `directory-publisher-hs` for the rest of
+its life: `SOCKS error: host unreachable` on every Profile, Listing and
+Liveness, with nothing in the network at fault.
+
+**What is not hidden here, stated plainly.** The workload images are pulled by
+the **host's** Docker daemon, not by the provider, so an image fetched from a
+registry leaves from this host's address; and `gateway_url_pattern` points at
+`envoy`, which is private and therefore unreachable through the proxy, so a
+TOON-store image (§Milestone 2) cannot be fetched by this provider today. Both
+are sandbox facts rather than protocol ones, and neither is on the path of a
+lease spawned from a registry reference.
+
 ## 7. Lifecycle and state
 
 - **`make down`** stops everything but keeps state: gateway/bundler data
@@ -1432,11 +1630,14 @@ docker compose --profile full logs -f swap-driver   # one line a minute
   them.
 - Re-running `make up` on a healthy stack is a no-op: every init job checks
   before it writes.
-- **The `.anyone` address (`hs` profile) survives `make down` and dies with
-  `make clean`.** It lives in the `anon-data` volume with the private key
-  behind it; `make down`/`make up-hs` keeps the same address, `make clean`
-  publishes a new one on the next cold start (and drops
-  `conf/.rendered/`). That is fine here and expensive in a deployment — §6.6.
+- **BOTH `.anyone` addresses (`hs` profile) survive `make down` and die with
+  `make clean`.** They live in the `anon-data` and `anon-hs-data` volumes with
+  the private keys behind them; `make down`/`make up-hs` keeps the same two
+  addresses, `make clean` publishes new ones on the next cold start (and drops
+  `conf/.rendered/`, which is where both are written into configs). That is
+  fine here and expensive in a deployment — §6.6, §6.8. The hidden provider's
+  control cookie (`anon-hs-control`) and its lease table
+  (`provider-hs-state`) go the same way.
 - `make down` and `make clean` sweep **every** profile's containers, whichever
   one brought them up, so `make up-hs && make down` leaves no daemon running.
 
@@ -1500,13 +1701,26 @@ docker compose --profile full logs -f swap-driver   # one line a minute
 - **Credentials purchases fail after the stack has run a month**: the
   issuer's epoch expired. `docker compose up -d --force-recreate
   issuer-keys issuer` re-forges it.
-- **`make up-hs` waits five minutes and gives up on `anon`**: read the
-  daemon's own log (`docker compose --profile hs logs --tail 80 anon`). A
-  container that is *Up* but not healthy is bootstrapping against the real
-  Anyone network and is usually not your fault; a container that **exited at
-  once** is a config fault — almost always a missing `AgreeToTerms 1` or a
-  missing explicit `Nickname` in `conf/anonrc` (the image's entrypoint would
-  append one, and the file is mounted read-only, so it fails at boot instead).
+- **`make up-hs` waits five minutes and gives up on `anon`** (or on
+  `anon-hs`): read the daemon's own log (`docker compose --profile hs logs
+  --tail 80 anon`). A container that is *Up* but not healthy is bootstrapping
+  against the real Anyone network and is usually not your fault; a container
+  that **exited at once** is a config fault — almost always a missing
+  `AgreeToTerms 1` or a missing explicit `Nickname` (the image's entrypoint
+  would append one, and the file is mounted read-only, so it fails at boot
+  instead), or, in `conf/anonrc-hs`, a `HiddenServicePort` target that is not
+  an IP literal: `anon` resolves those when it PARSES its config and aborts
+  rather than starting (§6.6, §6.8).
+- **The hidden provider publishes nothing and its log says `SOCKS error: host
+  unreachable` for `directory-publisher-hs`**: the provider started before its
+  publisher and decided, once, that the publisher was not on a private address.
+  `docker compose --profile full --profile hs up -d directory-publisher-hs` and
+  then recreate `provider-hs` — §6.8 has the whole story.
+- **`make up-hs` fails at `seed-toon-evm` with `Insufficient funds for gas`**:
+  anvil's funder account (index 0) has been drained by repeated seeding — it
+  hands out 100 ETH per node per run and the job re-runs on every `up`. Refill
+  it and try again:
+  `cast rpc anvil_setBalance 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 0x21e19e0c9bab2400000 --rpc-url http://localhost:8545`.
 - **`make smoke-hs` exits 75**: network-side, by construction — it only reaches
   that verdict after preflight has proved the daemon holds the address, the
   proxy is listening and the node advertises exactly that address. Re-run it
