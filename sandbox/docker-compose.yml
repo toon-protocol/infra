@@ -1969,6 +1969,15 @@ networks:
     ipam:
       config:
         - subnet: 172.30.1.0/24
+          # Dynamic addresses come from the UPPER HALF only. `anon-hs` (.2),
+          # `provider-hs-connector` (.3) and `hs-provider-ingress` (.4) are
+          # pinned, and Docker's IPAM does not reserve a pinned address for a
+          # container that has not started yet: on a cold start where
+          # `directory-publisher-hs` (dynamic) came up before the connector,
+          # it was handed .3 and the connector then failed to start with
+          # "Address already in use". A pool disjoint from the pins makes the
+          # start order irrelevant (TOON_Network #44).
+          ip_range: 172.30.1.128/25
 
 volumes:
   envoy-eds-data:
