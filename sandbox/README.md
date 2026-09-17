@@ -1722,6 +1722,17 @@ lease spawned from a registry reference.
   publisher and decided, once, that the publisher was not on a private address.
   `docker compose --profile full --profile hs up -d directory-publisher-hs` and
   then recreate `provider-hs` — §6.8 has the whole story.
+- **The hidden provider publishes nothing and `anon-hs` says `Tried for 120
+  seconds to get a connection to [scrubbed]:3200. Giving up. (waiting for
+  circuit)`**: its CLIENT side cannot build a rendezvous circuit to the hub's
+  virtual port, which is the overlay having a bad minute rather than this
+  sandbox — the same class of failure `make smoke-hs` calls exit 75. Check the
+  other side first (`curl --socks5-hostname 127.0.0.1:19050
+  http://<anytoon-addr>.anyone:3200/ilp` through the BUYER's daemon: a 200 says
+  the service and its forwarder are fine), then
+  `docker compose --profile hs restart anon-hs`, which re-picks guards and
+  refetches the descriptor. It comes back within a minute or two. The provider
+  and its publisher need no restart of their own: they retry every cadence.
 - **`make up-hs` fails at `seed-toon-evm` with `Insufficient funds for gas`**:
   anvil's funder account (index 0) has been drained by repeated seeding — it
   hands out 100 ETH per node per run and the job re-runs on every `up`. Refill
