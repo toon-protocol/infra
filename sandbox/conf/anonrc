@@ -7,8 +7,11 @@
 # is a second daemon — see conf/anonrc-client.
 #
 # Vendored from the anytoon sibling checkout's config/anonrc, which is the
-# reference implementation. Only the two HiddenServicePort targets differ, and
-# the block above them says why.
+# reference implementation. What differs: the HiddenServicePort targets are
+# loopback rather than a pinned container IP (the block above them says why),
+# and there are four of them rather than two — the last pair is this sandbox's
+# stand-in for clearnet, for the hidden provider (TOON_Network #43), and is
+# explained where it is written.
 #
 # The connector NEVER READS THIS FILE and never speaks this daemon's control
 # protocol (connector ADR 0070 decision 7). It is a sidecar, in the relationship
