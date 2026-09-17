@@ -494,10 +494,12 @@ curl --socks5-hostname 127.0.0.1:19050 http://<addr>.anyone/ilp   # its self-des
 there is no hub peering, by decision (spec Appendix A): it opens a client channel against that edge over its
 own SOCKS proxy, and settles on `http://<addr>.anyone:8545`, the same `anvil`
 this sandbox runs, on the same circuit. Account indices are the scarce thing
-here: `0` is `make smoke`'s buyer, `1`/`2`/`3` the three directory publishers,
-`5` `smoke-hs`'s own buyer (§6.6), so **a hidden-provider buyer should take
-index 6** and mint its own mock USDC from anvil's funder like every other payer
-here.
+here, and **nothing yet buys from this provider**: `0` is `make smoke`'s buyer,
+`1`/`2`/`3` are the three directory publishers, `5` is `smoke-hs`'s own buyer
+(§6.6), so **index 6 is the free one a hidden-provider buyer should take**. It
+is not seeded — no seed job funds it, deliberately, because no script needs it
+yet — so whatever takes it mints its own mock USDC from anvil's funder over the
+circuit, the way `smoke-hs`'s buyer is funded in ANYONE.
 
 What `make smoke-hs` proves, in one paid purchase:
 
