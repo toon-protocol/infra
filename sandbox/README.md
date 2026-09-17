@@ -463,7 +463,7 @@ Eight extra services, all `hs`-only. Three are the **anytoon ingress**:
 | in `hs` | what |
 |---|---|
 | `anon` | the daemon, **v0.4.10.2 built from source-of-truth release binaries** (§6.6). Generates this sandbox's `.anyone` address, publishes a descriptor for it, forwards what arrives |
-| `hs-ingress` | a two-port `socat` forwarder; owns the network namespace `anon` shares, so the daemon's config can name `127.0.0.1` (§6.6) |
+| `hs-ingress` | a four-port `socat` forwarder; owns the network namespace `anon` shares, so the daemon's config can name `127.0.0.1` (§6.6). Two of its ports are the issuer path and the chain; the other two are the hub and the relay, on the overlay, for the hidden provider (§6.8) |
 | `anon-client` | a SOCKS5 proxy on `127.0.0.1:19050` — the buyer's way onto the network, and nothing else. On its own compose network with **no route to any other service** |
 
 ...and five are **the hidden provider** (`g.toon.provider-hs`, TOON_Network
@@ -475,7 +475,7 @@ settlement RPC:
 | in `hs` | what |
 |---|---|
 | `anon-hs` | its own daemon, and the only one here that does three jobs: the address in front of its connector, a **cookie-authenticated control port** (one `.anyone` address per lease), and the **SOCKS + transparent-proxy egress** its own process and its workloads leave through. `conf/anonrc-hs` |
-| `hs-provider-ingress` | a three-port `socat` forwarder for the targets that must be resolved per connection — `anvil`, the hub and the relay (§6.8) |
+| `hs-provider-ingress` | a one-port `socat` forwarder: `anvil`, which has to be resolved per connection because the daemon's config can only name an address that always parses (§6.8) |
 | `provider-hs` | the provider app with `hidden = true` (`conf/provider-hs.toml`), workload ids **1200-1299**, SSH **46000-46099**, ports **47000-48599** — disjoint from the other two providers, which share this one host daemon |
 | `provider-hs-connector` | its connector, terminating `g.toon.provider-hs.*`. **No `ports:` line at all**: one address, over a circuit |
 | `directory-publisher-hs` | its relay-write payer, on **account index 3** (index 1 and 2 are the other two providers'), dialling through `anon` because a hidden provider's directory writes must not name this host |

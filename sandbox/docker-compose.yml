@@ -1618,12 +1618,15 @@ services:
   #   publishes no hostname or IP           `hidden = true`, no public_ip
   #   runs its own settlement RPC           `anvil`, on the private network
   #
-  # WHAT THIS TICKET'S SANDBOX CAN PROVE ON ITS OWN, and what it cannot: the
-  # daemon, the addresses, the network and the rendered configs are all here and
-  # checkable today. The PROVIDER ITSELF refuses every spawn with
-  # `invalid_request` until M4-2 (#39) lands — deliberately, so a half-built
-  # hidden provider cannot sell a lease it would expose. Rebuild this image from
-  # the provider checkout once #39-#42 are merged.
+  # WHAT IS AND IS NOT HIDDEN HERE, stated plainly. The connector, the per-lease
+  # addresses, the workload egress, the provider's own outbound and the
+  # settlement RPC all are. Two things are not, and both are sandbox facts
+  # rather than protocol ones: a workload's IMAGE is pulled by the HOST's Docker
+  # daemon, not by the provider, so a registry pull leaves from this host's
+  # address; and `gateway_url_pattern` names `envoy`, a private service the
+  # proxy cannot reach, so a TOON-store image cannot be fetched by this provider
+  # at all. Neither is on the path of a lease spawned from a registry
+  # reference.
   #
   # THE HUB DOES NOT PEER WITH IT, and that is not an omission: a tenant who
   # wants hidden compute opens a client channel against this connector's own
@@ -1658,7 +1661,7 @@ services:
         # the hidden provider on (toon-client ADR 0002: proxyRpc is on by
         # default, and reading chain state on clearnet while paying over a
         # circuit broadcasts the payer's settlement address from its own IP).
-        socat -d TCP-LISTEN:8545,fork,reuseaddr TCP:anvil:8545 &
+        socat -d TCP-LISTEN:8545,bind=172.30.1.4,fork,reuseaddr TCP:anvil:8545 &
         wait
     networks:
       default: {}
@@ -1817,13 +1820,14 @@ services:
   # watermark, whose loser has every later claim refused.
   # scripts/seed-toon-solana.mjs funds it by address.
   #
-  # IT PAYS THE HUB ON THE CLEARNET COMPOSE NETWORK, today. The Profile,
-  # Listings and Liveness of a hidden provider are supposed to leave through the
-  # same `anon` route as everything else (spec §10) — that is M4-5 (#42), which
-  # teaches the publisher and the provider's own reads to use
-  # `anon.socks_proxy`. Until it lands this sidecar is the ONE part of the
-  # hidden provider that is not yet hidden, and it is stated here rather than
-  # implied.
+  # IT PAYS THE HUB OVER THE OVERLAY, like everything else this provider does
+  # (spec §10 story 8: "Liveness and Directory writes leave through the same
+  # anon route", so relay operators never see its address). What that means in a
+  # sandbox with no clearnet is that the hub and the relay are published at
+  # virtual ports of the ANYTOON daemon's address — see conf/anonrc — and this
+  # payer dials them through `anon-hs`'s SOCKS port. Its chain RPC is the one
+  # exception and stays direct: a private address is one no exit could reach and
+  # one no packet crosses a watched network to get to.
   directory-publisher-hs:
     profiles: ['hs']
     build:

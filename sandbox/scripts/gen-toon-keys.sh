@@ -13,8 +13,8 @@
 #   DERIVED from anvil's public test mnemonic (rewritten every run; their
 #   ADDRESSES are committed in conf/connector-*.toml as counterparty_key and
 #   feed the committed channel ids, so they must be identical everywhere):
-#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30
-#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-39
+#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30/31
+#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-40
 #       (28/37 are the anytoon-connector's, 29/38 the provider-connector's,
 #        30/39 the SECOND provider's, provider2-connector, and 31/40 the HIDDEN
 #        provider's, provider-hs-connector; 27 was already spent on the gas

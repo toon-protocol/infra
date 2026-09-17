@@ -44,7 +44,7 @@
 # speak the control protocol, for the PER-LEASE addresses of M4-3; those are
 # created at runtime and never written to a config.)
 #
-# Idempotent: re-running it against an unchanged address rewrites the same two
+# Idempotent: re-running it against unchanged addresses rewrites the same three
 # files. `make up-hs` runs it; `make hs-address` runs it beside
 # scripts/hs-address.sh, so one command prints both of this sandbox's
 # addresses.
