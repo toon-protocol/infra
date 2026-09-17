@@ -304,7 +304,9 @@ the takeover timeline. It stops and restarts the FIRST provider's container,
 so run it alone. `TOON_M3_STANDBY_ONLY=1` runs the reservation side against
 provider2 alone for a first provider that does not sell `warm`, and its
 verdict says it is not a pass. `make smoke-m1` and `make smoke-m2` still
-pass afterwards.
+pass afterwards. **Milestone 4's, `make smoke-m4`, lives on the `hs` profile**
+— it buys from the hidden provider over the real Anyone network, so it is
+documented with `make smoke-hs` under *Hidden-service ingress* below.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -445,6 +447,7 @@ rehearses exactly that, and **nothing else in this sandbox depends on it**:
 ```bash
 make up-hs      # = --profile full --profile hs; expect 2-5 min of bootstrapping
 make smoke-hs   # buy one bundle over the circuit, chain RPC included
+make smoke-m4   # Milestone 4: buy a lease from the HIDDEN PROVIDER over the circuit
 ```
 
 > **This is the one target that takes a third-party dependency.** `anon`
@@ -494,12 +497,12 @@ curl --socks5-hostname 127.0.0.1:19050 http://<addr>.anyone/ilp   # its self-des
 there is no hub peering, by decision (spec Appendix A): it opens a client channel against that edge over its
 own SOCKS proxy, and settles on `http://<addr>.anyone:8545`, the same `anvil`
 this sandbox runs, on the same circuit. Account indices are the scarce thing
-here, and **nothing yet buys from this provider**: `0` is `make smoke`'s buyer,
-`1`/`2`/`3` are the three directory publishers, `5` is `smoke-hs`'s own buyer
-(§6.6), so **index 6 is the free one a hidden-provider buyer should take**. It
-is not seeded — no seed job funds it, deliberately, because no script needs it
-yet — so whatever takes it mints its own mock USDC from anvil's funder over the
-circuit, the way `smoke-hs`'s buyer is funded in ANYONE.
+here: `0` is `make smoke`'s buyer, `1`/`2`/`3` are the three directory
+publishers, `5` is `smoke-hs`'s own buyer (§6.6), and **`6` is
+`smoke-m4`'s** — the hidden provider's one tenant. It is not seeded — no seed
+job funds it, deliberately — so the smoke mints its own mock USDC over the
+circuit (`MockERC20.mint` is ungated on the sandbox deploy), the way
+`smoke-hs`'s buyer is sent ANYONE by the faucet.
 
 What `make smoke-hs` proves, in one paid purchase:
 
@@ -525,6 +528,75 @@ exact address, the price triple agrees — and only then opens a circuit. So:
 | `0` | bought |
 | `1` | **SANDBOX-SIDE**: something here is wrong, and the message says what |
 | `75` | **NETWORK-SIDE** (`EX_TEMPFAIL`): preflight passed, the overlay would not carry. It retries three times first (`SMOKE_HS_ATTEMPTS`) and prints both daemons' own last words. Try again later — this is not a bug to hunt |
+
+**`make smoke-m4` — Milestone 4's acceptance test** (TOON_Network #12 / #44,
+`scripts/smoke-milestone4.mjs`) is the same kind of rehearsal with the same two
+verdicts, against the **hidden provider** (§6.8). It follows the Milestone 1–3
+smokes' structure and helpers (`scripts/lib/provider-smoke.mjs`, where
+`provider-hs` is the third provider), and it dials the real network for
+everything a tenant would: the connector, the chain RPC and the lease itself.
+In order:
+
+- **preflight, sandbox-side, nothing dialled on the overlay**: the `hs`
+  services are up and the three daemons healthy; the address `anon-hs`
+  generated is the one the rendered configs name and the one
+  `provider-hs-connector` publishes as its own endpoint (read out of band on the
+  compose network — a client dials what a node publishes); the routes are
+  priced as `conf/provider-hs.toml` says, the free ones at 0 (no hub, no fee);
+  and **the private-RPC gate**: the provider's `settlement_rpc_url`, its
+  connector's two settlement RPCs and its publisher's `TOON_RPC_URL` are the
+  sandbox chains (compose service names), never a public URL. The host's own
+  public address is read here, on clearnet, to compare against later;
+- **the directory**: the Profile on the relay has `hidden: true`, **no `host`**
+  and a `connector_url` at the `.anyone` address; every Listing carries
+  `["l","hidden:true","toon.network"]`, the two public providers' Listings carry
+  none, and `#l = hidden:true` on the relay returns exactly the hidden
+  provider's (the relay does the search); an unexpired Liveness says the full
+  capacity;
+- **the buyer, over the circuit**: with only the address and the proxy it reads
+  the connector, mints its mock USDC and opens an EVM channel — every JSON-RPC
+  call through the same `socks5h://` proxy — and the free availability route
+  answers `would_run: true` spending no claim;
+- **a paid spawn on the `.anyone` endpoint**: `access.host` is a **per-lease**
+  `.anyone` address (the lease's own, not the connector's), no IP appears
+  anywhere in the answer, and the free signed `status` returns the same access.
+  On the host daemon the lease is **three containers** (`toon-<id>-egress`
+  owning the namespace on `hs-egress` alone, `toon-<id>` sharing it,
+  `toon-<id>-ingress` publishing the ports) in the `1200-1299` range; `anon-hs`
+  holds the address as a detached service (`GETINFO onions/detached`); and the
+  forwarder answers an SSH banner at the host port the address is forwarded to
+  — so if the circuit fails next, this side has already been proven;
+- **SSH to the per-lease address through the proxy** — `ssh -o
+  ProxyCommand='nc -X 5 -x 127.0.0.1:19050 %h %p'`, OpenBSD `nc` handing the
+  hostname to the proxy — with the tenant's key; the lease's published port
+  answers at the same address;
+- **from inside the workload**: a public what-is-my-IP service sees an `anon`
+  exit, not this host's address (nor any address this host holds); `ip route`
+  names nothing but the gateway and the egress subnet; ICMP to a clearnet
+  address is unanswered; and a dial to the host at `anon.forward_host`
+  (`172.17.0.1` — the very address this lease's own ports are forwarded to)
+  carries nothing back. A bare TCP `connect()` proves nothing here, because the
+  transparent proxy completes every handshake itself and only then refuses the
+  private destination: the dial has to read bytes;
+- **terminate**: `{ ended: termination }`; the daemon no longer holds the
+  address, the address no longer answers through the proxy, no `toon-<id>*`
+  container exists on the host daemon, and the next Liveness has the capacity
+  back;
+- **the book**: the hidden connector's client book on the tenant's channel grew
+  by exactly the listing price, read out of band on the compose network (it
+  publishes no host port).
+
+Buys the 180 s `basic` tier rather than the 30 s `smoke` one: a fresh `.anyone`
+address needs its descriptor published and fetched before the first circuit
+builds, and that — not the image — is the slow part. Two to three minutes on a
+good day; `TOON_M4_LISTING` overrides the tier. Exit `75` is reached only after
+this side is proven, and a carriage failure **after** the spawn is not retried
+(a second spawn is a second lease): the run terminates the lease if a circuit
+still carries and otherwise leaves it to expire. Its buyer is account index 6
+(above). Between attempts to reach the connector it **restarts the buyer's
+proxy** (`anon-client`): a buyer that fetched the provider's descriptor before
+`anon-hs` was last recreated keeps a stale one and waits 120 s for a circuit
+that cannot build — see *Troubleshooting*.
 
 **`make smoke` and `make smoke-hs` are alternatives, not a suite.** `make up-hs`
 recreates `anytoon-connector` against a rendered config whose `[node]` endpoints
@@ -1505,7 +1577,7 @@ The rest of this file avoids fixed IPs on purpose (§6.6); here a fixed address
 | network | docker name | what |
 |---|---|---|
 | `hs-egress` | `toon-sandbox_hs-egress`, `internal: true`, `10.203.0.0/24` | every hidden workload attaches here, with `anon-hs` at **10.203.0.2** as gateway and resolver. `conf/provider-hs.toml`'s `[anon.egress]` names both — and it names the **prefixed** name, because the provider attaches workloads through the HOST daemon, which knows no compose keys |
-| `hs-provider` | `toon-hs-provider`, `172.30.1.0/24` | `anon-hs` (.2, and where its control and SOCKS ports are bound), `provider-hs-connector` (.3), `hs-provider-ingress` (.4) — so `conf/anonrc-hs` can name its targets as IP literals, which always parse |
+| `hs-provider` | `toon-hs-provider`, `172.30.1.0/24`, dynamic pool `172.30.1.128/25` | `anon-hs` (.2, and where its control and SOCKS ports are bound), `provider-hs-connector` (.3), `hs-provider-ingress` (.4) — so `conf/anonrc-hs` can name its targets as IP literals, which always parse. The unpinned members (`provider-hs`, `directory-publisher-hs`) draw from the upper half only: Docker does not reserve a pinned address for a container that has not started yet, so with one pool the start order decided whether the connector could bind .3 |
 
 An **internal** network gets no NAT and Docker installs **no default route** in
 a container on it, so a workload there can reach `10.203.0.0/24` and nothing
@@ -1744,6 +1816,18 @@ lease spawned from a registry reference.
   that verdict after preflight has proved the daemon holds the address, the
   proxy is listening and the node advertises exactly that address. Re-run it
   later. Exit 1 is the other kind and names what is wrong here.
+- **`make smoke-m4` exits 75, or the BUYER's daemon says `Tried for 120 seconds
+  to get a connection to [scrubbed]:80. Giving up. (waiting for circuit)` for
+  the hidden provider's address while the anytoon address answers at once**:
+  the buyer holds a stale descriptor. `anon-hs` has been recreated since
+  `anon-client` last fetched the provider's descriptor (every recreate
+  re-establishes its introduction points), and the client keeps trying the old
+  ones for the descriptor's lifetime. `docker compose --profile hs restart
+  anon-client` — ten seconds — and it fetches the current one. `smoke-m4` does
+  exactly this between its attempts to reach the connector, so a run that still
+  exits 75 after that is the network. `curl --socks5-hostname 127.0.0.1:19050
+  http://<provider-hs-addr>.anyone/ilp` is the one-line check; `make hs-address`
+  prints the address.
 - **`make smoke` fails at step 4c after `make up-hs`**: expected, not a
   regression. That node now advertises its `.anyone` address, and a clearnet
   client has no proxy to reach it with — §2, *Hidden-service ingress*.
