@@ -408,6 +408,7 @@ for (const P of SET) {
 // the ones it could not reach, which is `member_unreachable`. The sandbox's
 // provider does the first; the poll below prefers it and accepts the other.
 const NOT_RUNNING = ['no_running_member', 'member_unreachable'];
+const refused = [];
 for (const hostname of [CANONICAL, NAMED]) {
   const answer = await askUntil(hostname, (a) => a.status === 503 && reasonOf(a) === 'no_running_member', WITHDRAW_BUDGET_S);
   assert(answer.status === 503 && NOT_RUNNING.includes(reasonOf(answer)),
@@ -415,6 +416,7 @@ for (const hostname of [CANONICAL, NAMED]) {
   const body = errorBody(answer);
   assert(body !== null && body.error === reasonOf(answer),
     `in spec §5's error shape, the header and the body agreeing: ${answer.body.slice(0, 200)}`);
+  refused.push(reasonOf(answer));
 }
 
 // ── 9. the books: the gateway paid nothing ────────────────────────────────
@@ -433,4 +435,4 @@ step('9. the books, to the unit: every unit either provider took is one the TENA
 }
 
 console.log(`\n  total run time ${Math.round((Date.now() - startedAt) / 1000)}s`);
-done(`a tenant spawned an HTTP workload on a two-member Standby Set, published one Gateway Grant and stopped there; the gateway found the grant on the relay by itself, resolved the workload across the set with a \`status\` signed by its own key, and served it at ${CANONICAL} and ${NAMED} over HTTP and HTTPS with the tenant's Host preserved. With the primary stopped, the standby took the workload over and THE SAME TWO URLS came back answered by the copy on the standby — the milestone's promise, with the tenant offline throughout. The restarted primary stood down leaving one copy; terminate left both URLs answering 503 no_running_member in the spec's error shape; and neither provider's book grew by a single unit for anything the gateway asked.`);
+done(`a tenant spawned an HTTP workload on a two-member Standby Set, published one Gateway Grant and stopped there; the gateway found the grant on the relay by itself, resolved the workload across the set with a \`status\` signed by its own key, and served it at ${CANONICAL} and ${NAMED} over HTTP and HTTPS with the tenant's Host preserved. With the primary stopped, the standby took the workload over and THE SAME TWO URLS came back answered by the copy on the standby — the milestone's promise, with the tenant offline throughout. The restarted primary stood down leaving one copy; terminate left both URLs answering 503 ${[...new Set(refused)].join(' / ')} in the spec's error shape; and neither provider's book grew by a single unit for anything the gateway asked.`);
