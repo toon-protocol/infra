@@ -103,6 +103,8 @@ ADR 0013, spec §12): a stable hostname per workload, keyed by its workload id
 and resolved to whichever sandbox provider is running it, behind a connector
 of its own — `make up-gateway`, then publish a Gateway Grant with one command
 and `curl http://<label>.gw.localhost:3280/` (§2, *The Workload Gateway*).
+`make smoke-m5` is that path as an acceptance test, with a Takeover in the
+middle of it.
 
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
@@ -324,6 +326,40 @@ verdict says it is not a pass. `make smoke-m1` and `make smoke-m2` still
 pass afterwards. **Milestone 4's, `make smoke-m4`, lives on the `hs` profile**
 — it buys from the hidden provider over the real Anyone network, so it is
 documented with `make smoke-hs` under *Hidden-service ingress* below.
+
+**`make smoke-m5` — Milestone 5's acceptance test** (TOON_Network #46 / #54,
+`scripts/smoke-milestone5.mjs`): the **Workload Gateway** end to end, and the
+milestone's promise in one sentence — *a workload has a stable URL that
+survives a Takeover with no tenant online*. It needs the `gateway` profile
+(`make up-gateway`, or `make up-gateway COMPOSE_PROFILE=payments`); §2's *The
+Workload Gateway* is the same path by hand. First the gateway's own connector
+(`http://localhost:3260/ilp`) is read and terminates **no paid route** — a
+gateway is party to no lease (ADR 0013) — and a hostname it holds no grant for
+is answered by the gateway itself, `503 no_grant`, dialling nothing. Then a
+tenant spawns `traefik/whoami` on container port **80** across the Standby Set
+`[provider, provider2]` (the `smoke-m3` shape, with `ports`) and publishes ONE
+**Gateway Grant** with `node scripts/grant.mjs`: kind 30438 on the relay, read
+back from it, naming the sandbox gateway in its `p` tag, this workload, the
+`http_port`, both members primary first, an expiry and a fresh short name.
+**Nothing else is told to the gateway**; publishing the grant is the whole
+ceremony, and the tenant's part ends there. The canonical hostname (the
+52-character base32 of the workload id) and the grant's name then both answer
+with the workload's **own body**, over HTTP and over HTTPS with the committed
+dev certificate, carrying the tenant's `Host` unchanged and the
+`X-Forwarded-For` / `-Proto` / `-Host` of spec §12.5. `docker compose stop
+provider` next, and the `smoke-m3` timeline runs underneath: the standby
+announces a Takeover on the relay, the gateway's own settle window (two
+cadences from the claim's `created_at`) passes, and **the same two URLs come
+back answered by the copy on the standby** — whoami reports its own container,
+so the move is visible in the response body and in nobody's log. The restarted
+primary stands down, leaving one copy; `terminate` on both leases leaves both
+URLs answering `503 no_running_member` in spec §5's error shape and in the
+`toon-gateway-reason` header; and neither provider's peer book grew by a single
+unit for anything the gateway asked, because `status` is free and a gateway
+calls no other route. Buys the 600 s `warm` tier on both providers; six to
+seven minutes, four of them the takeover timeline. Like `smoke-m3` it stops and
+restarts the FIRST provider's container, so run it alone. `make smoke-m1` to
+`make smoke-m4` still pass afterwards.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -662,6 +698,7 @@ and `workload-gateway-connector`, the conf is `conf/workload-gateway.conf`.)
 ```bash
 make up-gateway                            # = --profile full --profile gateway (+ the gateway checkout)
 make up-gateway COMPOSE_PROFILE=payments   # the payment layer + the gateway: no store or anytoon checkout
+make smoke-m5                              # Milestone 5's acceptance test: the whole path, with a Takeover
 ```
 
 Two services on top of whatever profile you chose:
@@ -671,7 +708,9 @@ Two services on top of whatever profile you chose:
 | `workload-gateway` | the gateway itself, built from `../../gateway`. Domain `gw.localhost`, key in `conf/workload-gateway.conf`, watching `ws://relay:7100` for grants naming it; HTTP on host **3280**, HTTPS on **3443** with `conf/workload-gateway-tls/`; its SOCKS proxy for `.anyone` hosts pointed at the `hs` profile's `anon-client` (validated at startup; dialled, once the gateway carries TOON_Network #52's `.anyone` path, only when a grant names a hidden member) |
 | `workload-gateway-connector` | its own connector (ADR 0013), client edge **3260**, `conf/connector-workload-gateway.toml`: an ILP identity and a self-description and **no routes, peers, channels or settlement** — it terminates no paid route, so there is nothing to price and nothing to settle. The hub does not peer with it |
 
-Then, the whole path by hand — four commands from a running stack to a URL:
+`make smoke-m5` drives the whole of that and asserts on it, Takeover
+included (the smoke list in §2). Here it is by hand instead — four commands
+from a running stack to a URL:
 
 ```bash
 # 1. a workload with an HTTP port. `traefik/whoami` on 80, the `warm` tier (600 s),

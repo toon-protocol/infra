@@ -83,7 +83,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-ci smoke-hs hs-address \
         logs ps test require-store-context require-anytoon-context require-gateway-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -536,6 +536,32 @@ smoke-hs:
 ## part); two to three minutes. TOON_M4_LISTING overrides the tier.
 smoke-m4:
 	node scripts/smoke-milestone4.mjs
+
+## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
+## for `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
+## WORKLOAD GATEWAY end to end — a workload has a stable URL that survives a
+## Takeover with no tenant online. The gateway's own connector terminates no
+## paid route and an unknown hostname is answered `no_grant` by the gateway
+## itself. A tenant spawns `traefik/whoami` on container port 80 across a
+## two-member Standby Set (the `make smoke-m3` shape, with ports), publishes ONE
+## Gateway Grant with `node scripts/grant.mjs` — kind 30438 on the relay, naming
+## the sandbox gateway, the workload, http_port 80, both members primary first,
+## an expiry and a fresh name — and stops there. Both the canonical hostname
+## (the 52-character base32 of the workload id) and the grant's name then answer
+## with the workload's OWN body over HTTP and HTTPS, `Host` preserved and the
+## §12.5 forwarding headers set. `docker compose stop provider`: the standby
+## announces a Takeover, settles and starts the workload, and THE SAME TWO URLS
+## come back answered by the copy on the STANDBY — whoami names its own
+## container, so the move is visible in the response body and in no log. The
+## restarted primary stands down; `terminate` leaves both URLs answering 503
+## `no_running_member` in the spec's error shape; and neither provider's book
+## grew by a unit for anything the gateway asked, because `status` is free and a
+## gateway calls no other route. Buys the 600 s `warm` tier on both providers;
+## six to seven minutes, four of them the takeover timeline. It stops and
+## restarts the FIRST provider's container, so nothing else should be spawning
+## on it meanwhile.
+smoke-m5:
+	node scripts/smoke-milestone5.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100

@@ -46,10 +46,14 @@ import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
-  HUB, HUB_FEE, ROOT, jstr, leaseRequest, listing, newTenant, newWorkloadId, openChannel, providerOf, usageFromHeader,
+  HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, ROOT,
+  jstr, leaseRequest, listing, newTenant, newWorkloadId, openChannel, providerOf, usageFromHeader,
 } from './lib/provider-smoke.mjs';
 
-const DEFAULT_IMAGE = 'traefik/whoami@sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420'; // v1.10.2
+// scripts/lib/provider-smoke.mjs's HTTP workload image, by reference@digest —
+// the same bytes `make smoke-m5` spawns, so this walk-through and that smoke
+// put the same thing behind the gateway.
+const DEFAULT_IMAGE = `${HTTP_IMAGE.reference}@${HTTP_IMAGE.digest}`;
 // The provider refuses a Lease Request valid for longer than this (spec §6.1).
 const REQUEST_TTL_S = 300;
 
@@ -97,7 +101,7 @@ if (values.terminate) {
 // ── spawn ──────────────────────────────────────────────────────────────────
 const [reference, digest] = values.image.split('@');
 if (!reference || !/^sha256:[0-9a-f]{64}$/.test(digest ?? '')) usage(`--image must be <reference>@sha256:<64 hex>, not ${values.image}`);
-const ports = (values.port ?? ['80']).map((p) => Number(p));
+const ports = (values.port ?? [String(HTTP_CONTAINER_PORT)]).map((p) => Number(p));
 if (ports.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) usage(`--port must be a port: ${values.port}`);
 const names = values.standby ?? ['provider'];
 let SET;
