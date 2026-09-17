@@ -1,0 +1,187 @@
+##===== /etc/anon/anonrc — the HIDDEN PROVIDER's own daemon (`anon-hs`) =====##
+#
+# The third `anon` daemon in this sandbox, and the only one that does all
+# three jobs a Hidden Provider needs (TOON_Network #43, spec §10, ADR 0008).
+# conf/anonrc fronts the anytoon issuer path and nothing else; conf/anonrc-client
+# is the buyer's way onto the network. This one is the provider's own
+# infrastructure:
+#
+#   1. INGRESS — an address for `provider-hs-connector`, so the hidden
+#      provider's client edge is reachable only over a circuit. Rendered into
+#      the connector's and the provider's configs by
+#      scripts/hs-provider-address.sh, the way scripts/hs-address.sh does it
+#      for anytoon.
+#   2. A CONTROL PORT — cookie-authenticated, so `toon-provider` can create one
+#      `.anyone` address per lease with ADD_ONION and destroy it with
+#      DEL_ONION when the lease ends (M4-3, TOON_Network #40). The cookie lives
+#      on a volume the provider container mounts read-only; nothing outside the
+#      compose project can reach the port.
+#   3. EGRESS — a SOCKS port for the provider's OWN outbound (M4-5,
+#      TOON_Network #42) and a TRANSPARENT proxy (TransPort + DNSPort) that is
+#      the only route off the `hs-egress` network every hidden
+#      workload is attached to (M4-4, TOON_Network #41).
+#
+# Mounted READ-ONLY at /etc/anon/anonrc. The daemon is `anon-hs` in
+# docker-compose.yml, on the `hs` profile only.
+
+# WITHOUT THIS THE DAEMON DOES NOT START — see conf/anonrc for the whole story.
+AgreeToTerms 1
+
+# Drop from root to the image's own unprivileged user. Everything this file
+# binds is above 1024 for that reason, and the iptables rules that make the
+# TransPort reachable are installed by the container's entrypoint BEFORE the
+# daemon drops (docker-compose.yml, `anon-hs`).
+User anond
+DataDirectory /var/lib/anon
+
+# EXPLICIT, and it cannot be dropped: the image's entrypoint APPENDS a Nickname
+# when it finds none, and this file is mounted read-only.
+Nickname toonsandboxprovhs
+
+# A SERVICE AND A CLIENT, never a relay: it publishes one address, opens
+# circuits for this provider and its workloads, and carries nobody else's
+# traffic.
+ClientOnly 1
+ORPort 0
+DirPort 0
+
+# ── 1. THE CONTROL PORT (M4-3, TOON_Network #40) ────────────────────────────
+#
+# What `toon-provider` speaks to create a per-lease address (TOON_Network #40):
+# PROTOCOLINFO 1, AUTHENTICATE <hex cookie>, then
+# ADD_ONION NEW:ED25519-V3 Flags=Detach Port=<virtual>,<forward_host>:<host_port>
+# and DEL_ONION <id> at lease end — one connection per call, and a preflight
+# connect + AUTHENTICATE at startup that refuses to start if it fails.
+#
+# BOUND TO ONE ADDRESS, and to the right one. Loopback would be reachable by
+# nothing at all — the provider is a SEPARATE CONTAINER (`ControlSocket 0` on
+# the other two daemons is the same decision the other way: they have no
+# controller). 0.0.0.0 would be reachable by one caller too many: this daemon
+# also sits on the EGRESS network, and a control port a tenant's workload could
+# dial is a control port a tenant could dial. So it binds this daemon's pinned
+# address on `hs-provider`, the network it shares with the provider and its
+# publisher and with nothing else (the iptables DROP in docker-compose.yml is
+# the belt to that brace). Published to no host interface anywhere.
+ControlPort 172.30.1.2:9051
+
+# COOKIE, NOT PASSWORD. The daemon writes a 32-byte file at startup and a
+# controller proves it can read it; a HashedControlPassword would have to be
+# committed in two places and would be the same secret in every checkout.
+CookieAuthentication 1
+
+# ON ITS OWN VOLUME, deliberately NOT the default
+# /var/lib/anon/control_auth_cookie: the volume that holds the cookie is
+# mounted into the provider container read-only, and the DataDirectory beside
+# it holds this address's PRIVATE KEY. The provider needs the first and has no
+# business with the second, so they are two mounts. The path here is what
+# conf/provider-hs.toml's `[anon.control] cookie_file` names.
+CookieAuthFile /var/lib/anon/control/control_auth_cookie
+
+# The image's entrypoint chowns /var/lib/anon (and so this nested mount) to
+# `anond` before the daemon starts, and the provider container runs as root, so
+# a 0600 cookie is already readable there. Group-readable anyway, so a provider
+# image that later drops privileges only needs the group.
+CookieAuthFileGroupReadable 1
+
+# ── 2. THE SOCKS PORT (M4-5, TOON_Network #42) ──────────────────────────────
+#
+# Where the PROVIDER's own outbound leaves: its relay reads and writes, its
+# image fetches, its publish requests. conf/provider-hs.toml names it as
+# `anon.socks_proxy = "socks5h://172.30.1.2:9050"` — socks5h, so the DAEMON
+# resolves every name and no lookup leaves this host.
+#
+# It is also the port the transparent proxy below is the front end of: one
+# daemon, one set of circuits, two ways in.
+#
+# On the same pinned address as the control port, and for the same reason: the
+# provider and its publisher are on `hs-provider`, a workload never is.
+SocksPort 172.30.1.2:9050
+
+# THE POLICY COVERS EVERY CLIENT LISTENER, not just this one: `anon` applies
+# SocksPolicy to the DNSPort and the TransPort below as well. So the egress
+# subnet has to be accepted here or a workload's DNS query comes back REFUSED
+# and nothing about the transparent proxy works — which is exactly how this
+# line earns its comment. Two subnets, and they are the two ways in:
+#   172.30.1.0/24  the provider and its publisher, dialling SOCKS
+#   10.203.0.0/24  the workloads, arriving at the TransPort and the DNSPort
+SocksPolicy accept 172.30.1.0/24
+SocksPolicy accept 10.203.0.0/24
+SocksPolicy accept 127.0.0.0/8
+SocksPolicy reject *
+
+# ── 3. THE TRANSPARENT EGRESS (M4-4, TOON_Network #41) ──────────────────────
+#
+# A hidden workload is attached to `toon-sandbox_hs-egress` (an `internal: true`
+# compose network — Docker gives it no NAT and installs no default route at all)
+# and the provider's own namespace-owner sidecar points its default route and
+# its resolver at this daemon's fixed address there, 10.203.0.2. The container's
+# entrypoint installs the nat/PREROUTING rules for traffic arriving from that
+# subnet:
+#
+#     udp/tcp dport 53        -> REDIRECT 5353   (the DNSPort below)
+#     tcp, leaving the subnet -> REDIRECT 9040   (the TransPort below)
+#
+# so the workload needs no proxy settings, cannot opt out, and has no second
+# route to try. A UDP flow other than DNS has nowhere to go, which is the
+# intended behaviour: `anon` carries TCP.
+#
+# BOUND TO THE EGRESS ADDRESS, not 0.0.0.0: these two are the only surfaces a
+# workload may reach, and the INPUT rules beside them drop everything else that
+# subnet sends this daemon.
+TransPort 10.203.0.2:9040
+DNSPort 10.203.0.2:5353
+
+# The two options that make `.anyone` names work for a workload that has no
+# SOCKS client: a name resolved through the DNSPort is answered with an address
+# out of this block, and a connection to that address is mapped back to the
+# name on the circuit. Without them a workload could reach IP destinations but
+# no hidden service.
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .anyone,.exit
+
+# ── THE ADDRESS THIS DAEMON PUBLISHES ───────────────────────────────────────
+#
+# The hidden provider's connector, and the chain a buyer settles against on the
+# SAME address and the same circuit — the shape conf/anonrc already explains at
+# length for anytoon, for the same reason (a buyer that reaches a connector
+# over a circuit while reading chain state on clearnet has broadcast its
+# settlement address from its own IP).
+#
+# PER-LEASE addresses are NOT here and never will be: they are created at
+# runtime over the control port above and destroyed when the lease ends, which
+# is what makes them per-lease. This file holds only the address that has to
+# exist before anything is running.
+#
+# BOTH TARGETS ARE FIXED IPs, and that is the same circle conf/anonrc breaks
+# with a shared loopback: `anon` resolves a HiddenServicePort target when it
+# PARSES this file, long before the connector it fronts can exist (that
+# connector's config has to name an address only this daemon can generate). A
+# container name would abort the daemon at boot; an IP literal always parses.
+# The two addresses are pinned on the `hs-provider` network in
+# docker-compose.yml.
+HiddenServiceDir /var/lib/anon/hidden_service
+
+# PORT 80 — the hidden provider's client edge (`provider-hs-connector`, pinned
+# at 172.30.1.3). An address is a host, so it is addressed the way any host is.
+HiddenServicePort 80 172.30.1.3:3000
+
+# PORT 8545 — anvil, through `hs-provider-ingress` (pinned at 172.30.1.4),
+# which forwards to it BY NAME once per connection so a recreated chain cannot
+# leave this daemon pointed at a dead address.
+HiddenServicePort 8545 172.30.1.4:8545
+
+# THE HUB AND THE RELAY ARE NOT HERE, and that is deliberate. This provider
+# reaches both over the overlay (it dials them through the SOCKS port above,
+# and `anon` builds no circuit to a private compose address) — but they are
+# published on the ANYTOON daemon's address, conf/anonrc, not on this one. A
+# daemon connecting to its own hidden service is the one overlay path that is
+# unreliable in practice: the path restrictions that keep a rendezvous
+# anonymous exclude the relays it is already using, and it can sit in
+# "waiting for circuit" until it gives up. conf/anonrc says the same thing from
+# the other end.
+
+# Twice, deliberately: stdout is where `docker compose logs` reads, and the
+# file is what the healthcheck greps for `Bootstrapped 100%`.
+Log notice stdout
+Log notice file /var/lib/anon/notice.log

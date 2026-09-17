@@ -1503,6 +1503,14 @@ services:
         socat -d TCP-LISTEN:3000,bind=127.0.0.1,fork,reuseaddr TCP:anytoon-connector:3000 &
         # 8545 -> anvil, for the buyer's proxied chain RPC.
         socat -d TCP-LISTEN:8545,bind=127.0.0.1,fork,reuseaddr TCP:anvil:8545 &
+        # 3200 -> the hub's client edge and 7100 -> the relay's websocket, for
+        # THE HIDDEN PROVIDER (TOON_Network #43). It reaches both over the
+        # overlay because `anon` builds no circuit to a private address, and
+        # they are on THIS daemon's address rather than its own because a daemon
+        # dialling its own hidden service is the one overlay path that does not
+        # reliably build. conf/anonrc says it at length.
+        socat -d TCP-LISTEN:3200,bind=127.0.0.1,fork,reuseaddr TCP:relay-connector:3000 &
+        socat -d TCP-LISTEN:7100,bind=127.0.0.1,fork,reuseaddr TCP:relay:7100 &
         wait
     restart: unless-stopped
     logging: *chain-logging
@@ -1593,10 +1601,370 @@ services:
       retries: 60
       start_period: 30s
 
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # THE HIDDEN PROVIDER — profile `hs` ONLY (TOON_Network #43, spec §10)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # A THIRD provider (`g.toon.provider-hs`), whole and hidden: its own `anon`
+  # daemon, its own connector, its own directory publisher, its own lease table
+  # and its own workload id/port ranges. Nothing of it publishes a host port.
+  # ADR 0008's five conditions, and where each one lives:
+  #
+  #   connector reachable only at .anyone   `anon-hs` + the rendered
+  #                                         conf/.rendered/connector-provider-hs.toml
+  #   every lease's ports likewise          created at runtime over the control
+  #                                         port below (M4-3, #40)
+  #   all workload egress through anon      `hs-egress`, whose gateway
+  #                                         is this daemon (M4-4, #41)
+  #   publishes no hostname or IP           `hidden = true`, no public_ip
+  #   runs its own settlement RPC           `anvil`, on the private network
+  #
+  # WHAT THIS TICKET'S SANDBOX CAN PROVE ON ITS OWN, and what it cannot: the
+  # daemon, the addresses, the network and the rendered configs are all here and
+  # checkable today. The PROVIDER ITSELF refuses every spawn with
+  # `invalid_request` until M4-2 (#39) lands — deliberately, so a half-built
+  # hidden provider cannot sell a lease it would expose. Rebuild this image from
+  # the provider checkout once #39-#42 are merged.
+  #
+  # THE HUB DOES NOT PEER WITH IT, and that is not an omission: a tenant who
+  # wants hidden compute opens a client channel against this connector's own
+  # edge over the circuit (spec Appendix A). Nothing in `full` names anything
+  # here, in either direction.
+
+  # The forwarder the daemon's second virtual port leads to. Same circle
+  # `hs-ingress` breaks, broken the same way: `anon` resolves a
+  # HiddenServicePort target when it PARSES its config, so the target has to be
+  # something that always parses — here a PINNED IP on `hs-provider` rather than
+  # the shared loopback the anytoon daemon uses. This container then resolves
+  # `anvil` BY NAME once per connection, so a recreated chain cannot leave the
+  # daemon pointed at a dead address.
+  #
+  # The connector needs no such hop: it has a pinned address of its own below.
+  # This exists for the chain alone, because `anvil` is a `full`-profile service
+  # this profile must not modify. (The hub and the relay, which this provider
+  # also reaches over the overlay, are published on the ANYTOON daemon's address
+  # instead — see `hs-ingress` and conf/anonrc for why a daemon must not have to
+  # dial its own hidden service.)
+  hs-provider-ingress:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        # 8545 -> anvil, for a tenant's chain RPC over the SAME circuit it pays
+        # the hidden provider on (toon-client ADR 0002: proxyRpc is on by
+        # default, and reading chain state on clearnet while paying over a
+        # circuit broadcasts the payer's settlement address from its own IP).
+        socat -d TCP-LISTEN:8545,fork,reuseaddr TCP:anvil:8545 &
+        wait
+    networks:
+      default: {}
+      hs-provider:
+        ipv4_address: 172.30.1.4
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # THE HIDDEN PROVIDER'S OWN `anon` DAEMON. Config: conf/anonrc-hs, which
+  # explains each of its three jobs at length — an address for the connector, a
+  # cookie-authenticated control port for per-lease addresses, and a
+  # SOCKS + transparent-proxy egress.
+  #
+  # IT IS ON THREE NETWORKS, and each one is a different job:
+  #   default      its own route to the REAL Anyone network, and nothing else
+  #                is bound there.
+  #   hs-provider  pinned, and every surface this daemon offers the provider is
+  #                on it: the ControlPort and the SocksPort bind 172.30.1.2,
+  #                and conf/anonrc-hs names the connector (172.30.1.3) and the
+  #                chain forwarder (172.30.1.4) as IP literals that always
+  #                parse. Binding the two ports HERE rather than on 0.0.0.0 is
+  #                the point — a workload shares the egress network with this
+  #                daemon, and a control port it could dial would be a control
+  #                port a tenant could dial.
+  #   hs-egress    `internal: true`, pinned, and this daemon holds 10.203.0.2
+  #                on it — the gateway, the resolver and the only way out for
+  #                every hidden workload.
+  #
+  # NET_ADMIN AND AN ENTRYPOINT OF ITS OWN. A TransPort is reachable only
+  # through nat/PREROUTING REDIRECT rules, and they must exist before the daemon
+  # drops to `anond` and before any workload runs — so the container installs
+  # them as root and then execs the image's own entrypoint unchanged. The rules
+  # match on the SOURCE SUBNET rather than an interface name, because the
+  # interface a compose network lands on is not stable.
+  #
+  # NO host port, here or anywhere below: the control port's whole reachable
+  # surface is this project's networks, and it is cookie-authenticated on top.
+  anon-hs:
+    profiles: ['hs']
+    build:
+      context: ./anon
+    image: toon-sandbox-anon:v0.4.10.2
+    init: true
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        nat() { iptables -t nat -C PREROUTING "$$@" 2>/dev/null || iptables -t nat -A PREROUTING "$$@"; }
+        inp() { iptables -C INPUT "$$@" 2>/dev/null || iptables -A INPUT "$$@"; }
+        # DNS first, then the catch-all: a tcp/53 packet must reach the DNSPort,
+        # not the TransPort, and -A appends in order. The catch-all excludes
+        # traffic INSIDE the egress subnet, so two workloads on it still reach
+        # each other directly rather than through a circuit that would refuse
+        # them.
+        nat -s 10.203.0.0/24 -p udp --dport 53 -j REDIRECT --to-ports 5353
+        nat -s 10.203.0.0/24 -p tcp --dport 53 -j REDIRECT --to-ports 5353
+        nat -s 10.203.0.0/24 ! -d 10.203.0.0/24 -p tcp --syn -j REDIRECT --to-ports 9040
+        # AND THEN ONLY THOSE TWO PORTS. A workload shares this subnet with the
+        # daemon, so without the DROP it could dial anything the daemon happens
+        # to be listening on. The redirected packets arrive here already
+        # rewritten to 9040/5353, which is why the ACCEPTs come first.
+        inp -s 10.203.0.0/24 -p tcp --dport 9040 -j ACCEPT
+        inp -s 10.203.0.0/24 -p tcp --dport 5353 -j ACCEPT
+        inp -s 10.203.0.0/24 -p udp --dport 5353 -j ACCEPT
+        inp -s 10.203.0.0/24 -j DROP
+        exec docker-entrypoint anon -f /etc/anon/anonrc
+    volumes:
+      - ./conf/anonrc-hs:/etc/anon/anonrc:ro
+      # This address and the PRIVATE KEY behind it. Survives `make down`, dies
+      # with `make clean` — see conf/anonrc.
+      - anon-hs-data:/var/lib/anon
+      # THE CONTROL COOKIE, on a volume of its own so the provider can be given
+      # the cookie WITHOUT being given the key beside it.
+      - anon-hs-control:/var/lib/anon/control
+    networks:
+      default: {}
+      hs-provider:
+        ipv4_address: 172.30.1.2
+      hs-egress:
+        ipv4_address: 10.203.0.2
+    restart: unless-stopped
+    logging: *chain-logging
+    healthcheck:
+      # THREE halves, and none of them is enough alone. The hostname file
+      # appears at key generation, seconds in; `Bootstrapped 100%` is what says
+      # the descriptor can actually be published; the cookie is written when the
+      # CONTROL PORT opens, which is the surface the provider needs.
+      test:
+        - 'CMD-SHELL'
+        - "test -s /var/lib/anon/hidden_service/hostname && grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log && test -s /var/lib/anon/control/control_auth_cookie"
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # The hidden provider itself. Same image and build context as the other two
+  # (one checkout, three configs), and the same deployment shape: it shells out
+  # to the docker CLI, so its workloads run as siblings on the HOST daemon.
+  #
+  # ITS CONFIG IS THE RENDERED ONE. `hidden = true` refuses to start unless
+  # `connector_url` is at an `.anyone` host, and that address exists only once
+  # `anon-hs` has generated it — so `make up-hs` runs
+  # scripts/hs-provider-address.sh and passes PROVIDER_HS_CONF. The default
+  # below is the committed template, which loads (its placeholder is
+  # valid-shaped) but advertises an address that resolves nowhere.
+  provider-hs:
+    profiles: ['hs']
+    build:
+      context: ${PROVIDER_CONTEXT:-../../provider}
+    volumes:
+      - ${PROVIDER_HS_CONF:-./conf/provider-hs.toml}:/etc/toon-provider/provider.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Its OWN lease table: three providers sharing one would be one provider.
+      - provider-hs-state:/var/lib/toon-provider
+      # READ-ONLY, and the cookie alone: this is how the provider authenticates
+      # to 172.30.1.2:9051 to create and destroy a lease's `.anyone` address.
+      - anon-hs-control:/var/lib/anon/control:ro
+    networks:
+      default: {}
+      # Where the daemon's control and SOCKS ports are bound. No fixed address
+      # of its own: it dials, it is not dialled here.
+      hs-provider: {}
+    expose:
+      - '8080' # PRIVATE, only provider-hs-connector dials this
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    depends_on:
+      # A hidden provider with no daemon is not a hidden provider: it needs the
+      # control port before it can answer a spawn at all.
+      anon-hs:
+        condition: service_healthy
+      # AND ITS PUBLISHER, BEFORE ITSELF — which is not about publishing but
+      # about DNS. A hidden provider dials its publisher DIRECTLY when the
+      # publisher is on a private address and through `anon` when it is not,
+      # and it decides which ONCE, at startup, by resolving `publish_url`
+      # (`is_private_url`). A publisher that does not exist yet does not
+      # resolve, so the provider would settle on "not private" and ask the
+      # daemon for a circuit to `directory-publisher-hs` for the rest of its
+      # life — SOCKS "host unreachable" on every Profile, Listing and
+      # Liveness. Starting the publisher first is the whole fix.
+      directory-publisher-hs:
+        condition: service_started
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The hidden provider's payer for relay writes. Everything the
+  # `directory-publisher` service's header says applies here; the one field that
+  # matters is TOON_ACCOUNT_INDEX — ACCOUNT 3, because index 1 and index 2 are
+  # the other two publishers' and two processes on one channel share one nonce
+  # watermark, whose loser has every later claim refused.
+  # scripts/seed-toon-solana.mjs funds it by address.
+  #
+  # IT PAYS THE HUB ON THE CLEARNET COMPOSE NETWORK, today. The Profile,
+  # Listings and Liveness of a hidden provider are supposed to leave through the
+  # same `anon` route as everything else (spec §10) — that is M4-5 (#42), which
+  # teaches the publisher and the provider's own reads to use
+  # `anon.socks_proxy`. Until it lands this sidecar is the ONE part of the
+  # hidden provider that is not yet hidden, and it is stated here rather than
+  # implied.
+  directory-publisher-hs:
+    profiles: ['hs']
+    build:
+      context: ${PROVIDER_CONTEXT:-../../provider}
+      dockerfile: tools/publisher/Dockerfile
+    # THE THREE ENDPOINT VALUES COME FROM THE RENDERED FILE, not from here:
+    # TOON_CONNECTOR_URL, TOON_ENDPOINT_REWRITE and RELAY_WRITE_ROUTES all name
+    # the `.anyone` address `anon-hs` generated, which does not exist until it
+    # has. scripts/hs-provider-address.sh writes them; `required: false` so
+    # `--profile hs` alone still renders this file before they exist. A
+    # `environment:` key would WIN over the file, which is why they are not
+    # repeated below.
+    env_file:
+      - path: ./conf/.rendered/hs-provider.env
+        required: false
+    environment:
+      TOON_CHAIN: solana
+      # DIRECT, and by design: a private address is one no `anon` exit could
+      # reach and one no packet crosses a watched network to get to, so the
+      # publisher dials its chain RPC itself (tools/publisher/proxy.mjs,
+      # `isNearUrl`). Everything else it dials rides the proxy.
+      TOON_RPC_URL: http://solana-validator:8899
+      TOON_MNEMONIC: 'test test test test test test test test test test test junk'
+      TOON_ACCOUNT_INDEX: '3'
+      TOON_DEPOSIT: '10000000' # 10 mock USDC at 6 dp; a write costs 1 unit
+      TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
+      # WITHOUT THESE TWO IT EXITS 1 (TOON_Network #42): a publisher beside a
+      # hidden provider that dialled the hub from this host's real address
+      # would leak exactly what the provider is hiding, so it refuses to start
+      # rather than fail per request.
+      TOON_HIDDEN: 'true'
+      TOON_SOCKS_PROXY: socks5h://172.30.1.2:9050
+    networks:
+      default: {}
+      hs-provider: {} # where the daemon's SOCKS port is bound
+    volumes:
+      - directory-publisher-hs-state:/var/lib/toon-publisher
+    expose:
+      - '8081' # PRIVATE, only provider-hs dials this
+    depends_on:
+      # `required: false` on every row naming a `full` service, and ONLY for
+      # that reason: `--profile hs` alone (scripts/hs-address.sh runs it) must
+      # still render this file, and a depends_on naming a service the active
+      # profiles disable is otherwise a hard config error. Under `make up-hs`
+      # (= full + hs) each row gates exactly as written.
+      solana-validator:
+        condition: service_healthy
+        required: false
+      seed-toon-solana:
+        condition: service_completed_successfully
+        required: false
+      relay-connector:
+        condition: service_healthy
+        required: false
+      # Its SOCKS proxy, and the daemon that publishes the addresses its
+      # endpoints name: neither exists before this is healthy.
+      anon-hs:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The hidden provider's connector: same pinned image as every other node here,
+  # its own key directory, its own state volume — and NO `ports:` line, which is
+  # the whole point. It is reachable at exactly one address, over a circuit.
+  #
+  # PINNED AT 172.30.1.3 on `hs-provider` so conf/anonrc-hs can name it as an IP
+  # literal (see `hs-provider-ingress` for why a name cannot be used), and so
+  # recreating it against the rendered config — which `make up-hs` must do —
+  # cannot leave the daemon pointed at a dead address.
+  provider-hs-connector:
+    profiles: ['hs']
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ${PROVIDER_HS_CONNECTOR_CONF:-./conf/connector-provider-hs.toml}:/app/config/connector.toml:ro
+      - ./keys/toon/provider-hs-connector:/app/data:ro
+      - provider-hs-connector-state:/app/state
+    networks:
+      default: {}
+      hs-provider:
+        ipv4_address: 172.30.1.3
+    healthcheck: *connector-healthcheck
+    depends_on:
+      # `required: false` on the `full` rows — see `directory-publisher-hs`.
+      anvil:
+        condition: service_healthy
+        required: false
+      solana-validator:
+        condition: service_healthy
+        required: false
+      seed-toon-evm:
+        condition: service_completed_successfully
+        required: false
+      seed-toon-solana:
+        condition: service_completed_successfully
+        required: false
+      provider-hs:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
 networks:
   # The buyer's proxy, and nothing else — see `anon-client`. Rendered ONLY under
   # the `hs` profile, so `make up` creates no such network.
   hs-payer:
+
+  # THE HIDDEN PROVIDER'S TWO NETWORKS (TOON_Network #43). Both are `hs`-only,
+  # so `make up` creates neither, and both are PINNED — the one thing the rest
+  # of this file deliberately avoids (see `hs-ingress`), because here a fixed
+  # address is the mechanism rather than a convenience: a HiddenServicePort
+  # target must parse before the container it names exists, and a workload's
+  # gateway must be an IP the provider can write into a config.
+  #
+  # 10.203.0.0/24 is off Docker's default pool entirely and 172.30.1.0/24 sits
+  # at its top; a collision with another project shows up as "Pool overlaps
+  # with other one on this address space" at `make up-hs`, and the fix is to
+  # move the subnet and every address that names it (conf/anonrc-hs,
+  # conf/provider-hs.toml and the services above).
+  hs-egress:
+    # NO `name:`, deliberately: the provider shells out to the HOST daemon to
+    # attach a workload to this network, and what it names there is the name
+    # compose gives it — `toon-sandbox_hs-egress`, project prefix and all.
+    # conf/provider-hs.toml's `[anon.egress] network` spells exactly that.
+    driver: bridge
+    # NO ROUTE OFF THIS HOST except the one `anon-hs` provides. Docker gives an
+    # internal network no NAT and installs NO DEFAULT ROUTE in a container on
+    # it, so a workload reaches 10.203.0.0/24 and nothing else until the
+    # provider's own namespace-owner sidecar points it at the daemon — and a
+    # tenant image that ignores every proxy setting still cannot leak where this
+    # provider is.
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.203.0.0/24
+  # The hidden provider's own service network, pinned so conf/anonrc-hs can name
+  # its connector and its chain forwarder as IP literals.
+  hs-provider:
+    name: toon-hs-provider
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
 
 volumes:
   envoy-eds-data:
@@ -1625,3 +1993,14 @@ volumes:
   # up-hs`) and dies with `make clean` (new address, which is fine here).
   anon-data:
   anon-client-data:
+  # THE HIDDEN PROVIDER (TOON_Network #43), `hs` profile only. Same story as
+  # anon-data for the first two: anon-hs-data holds the hidden provider's
+  # `.anyone` address and the key behind it, and anon-hs-control holds the
+  # control cookie the provider authenticates with — a volume of its own, so the
+  # provider gets the cookie and not the key. The other three are one lease
+  # table, one claim journal and one channel watermark, never shared.
+  anon-hs-data:
+  anon-hs-control:
+  provider-hs-state:
+  provider-hs-connector-state:
+  directory-publisher-hs-state:

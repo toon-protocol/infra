@@ -99,6 +99,28 @@ HiddenServicePort 80 127.0.0.1:3000
 # `http://<addr>.anyone:8545` is the chain it settles on.
 HiddenServicePort 8545 127.0.0.1:8545
 
+# PORTS 3200 AND 7100 — THE HUB AND THE RELAY, for the HIDDEN PROVIDER
+# (TOON_Network #43). They are on THIS daemon's address rather than the hidden
+# provider's own, and that is the whole point of putting them here.
+#
+# A Hidden Provider dials every relay and its payer's connector through its own
+# `anon` SOCKS port (spec §10 story 8), and `anon` builds no circuit to a
+# private address — which is what `relay:7100` and `relay-connector:3000` are on
+# this compose network. In a deployment the hub and the relays are on clearnet
+# and an exit reaches them. This sandbox has no clearnet, so they are reached
+# over the overlay instead; and they are published HERE because a daemon
+# connecting to ITS OWN hidden service is the one overlay path that is
+# unreliable in practice — the path restrictions that keep a rendezvous
+# anonymous exclude the relays it is already using, and it can sit in
+# "waiting for circuit" until it gives up. Two daemons, an ordinary
+# client-to-service circuit, and the property under test is unchanged: the
+# provider's packets leave over a circuit and arrive naming nothing about it.
+#
+# Both targets are the loopback this daemon shares with `hs-ingress`, like the
+# two above, so `socat` resolves the service names per connection.
+HiddenServicePort 3200 127.0.0.1:3200
+HiddenServicePort 7100 127.0.0.1:7100
+
 # Twice, deliberately: stdout is where `docker compose logs` reads, and the file
 # is what the healthcheck greps for `Bootstrapped 100%`. A container that is Up
 # is not a container that has a circuit.

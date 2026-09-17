@@ -45,6 +45,13 @@ RUN set -eux; \
     # Installing it here means the `hs` profile builds ONE image and pulls no
     # second one for two `socat` invocations.
     apt-get install -y --no-install-recommends socat; \
+    # iptables is KEPT for the same reason, and only one service needs it:
+    # the HIDDEN PROVIDER's daemon (`anon-hs`, conf/anonrc-hs) is the
+    # transparent-egress gateway of the `hs-egress` network, and a
+    # TransPort is reachable only through the nat/PREROUTING REDIRECT rules
+    # its own container installs at boot. Debian's iptables is the nft
+    # backend; the rules live in that container's own network namespace.
+    apt-get install -y --no-install-recommends iptables; \
     curl -fsSL -o /tmp/anon.zip \
       "https://github.com/anyone-protocol/ator-protocol/releases/download/${ANON_VERSION}/anon-live-linux-amd64.zip"; \
     echo "${ANON_SHA256}  /tmp/anon.zip" | sha256sum -c -; \

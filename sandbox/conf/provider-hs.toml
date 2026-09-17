@@ -1,0 +1,210 @@
+# THE HIDDEN PROVIDER (TOON_Network #43, spec §10, ADR 0008) — `hs` profile
+# only, mounted read-only at /etc/toon-provider/provider.toml by the
+# `provider-hs` compose service.
+#
+# THIS FILE IS A TEMPLATE, AND THE RUNNING PROVIDER READS THE RENDERED COPY.
+# `hidden = true` requires a `connector_url` at an `.anyone` host, and that
+# address does not exist until the `anon-hs` daemon has generated it — so
+# `make up-hs` runs scripts/hs-provider-address.sh, which writes
+# conf/.rendered/provider-hs.toml (this file with the address substituted) and
+# conf/.rendered/connector-provider-hs.toml beside it. The placeholder below is
+# a valid-shaped address that resolves to nothing, so `toon-provider routes`
+# still runs against THIS file and every gate below is still checked.
+#
+# WHAT MAKES IT DIFFERENT FROM conf/provider.toml AND conf/provider2.toml:
+#   - `hidden = true`, and so NO `public_ip` — a Hidden Provider publishes no
+#     host at all (the Profile carries `hidden: true` and every Listing the
+#     `hidden:true` label).
+#   - its connector is reachable ONLY at the `.anyone` address above; nothing
+#     of this provider's publishes a port to the host, and the hub does NOT
+#     peer with it. A tenant pays it DIRECTLY, through its own SOCKS proxy
+#     (spec Appendix A allows a direct client channel).
+#   - an `[anon]` table: the daemon's control port (one `.anyone` address per
+#     lease), the SOCKS port this provider's own outbound leaves through, the
+#     internal network every workload is attached to, and a settlement RPC on
+#     the private compose network rather than a public provider.
+#
+# Its workloads still run on the HOST daemon (the service mounts
+# /var/run/docker.sock), on id/port ranges disjoint from the other two
+# providers', so the three never fight over a container name or a host port.
+
+backend = "docker"
+provider_name = "TOON Sandbox Hidden Provider"
+
+# Every route is a suffix of this: g.toon.provider-hs.basic.v1.spawn, .extend,
+# the same pair for `smoke`, plus the free .availability / .status /
+# .terminate. Terminated by `provider-hs-connector` and by nothing else — the
+# hub has no route to it.
+ilp_address = "g.toon.provider-hs"
+
+# ── The Hidden Provider declaration (spec §10, ADR 0008) ────────────────────
+# A SELF-ASSERTION nobody outside can verify, so the app refuses to start
+# unless every hiding condition below is configured. There is deliberately no
+# `public_ip` line: setting one beside this is a startup refusal.
+hidden = true
+
+# THROWAWAY dev identity, committed like everything under keys/toon/. Hex.
+# Its public key (what a Lease Request's `p` tag must name) is
+# bdf4b4689d88c29fac6a7d2a350b9fc32faf70cee4661783fcce94214cdc5373.
+nostr_private_key = "ca744bd2d2def699becc4a4a850822f8b2fe91553466cefa5f6c048642727352"
+
+# THE SAME SANDBOX RELAY THE OTHER TWO PROVIDERS USE — reached over the
+# OVERLAY, not at `ws://relay:7100`. A Hidden Provider dials every relay in its
+# set through `anon.socks_proxy` with `socks5h` (spec §10 story 8: a clearnet
+# relay read names this host to its operator), and `anon` builds no circuit to
+# a private compose address — so the relay is published at virtual port 7100 of
+# THE ANYTOON DAEMON's address (conf/anonrc), which is this sandbox's stand-in
+# for "somewhere an exit could reach". RENDERED, like `connector_url` below,
+# but from the OTHER daemon's hostname: a daemon dialling its own hidden
+# service is the one overlay path that does not reliably build.
+relay_set = ["ws://unrenderedplaceholderaddressaaaaaaaaaaaaaaaaaaaaaaaaaaaa.anyone:7100"]
+
+gateway_url_pattern = "http://envoy:3000/raw/{txid}"
+capabilities = []
+
+# ── The Provider Directory (spec §4) ────────────────────────────────────────
+# RENDERED: scripts/hs-provider-address.sh rewrites this line with the address
+# `anon-hs` generated, so what a tenant reads off the relay is
+# http://<addr>.anyone/ilp and nothing else. The placeholder is a valid-shaped
+# `.anyone` host that resolves nowhere, which is what lets the committed file
+# pass the gate.
+connector_url = "http://unrenderedplaceholderaddressaaaaaaaaaaaaaaaaaaaaaaaaaaaa.anyone/ilp"
+
+# Copied verbatim from `provider-hs-connector`'s own self-description
+# (`GET /ilp/identity` -> .publicKey), so a tenant's comparison is
+# byte-for-byte (ADR 0011). Deterministic: it is the public half of
+# keys/toon/provider-hs-connector/signer.key, which is committed.
+connector_seal_key = "0x0420b6d903b8675598440d2dab02e0795490500e2ce045135703cc424d9e9390b613165f44e4ce1b95f567bf512321a2f20eac7ba0558aa13e02cd193c80d51141"
+
+isolation = "shared-kernel"
+
+# 30 s, like the other two providers: short enough to sit through.
+liveness_cadence_s = 30
+
+# Its OWN directory publisher, on its own wallet and its own channel
+# (docker-compose.yml, `directory-publisher-hs`). Three publishers sharing one
+# account would share one nonce watermark. This URL is NOT proxied and is not
+# meant to be: a publisher on this host's own private network is a packet that
+# crosses nothing anyone outside can watch (`is_private_url`), and the publish
+# request carries the proxy the publisher is to use for everything it dials in
+# turn.
+publish_url = "http://directory-publisher-hs:8081/publish"
+
+# The connector dials the app by compose service name; no port is published.
+http_bind_addr = "0.0.0.0:8080"
+handler_base_url = "http://provider-hs:8080"
+
+# Loopback only, reached from inside this same container by `docker compose
+# exec provider-hs toon-provider evict ...` — never a published port.
+operator_bind_addr = "127.0.0.1:8090"
+operator_url = "http://127.0.0.1:8090"
+
+# 100 workload ids -> SSH forwards 46000..46099, port blocks from 47000 (16 per
+# id, so up to 48599). DISJOINT from `provider` (1000-1099, 40000-40099,
+# 41000-42599) and `provider2` (1100-1199, 43000-43099, 44000-45599): all three
+# run their workloads on this one host daemon, which a real third provider
+# would not.
+workload_id_range_start = 1200
+workload_id_range_end = 1299
+ssh_port_start = 46000
+workload_port_start = 47000
+
+lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# ── Everything this provider needs from its `anon` daemon (spec §10) ─────────
+# The daemon is the `anon-hs` service; its config is conf/anonrc-hs, which
+# explains each surface at length. Each key here is a HIDING CONDITION: a
+# missing one is a startup refusal naming it.
+[anon]
+# The provider's OWN outbound — relay reads and writes, image fetches, the
+# publish request (M4-5, TOON_Network #42). `socks5h`, so the daemon resolves
+# every name and no lookup leaves this host.
+socks_proxy = "socks5h://172.30.1.2:9050"
+
+# THE SELF-HOSTED SETTLEMENT RPC (spec §10). `anvil` is this sandbox's own EVM
+# chain on the private compose network — the sandbox's answer to "runs its own
+# RPC", and a name that resolves only inside the project. The gate accepts
+# loopback, private ranges and names resolving only to them; a public RPC
+# provider is refused at load. On the HOST (`toon-provider routes`) the name
+# does not resolve at all, which the gate accepts with a warning and the
+# RUNNING provider re-checks.
+settlement_rpc_url = "http://anvil:8545"
+
+# WHERE THE DAEMON FORWARDS A PER-LEASE ADDRESS'S PORTS (M4-3, #40). This
+# provider's workloads publish their SSH forward and ports on the HOST
+# (0.0.0.0, through the lease's own ingress sidecar), so "the provider" as
+# `anon-hs` sees it is this host: 172.17.0.1, the docker0 address every
+# container on this daemon reaches it at. NOT 127.0.0.1, which inside the
+# daemon's own container is the daemon itself; and an IP rather than
+# `host.docker.internal` because `anon` resolves an ADD_ONION target when it
+# PARSES the command.
+forward_host = "172.17.0.1"
+
+# The control port, over which this provider creates one `.anyone` address per
+# lease (ADD_ONION) and destroys it when the lease ends (DEL_ONION). Cookie
+# authentication: the daemon writes the file, the provider proves it can read
+# it. The cookie volume is mounted read-only into this container; the daemon's
+# DataDirectory, which holds the address's private key, is NOT.
+[anon.control]
+addr = "172.30.1.2:9051"
+cookie_file = "/var/lib/anon/control/control_auth_cookie"
+
+# EVERY HIDDEN WORKLOAD'S ONLY ROUTE OUT (M4-4, TOON_Network #41). The compute
+# backend attaches the workload to this network instead of the default bridge
+# and points its resolver at the gateway. The network is `hs-egress` in
+# docker-compose.yml — `internal: true`, so Docker gives it no NAT and installs
+# no default route at all — and 10.203.0.2 is `anon-hs`'s fixed address on it,
+# whose PREROUTING rules REDIRECT the workload's TCP to the TransPort and its
+# DNS to the DNSPort. Direct egress is dropped by the NETWORK, not by anything
+# the image could ignore.
+#
+# The name is what DOCKER sees — the compose network `hs-egress` with this
+# project's prefix on it — not a compose service key: the provider shells out to
+# the host daemon, which knows only the full name.
+[anon.egress]
+network = "toon-sandbox_hs-egress"
+gateway = "10.203.0.2"
+
+# What `provider-hs-connector` settles in — the same two sandbox chains every
+# other node here settles on.
+[[settlement]]
+chain = "solana"
+token = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[[settlement]]
+chain = "evm:31337"
+token = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+# TWO TIERS, deliberately fewer than the public providers': this provider
+# exists to rehearse hiding, not to re-sell every tier. `basic` is the
+# three-minute one a lease can be left to expire on; `smoke` is the 30 s one an
+# acceptance test buys so "spawn, extend, wait for expiry" is a wait you can
+# sit through. Both are priced exactly as conf/connector-provider-hs.toml's
+# rows charge. KEEP `basic` FIRST.
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 180
+price = 1000
+capabilities = []
+capacity = 4
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
+
+[[listings]]
+name = "smoke"
+version = 1
+arch = "amd64"
+lease_interval_s = 30
+price = 1000
+capabilities = []
+capacity = 2
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 256
+storage_gb = 1
