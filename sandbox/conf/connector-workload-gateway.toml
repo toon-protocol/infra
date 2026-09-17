@@ -1,0 +1,37 @@
+# =============================================================================
+# workload-gateway-connector — THE WORKLOAD GATEWAY'S OWN CONNECTOR
+# (TOON_Network ADR 0013, spec §12; Milestone 5, #53), on client edge 3260.
+# =============================================================================
+# ADR 0013 puts a Workload Gateway behind its own connector like any other
+# TOON app, and this is that connector. What it is NOT, in this milestone, is
+# a payee: IT TERMINATES NO PAID ROUTE — pricing a gateway's service is
+# deferred (#46, Out of Scope) — and the gateway behind it holds no lease, no
+# channel and no mnemonic, and calls no paid route. So there are no
+# [[routes]], no [[peers]], no [[peer_channels]] and no [settlement.*] here:
+# nothing arrives that could be paid for and nothing leaves that pays. What
+# remains is the shape — an ILP identity, a client edge, a self-description at
+# http://localhost:3260/ilp — which is what the next milestone prices. The
+# hub does not peer with it (there is nothing to forward to), and the gateway's
+# HTTP listeners are published on their own host ports (3280, 3443), because
+# a browser reaches a hostname, not an ILP address.
+#
+# Copied from conf/connector-gas.toml with everything a payee needs removed;
+# see conf/connector-relay.toml for the shared provenance notes.
+
+client_edge_addr = "0.0.0.0:3000"
+state_dir = "/app/state"
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+[node]
+addresses = ["g.toon.workload-gateway"]
+http_endpoint = "http://127.0.0.1:3260/ilp"
+btp_endpoint = "ws://127.0.0.1:3260/ilp/btp"
+
+# Operator surface kept ON like every other node's, so the shape is complete:
+# `GET /claims` with the bearer token answers an empty book, which is the point.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"
