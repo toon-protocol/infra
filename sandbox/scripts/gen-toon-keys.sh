@@ -24,6 +24,16 @@
 #                                  value is embedded in conf/gas-station.conf
 #                                  (EVM_GAS_STATION_CONFIG_JSON) and its address
 #                                  in scripts/seed-toon-evm.sh
+#   RANDOM ONLY, no settlement keys at all:
+#     workload-gateway-connector/  the WORKLOAD GATEWAY's own connector
+#                                  (TOON_Network #53): signer + operator files
+#                                  and nothing else, because it terminates no
+#                                  paid route, holds no channel and settles
+#                                  nothing in this milestone
+#   NOT HERE: the Workload Gateway's own Nostr key, a committed literal in
+#   conf/workload-gateway.conf (GATEWAY_SECRET_KEY) exactly as each provider's
+#   nostr_private_key is in conf/provider*.toml — `openssl rand -hex 32`, and
+#   its public key in the comment beside it.
 #   COPIED from the connector repo (committed there for the same reason):
 #     usdc-mint.json usdc-authority.json — the deterministic local mock-USDC
 #     mint H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H and its authority
@@ -63,22 +73,31 @@ MN="test test test test test test test test test test test junk"
 CAST="docker run --rm --entrypoint cast ghcr.io/foundry-rs/foundry:v1.8.1"
 CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.08.28.1
 
-i=0
-for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 \
-           provider-connector:29:38 provider2-connector:30:39 provider-hs-connector:31:40; do
-  IFS=: read -r node ei si <<<"$pair"
+# The RANDOM files every connector node has — identity and operator credentials
+# — kept if present, and the operator allowlist derived from them.
+random_keys() {
+  local node=$1
   mkdir -p "$KEYS/$node"
   for k in signer.key operator-send.key operator-bearer.token; do
     [[ -f "$KEYS/$node/$k" ]] || openssl rand -hex 32 >"$KEYS/$node/$k"
   done
-  $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$ei" | sed 's/^0x//' >"$KEYS/$node/settlement.key"
-  $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$si" | sed 's/^0x//' >"$KEYS/$node/settlement-solana.key"
   docker run --rm -v "$KEYS/$node:/w:ro" "$CONNECTOR_IMAGE" \
     send --operator-key /w/operator-send.key --print-keyid \
     | { echo "# The PUBLIC half of operator-send.key. An allowlist entry holds no secret."; cat; } \
     >"$KEYS/$node/operator-write.keys"
+}
+
+for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 \
+           provider-connector:29:38 provider2-connector:30:39 provider-hs-connector:31:40; do
+  IFS=: read -r node ei si <<<"$pair"
+  random_keys "$node"
+  $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$ei" | sed 's/^0x//' >"$KEYS/$node/settlement.key"
+  $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$si" | sed 's/^0x//' >"$KEYS/$node/settlement-solana.key"
   echo "$node: evm $($CAST wallet address --private-key 0x$(cat "$KEYS/$node/settlement.key"))"
 done
+# The Workload Gateway's connector: identity and operator credentials only.
+random_keys workload-gateway-connector
+echo "workload-gateway-connector: no settlement key (terminates no paid route)"
 $CAST wallet private-key --mnemonic "$MN" --mnemonic-index 27 | sed 's/^0x//' >"$KEYS/gas-evm-relayer.key"
 echo "gas-evm-relayer: evm $($CAST wallet address --private-key 0x$(cat "$KEYS/gas-evm-relayer.key"))"
 chmod -R a+rX "$KEYS"

@@ -20,6 +20,18 @@ import { ToonClient } from '@toon-protocol/client';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
+/**
+ * A host-run script's usage: its own header comment, printed to stderr, then
+ * exit 2 (or 0 for an explicit --help). `problem` is printed first when given.
+ * Pass `import.meta.url`.
+ */
+export function usageFromHeader(scriptUrl, tag, problem) {
+  if (problem) console.error(`[${tag}] ${problem}\n`);
+  console.error(
+    readFileSync(new URL(scriptUrl), 'utf8').split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'),
+  );
+  process.exit(problem ? 2 : 0);
+}
 export const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 export const PROVIDER_EDGE = process.env.PROVIDER_EDGE_URL ?? 'http://localhost:3240';
 export const PROVIDER2_EDGE = process.env.PROVIDER2_EDGE_URL ?? 'http://localhost:3250';

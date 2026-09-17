@@ -107,9 +107,22 @@ name: toon-sandbox
 #             point `make up-hs` (= --profile full --profile hs) + `make
 #             smoke-hs`; `make up` and `make smoke` never render it. See the
 #             "The hidden-service ingress" section at the bottom of this file.
+#   gateway   TWO EXTRA SERVICES ON TOP OF `full` (or `payments`), never on
+#             their own: the WORKLOAD GATEWAY (TOON_Network ADR 0013, spec
+#             §12, Milestone 5) — a stable hostname per workload, keyed by its
+#             workload id, resolved to whichever provider is running it — and
+#             its own connector, which in this milestone terminates no paid
+#             route. It holds no lease and pays nothing; its whole authority
+#             is the Gateway Grant a tenant publishes (scripts/grant.mjs).
+#             Entry point `make up-gateway` (= --profile full --profile
+#             gateway; `COMPOSE_PROFILE=payments` for the payment layer alone)
+#             + `curl http://<label>.gw.localhost:3280/`. Nothing in `full`
+#             names it and it names nothing `hs`-only: `make up-gateway-hs`
+#             adds it on top of `make up-hs` for the hidden path by hand. See
+#             "The Workload Gateway" below.
 #
-# `make up` / `make up-payments` / `make up-credentials` / `make up-hs` are the
-# supported entry points; see Makefile.
+# `make up` / `make up-payments` / `make up-credentials` / `make up-hs` /
+# `make up-gateway` are the supported entry points; see Makefile.
 
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
@@ -1439,6 +1452,111 @@ services:
     logging: *chain-logging
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # The Workload Gateway — profile `gateway` (`make up-gateway`)
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # TOON_Network ADR 0013, spec §12; Milestone 5 (#46), ticket #53. A workload
+  # is reachable today only at whichever provider runs it, on a host and port
+  # that provider chose, and a Hidden Provider gives no host at all; a Takeover
+  # moves it. The Workload Gateway is the party that owns the stable name: it
+  # serves `<canonical label>.gw.localhost` — the label derived from the
+  # workload id and from nothing else — and forwards to the running member of
+  # the workload's Standby Set, which it finds by sending each member a
+  # `status` signed with its own key and carrying the tenant's GATEWAY GRANT
+  # (kind 30438). No tenant contacts it: publishing the grant is the whole
+  # ceremony, and scripts/grant.mjs is the one command that does it.
+  #
+  # NOT the AR.IO gateway (`envoy`/`core`, the permaweb half): CONTEXT.md keeps
+  # the two apart, so nothing here is called "gateway" unqualified.
+  #
+  # IT HOLDS NO LEASE AND PAYS NOTHING. No channel, no mnemonic, no seed job
+  # funds it, and it calls no paid route: `status` is free, a relay read is
+  # free, and the grant is its whole authority. Its own connector below
+  # terminates no paid route in this milestone (#46, Out of Scope) — the shape
+  # is here, the price is not.
+  #
+  # TWO THINGS ABOUT THIS SANDBOX, and only this sandbox, are in
+  # conf/workload-gateway.conf's GATEWAY_DIAL_REWRITE: a Profile's
+  # connector_url names a connector edge that terminates sealed packets, where
+  # the gateway sends `status` plainly — so it is dialled at the provider APP's
+  # own free route instead; and a running member's access.host is 127.0.0.1,
+  # the HOST daemon the workloads publish on, which from inside this container
+  # is dialled at host.docker.internal. That conf file says why at length.
+  workload-gateway:
+    profiles: ['gateway']
+    build:
+      # The gateway sibling checkout (toon-protocol/gateway). Relative so the
+      # file stays portable; only `gateway` renders it.
+      context: ${GATEWAY_CONTEXT:-../../gateway}
+    env_file:
+      - conf/workload-gateway.conf
+      # The hidden provider's `status` rewrite, rendered by
+      # scripts/hs-provider-address.sh with the address `anon-hs` generated
+      # (`make up-gateway-hs`); absent under `make up-gateway`, deliberately —
+      # a missing optional env_file is not an error, and the gateway then knows
+      # no hidden member, which is right: `make up` renders none.
+      - path: conf/.rendered/workload-gateway-hs.env
+        required: false
+    volumes:
+      # The self-signed wildcard certificate for *.gw.localhost and its key —
+      # committed dev material, like everything under conf/ and keys/. Read
+      # once at startup.
+      - ./conf/workload-gateway-tls:/etc/workload-gateway/tls:ro
+    ports:
+      - '3280:8080' # plain HTTP: `curl http://<label>.gw.localhost:3280/`
+      - '3443:8443' # HTTPS with the dev certificate: `curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://<label>.gw.localhost:3443/`
+    extra_hosts:
+      # Where GATEWAY_DIAL_REWRITE sends a member's 127.0.0.1: this host, as
+      # the daemon publishes the workloads' ports on it.
+      - 'host.docker.internal:host-gateway'
+    networks:
+      default: {}
+      # The buyer's SOCKS proxy (`anon-client`, `hs` only) lives on this network
+      # and nowhere else; TOON_SOCKS_PROXY names it, and a gateway carrying
+      # TOON_Network #52's `.anyone` path dials it. Joining it under
+      # `make up-gateway` alone creates an empty network and dials nothing.
+      hs-payer: {}
+    healthcheck:
+      # The gateway answers a hostname it holds no grant for — `127.0.0.1` is
+      # one — with its own 503 and dials nothing (spec §12.3): a liveness probe
+      # that touches no provider. node:22-slim has no curl.
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8080/').then((r) => process.exit(r.status === 503 && r.headers.get('toon-gateway-reason') === 'no_grant' ? 0 : 1), () => process.exit(1))"]
+      # 15 s, not the 5 s the rest of this file uses: the probe is a node
+      # process, and each probe is a line in the gateway's request log.
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 5s
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # The gateway's OWN connector (ADR 0013): the next free client edge, 3260,
+  # its own key directory and its own state volume — and NO routes, peers,
+  # channels or settlement, because it terminates no paid route in this
+  # milestone (conf/connector-workload-gateway.toml says why). It is the one
+  # connector here the hub does not peer with: there is nothing to forward to.
+  # It starts after the gateway is healthy for the same reason the provider
+  # connectors start after their apps.
+  workload-gateway-connector:
+    profiles: ['gateway']
+    image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./conf/connector-workload-gateway.toml:/app/config/connector.toml:ro
+      - ./keys/toon/workload-gateway-connector:/app/data:ro
+      - workload-gateway-connector-state:/app/state
+    ports:
+      - '3260:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      workload-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # The hidden-service ingress — profile `hs` ONLY (`make up-hs`)
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Everything below rehearses the one production shape the rest of this file
@@ -1930,8 +2048,9 @@ services:
     logging: *chain-logging
 
 networks:
-  # The buyer's proxy, and nothing else — see `anon-client`. Rendered ONLY under
-  # the `hs` profile, so `make up` creates no such network.
+  # The buyer's proxy, and nothing else — see `anon-client`. Rendered under the
+  # `hs` profile, and under `gateway`, whose Workload Gateway is a buyer-side
+  # client of `.anyone` addresses too; `make up` creates no such network.
   hs-payer:
 
   # THE HIDDEN PROVIDER'S TWO NETWORKS (TOON_Network #43). Both are `hs`-only,
@@ -2017,3 +2136,6 @@ volumes:
   provider-hs-state:
   provider-hs-connector-state:
   directory-publisher-hs-state:
+  # The Workload Gateway's connector (`gateway` profile): a claim journal that
+  # stays empty in this milestone, on a volume of its own like every other.
+  workload-gateway-connector-state:
