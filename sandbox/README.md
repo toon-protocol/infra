@@ -98,6 +98,14 @@ hub's edge:
    both ends of the run and requires the ANYONE rate to have **moved**: every
    other assertion would pass against a frozen TWAP.
 
+Opt-in on top of all that, the **Workload Gateway** (TOON_Network Milestone 5,
+ADR 0013, spec §12): a stable hostname per workload, keyed by its workload id
+and resolved to whichever sandbox provider is running it, behind a connector
+of its own — `make up-gateway`, then publish a Gateway Grant with one command
+and `curl http://<label>.gw.localhost:3280/` (§2, *The Workload Gateway*).
+`make smoke-m5` is that path as an acceptance test, with a Takeover in the
+middle of it.
+
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
 hidden service, which is how the credentials issuer actually deploys. That is
@@ -138,14 +146,25 @@ hold the detailed findings).
   `make up-credentials` preflight it (`make setup` only prints a note). Only
   `claim-minter/` is used — the issuer itself is the upstream image, pulled
   and run unmodified. The `payments` profile never builds it
+- **`gateway` profile only** — the **gateway sibling checkout** at
+  `../../gateway` (toon-protocol/gateway): the Workload Gateway image is BUILT
+  from it (it publishes no image). Override with `GATEWAY_CONTEXT` if your
+  checkout lives elsewhere: `make up-gateway GATEWAY_CONTEXT=/path/to/gateway`.
+  Its tenant side, `scripts/grant.mjs`, runs the `grant` tool out of the
+  **provider checkout** (`../../provider/tools/grant`, the same checkout the
+  provider images build from); `make setup` installs that tool's deps
 - Free host ports: 3000, 3004, 5100, 4566, 1984, 8545, 8899, 8900, 3200,
   3210, 3220, 3230, 3240, 3250, 3300, 3400, 7100 — the `payments` profile
   only needs 8545, 8899, 8900, 3200, 3240, 3250 and 7100 (plus 40000–42599
   for the first provider's workload SSH forwards and ports and 43000–45599
   for the second's — disjoint on purpose, both providers publish on this one
-  host daemon); `credentials` needs the first five plus 3230
+  host daemon); `credentials` needs the first five plus 3230; `gateway` adds
+  3260 (the gateway's connector), 3280 (its plain listener) and 3443 (TLS)
 - **Full stack only** — `*.localhost` resolving to loopback (default on
-  modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`)
+  modern Linux/macOS resolvers; check with `getent hosts foo.ar.localhost`).
+  The `gateway` profile leans on the same thing for `*.gw.localhost`, with a
+  52-character label — §2, *The Workload Gateway*, says how to check and what
+  to do when it does not
 
 ### Cold start
 
@@ -307,6 +326,40 @@ verdict says it is not a pass. `make smoke-m1` and `make smoke-m2` still
 pass afterwards. **Milestone 4's, `make smoke-m4`, lives on the `hs` profile**
 — it buys from the hidden provider over the real Anyone network, so it is
 documented with `make smoke-hs` under *Hidden-service ingress* below.
+
+**`make smoke-m5` — Milestone 5's acceptance test** (TOON_Network #46 / #54,
+`scripts/smoke-milestone5.mjs`): the **Workload Gateway** end to end, and the
+milestone's promise in one sentence — *a workload has a stable URL that
+survives a Takeover with no tenant online*. It needs the `gateway` profile
+(`make up-gateway`, or `make up-gateway COMPOSE_PROFILE=payments`); §2's *The
+Workload Gateway* is the same path by hand. First the gateway's own connector
+(`http://localhost:3260/ilp`) is read and terminates **no paid route** — a
+gateway is party to no lease (ADR 0013) — and a hostname it holds no grant for
+is answered by the gateway itself, `503 no_grant`, dialling nothing. Then a
+tenant spawns `traefik/whoami` on container port **80** across the Standby Set
+`[provider, provider2]` (the `smoke-m3` shape, with `ports`) and publishes ONE
+**Gateway Grant** with `node scripts/grant.mjs`: kind 30438 on the relay, read
+back from it, naming the sandbox gateway in its `p` tag, this workload, the
+`http_port`, both members primary first, an expiry and a fresh short name.
+**Nothing else is told to the gateway**; publishing the grant is the whole
+ceremony, and the tenant's part ends there. The canonical hostname (the
+52-character base32 of the workload id) and the grant's name then both answer
+with the workload's **own body**, over HTTP and over HTTPS with the committed
+dev certificate, carrying the tenant's `Host` unchanged and the
+`X-Forwarded-For` / `-Proto` / `-Host` of spec §12.5. `docker compose stop
+provider` next, and the `smoke-m3` timeline runs underneath: the standby
+announces a Takeover on the relay, the gateway's own settle window (two
+cadences from the claim's `created_at`) passes, and **the same two URLs come
+back answered by the copy on the standby** — whoami reports its own container,
+so the move is visible in the response body and in nobody's log. The restarted
+primary stands down, leaving one copy; `terminate` on both leases leaves both
+URLs answering `503 no_running_member` in spec §5's error shape and in the
+`toon-gateway-reason` header; and neither provider's peer book grew by a single
+unit for anything the gateway asked, because `status` is free and a gateway
+calls no other route. Buys the 600 s `warm` tier on both providers; six to
+seven minutes, four of them the takeover timeline. Like `smoke-m3` it stops and
+restarts the FIRST provider's container, so run it alone. `make smoke-m1` to
+`make smoke-m4` still pass afterwards.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -612,6 +665,208 @@ own `[[peers]]` row names), so hub-routed purchases still work; but
 `make down` keeps it (same address next `make up-hs`), `make clean` wipes it and
 the next cold start publishes a new one. In a deployment that same wipe would
 strand every buyer's configuration silently; in a sandbox it is expected.
+
+### The Workload Gateway (the `gateway` profile)
+
+A workload is reachable, so far, only at whichever provider is running it — a
+host and a host port that provider chose, or for the hidden provider a
+per-lease `.anyone` address and no host at all — and a Takeover (`make
+smoke-m3`) moves it. **The Workload Gateway** (TOON_Network Milestone 5, ADR
+0013, spec §12) is the party that owns the stable name: it serves every
+granted workload at
+
+```
+http://<canonical label>.gw.localhost:3280/      the plain listener, for curl and smokes
+https://<canonical label>.gw.localhost:3443/     TLS, with the self-signed wildcard below
+```
+
+where the canonical label is the **lowercase, unpadded base32 of the workload
+id** — 52 characters, derived and never assigned — and forwards each request
+to whichever member of the workload's Standby Set is running it. It finds that
+member by sending every member a `status` signed with **its own key** and
+carrying the tenant's **Gateway Grant** (kind 30438): a signed, published
+delegation naming one gateway, one workload, the HTTP port and the Standby
+Set, with an expiry. No tenant ever contacts the gateway; publishing the grant
+is the whole ceremony. **The gateway holds no lease, pays nothing and calls no
+paid route**, and its own connector terminates no paid route in this
+milestone — the shape ADR 0013 asks for is here, the price is deferred.
+
+(Not the AR.IO gateway of §1 — `CONTEXT.md` never says "gateway" unqualified,
+and neither does anything in this profile: the services are `workload-gateway`
+and `workload-gateway-connector`, the conf is `conf/workload-gateway.conf`.)
+
+```bash
+make up-gateway                            # = --profile full --profile gateway (+ the gateway checkout)
+make up-gateway COMPOSE_PROFILE=payments   # the payment layer + the gateway: no store or anytoon checkout
+make smoke-m5                              # Milestone 5's acceptance test: the whole path, with a Takeover
+```
+
+Two services on top of whatever profile you chose:
+
+| in `gateway` | what |
+|---|---|
+| `workload-gateway` | the gateway itself, built from `../../gateway`. Domain `gw.localhost`, key in `conf/workload-gateway.conf`, watching `ws://relay:7100` for grants naming it; HTTP on host **3280**, HTTPS on **3443** with `conf/workload-gateway-tls/`; its SOCKS proxy for `.anyone` hosts pointed at the `hs` profile's `anon-client` (validated at startup; dialled, once the gateway carries TOON_Network #52's `.anyone` path, only when a grant names a hidden member) |
+| `workload-gateway-connector` | its own connector (ADR 0013), client edge **3260**, `conf/connector-workload-gateway.toml`: an ILP identity and a self-description and **no routes, peers, channels or settlement** — it terminates no paid route, so there is nothing to price and nothing to settle. The hub does not peer with it |
+
+`make smoke-m5` drives the whole of that and asserts on it, Takeover
+included (the smoke list in §2). Here it is by hand instead — four commands
+from a running stack to a URL:
+
+```bash
+# 1. a workload with an HTTP port. `traefik/whoami` on 80, the `warm` tier (600 s),
+#    paid through the hub from the smokes' buyer — exactly what the Milestone smokes do,
+#    as one command. Prints the tenant key, the workload id and the access block.
+#    (`--direct` pays the provider's own edge instead; §8 says when you want that.)
+node scripts/spawn.mjs
+#    a two-member Standby Set instead (the `make smoke-m3` shape; primary first):
+node scripts/spawn.mjs --standby provider --standby provider2
+
+# 2. the Gateway Grant, signed with THE KEY THAT SIGNED THE SPAWN (spec §6.5) and
+#    published as a paid g.toon.relay write from its own wallet (account index 4).
+#    spawn.mjs prints this exact command, filled in:
+node scripts/grant.mjs --workload <id> --key <tenant key> --http-port 80 --ports 80 \
+    --standby provider [--standby provider2] --expires-in 1h [--name whoami]
+#    -> one JSON report: the grant's address and event id, the relay that accepted it,
+#       and `hostnames` / `urls` — where the workload is now served
+
+# 3. open it. The first request after a grant may answer 503 `not_resolved` while the
+#    gateway asks the members; ask again.
+curl http://<canonical label>.gw.localhost:3280/
+curl http://whoami.gw.localhost:3280/                         # the --name, if it was free
+curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://<canonical label>.gw.localhost:3443/
+
+# 4. done with it (free; otherwise it expires with the lease interval)
+node scripts/spawn.mjs --terminate .toon-client/spawn-<id prefix>.json
+```
+
+`whoami` answers with the request it saw, which is the point of choosing it:
+`Host` is the name **you** used, and `X-Forwarded-For`, `X-Forwarded-Proto`
+(`https` on the 3443 listener) and `X-Forwarded-Host` are set (spec §12.5):
+
+```
+$ curl -i http://kwcrjzpok35a47emsfl63w5cmt2wii7cxjns57y3makzeligjilq.gw.localhost:3280/
+HTTP/1.1 200 OK
+Hostname: ac058da00dbb
+GET / HTTP/1.1
+Host: kwcrjzpok35a47emsfl63w5cmt2wii7cxjns57y3makzeligjilq.gw.localhost:3280
+X-Forwarded-For: 172.20.0.1
+X-Forwarded-Host: kwcrjzpok35a47emsfl63w5cmt2wii7cxjns57y3makzeligjilq.gw.localhost:3280
+X-Forwarded-Proto: http
+```
+
+and the gateway's own log (`docker compose --profile gateway logs
+workload-gateway`) says what it did: `holding a grant for workload … at
+<label>, until <expiry>`, then `workload … is running at 127.0.0.1:41000 on
+member b78bca6e…` — the provider's `status`, answered to the gateway's key on
+the strength of the grant.
+Renewal and rotation are the same act as publishing: run `grant.mjs` again
+with a later expiry, or with `--gateway <another key>`, and the addressable
+grant replaces itself on the relay (spec §3.1.3) — the gateway logs the
+replacement and needs no restart. A `--name` is first come, first served
+across every grant the gateway still holds (spec §12.6): a name another
+workload's unexpired grant holds is logged and dropped, and the canonical
+hostname still works — so a name that stopped resolving after a respawn is
+the *old* grant's, until it expires. What the gateway answers
+when it cannot forward is its own `503` with a reason in the body and in a
+`toon-gateway-reason` header — `no_grant`, `grant_expired`, `not_resolved`,
+`no_running_member`, `member_unreachable` (spec §12.3) — never a dropped
+connection: `curl -si http://anything.gw.localhost:3280/` shows the shape.
+
+**How `*.gw.localhost` resolves, and what to do when it does not.** Nothing is
+added to anyone's DNS or `/etc/hosts`. A modern stub resolver answers every
+name under `.localhost` with loopback — systemd-resolved does, and so do the
+resolvers this README already relies on for `*.ar.localhost` — and a
+52-character label is an ordinary label (the limit is 63). Check it the way
+§2 checks the permaweb names:
+
+```bash
+getent hosts vkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkva.gw.localhost   # -> ::1 / 127.0.0.1
+```
+
+If that prints nothing (macOS's resolver, for one, does not special-case
+subdomains of `localhost`), tell `curl` where the name lives instead of
+telling the system — either pins the name without touching DNS, and the
+gateway sees the same `Host`:
+
+```bash
+curl --resolve '<label>.gw.localhost:3280:127.0.0.1' http://<label>.gw.localhost:3280/
+curl -H 'Host: <label>.gw.localhost' http://localhost:3280/
+```
+
+(A browser is fine either way: Chromium and Firefox resolve `*.localhost` to
+loopback themselves.)
+
+**The certificate.** `conf/workload-gateway-tls/gw.localhost.{crt,key}` is a
+self-signed ECDSA P-256 certificate for `*.gw.localhost` (and `gw.localhost`),
+valid ten years, committed like every other throwaway under `conf/` and
+`keys/`. `curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://…`
+validates against it; a browser will warn once. It is not a CA and signs
+nothing else. Regenerate it with the one command in §6.9.
+
+**Sandbox-only, said plainly.** One line of `conf/workload-gateway.conf` is
+true here and would be wrong anywhere else: `GATEWAY_DIAL_REWRITE`. The
+gateway dials a member where its Profile and its `status` answer say it is,
+and in this sandbox neither is where the container can reach it — a Profile's
+`connector_url` is `http://provider-connector:3000/ilp`, a connector edge that
+terminates sealed packets, whereas the gateway sends `status` as the plain
+§6.1.1 body (its README, *How `status` is sent*), which the provider **app**
+serves at `provider:8080/status`; and a running member's `access.host` is
+`127.0.0.1`, this host, where the workloads are published, which from inside
+the container is the gateway itself. So the two connector names are dialled
+at the two apps, and `127.0.0.1` at `host.docker.internal`, at the gateway's
+one dial seam — the same request, the same free route, and no URL or header
+rewritten. It is the gateway's counterpart of the publisher's
+`TOON_ENDPOINT_REWRITE`. §6.9 has the whole of it.
+
+#### Reaching a hidden workload by hand
+
+A Hidden Provider's lease has no host, only a per-lease `.anyone` address
+(§6.8), and the gateway reaches one through its anon client — an ordinary
+client of that address, which is what puts a hidden workload on a public URL
+while its provider stays hidden (spec §12; the tenant's choice, stated in the
+spec). **This is not part of `make up-gateway`** and no smoke depends on it:
+the gateway's own tests cover the `.anyone` path in-process against a stub
+proxy, and this recipe is how to see it for real, with the same two verdicts as
+every `hs` rehearsal (a circuit that will not build is the network, not this
+sandbox). It needs a gateway built from a `milestone-5` that includes the
+`.anyone` dialling (TOON_Network #52).
+
+```bash
+make up-hs                 # the three daemons, the hidden provider (§6.8); minutes
+make up-gateway-hs         # the gateway on top, with the hidden provider's status rewrite rendered
+```
+
+`up-gateway-hs` re-renders `conf/.rendered/workload-gateway-hs.env` — the
+committed `GATEWAY_DIAL_REWRITE` plus one entry, `<hidden provider
+address>.anyone:80` dialled at `provider-hs:8080` — and starts the two
+services with the rendered `hs` configs passed again, so nothing already up is
+recreated. The one honest shortcut in it: the hidden provider's **`status`**
+is asked out of band on the compose network, for the same reason as the public
+providers' (its connector terminates sealed packets only) and in the same way
+`smoke-m4`'s preflight reads that connector's self-description. **The lease
+itself is not shortcut**: its `access.host` is the per-lease `.anyone`
+address, nothing rewrites it, and the gateway can only dial it through
+`socks5h://anon-client:9050` — which is the property the recipe shows.
+
+```bash
+# a lease on the hidden provider, over the circuit: scripts/smoke-milestone4.mjs step 3 is the
+# reference — a buyer with the address and the proxy (account index 6, minting its own USDC),
+# a spawn with `ports: [{ container_port: 80 }]` and an HTTP image. Keep the tenant key and
+# the workload id it prints.
+#
+# the grant, naming the hidden provider as the one member:
+node scripts/grant.mjs --workload <id> --key <tenant key> --http-port 80 --ports 80 \
+    --standby provider-hs --expires-in 1h
+#
+# then the URL, and the gateway's log showing the dial:
+curl http://<canonical label>.gw.localhost:3280/
+docker compose --profile hs --profile gateway logs --tail 20 workload-gateway
+```
+
+A first `curl` can take a while and may answer `503 member_unreachable` once
+or twice: a fresh per-lease address needs its descriptor published and
+fetched before the first circuit builds, exactly as `smoke-m4` waits for SSH.
+`docker compose --profile hs restart anon-client` is the same remedy as there.
 
 > **Driving compose by hand:** every service carries a profile, so a bare
 > `docker compose …` in `sandbox/` selects nothing and does nothing. Pass the
@@ -1695,6 +1950,98 @@ TOON-store image (§Milestone 2) cannot be fetched by this provider today. Both
 are sandbox facts rather than protocol ones, and neither is on the path of a
 lease spawned from a registry reference.
 
+### 6.9 The Workload Gateway (`gateway` profile)
+
+Read §2's *The Workload Gateway* first; this is how the two services are put
+together and which of it is this sandbox's rather than the protocol's.
+
+**The gateway is built, not pulled.** `docker-compose.yml`'s `workload-gateway`
+builds `${GATEWAY_CONTEXT:-../../gateway}` — the gateway repo's own
+`Dockerfile`, a `node:22-slim` image running `src/main.mjs` — the way the
+providers build from `../../provider`. Its configuration is environment only
+(`conf/workload-gateway.conf`, an `env_file` like the relay's); there is no
+config file to drift. What that file sets, and where each value comes from:
+
+| variable | value | why |
+|---|---|---|
+| `GATEWAY_SECRET_KEY` | a committed throwaway, pubkey `e5bbfb59…674ed` | the key a grant names (`gateway` and `p`) and the key `status` is signed with. Generated with `openssl rand -hex 32` and committed exactly as each provider's `nostr_private_key` is; `scripts/grant.mjs` derives the pubkey from this line |
+| `GATEWAY_DOMAIN` | `gw.localhost` | resolves to loopback with nothing added to DNS (§2) |
+| `GATEWAY_RELAYS` | `ws://relay:7100` | the relay by its compose name; the gateway also watches every relay a member's Profile names, which here is the same one under the same name |
+| `GATEWAY_HTTP_PORT` / `GATEWAY_HTTPS_PORT` | `8080` / `8443`, published at host **3280** / **3443** | both listeners side by side: TLS is what spec §12.2 requires, the plain one is what smokes and `curl` use |
+| `GATEWAY_TLS_CERT` / `_KEY` | `conf/workload-gateway-tls/gw.localhost.{crt,key}`, mounted read-only | a self-signed ECDSA P-256 wildcard for `*.gw.localhost` and `gw.localhost`, ten years, not a CA |
+| `TOON_SOCKS_PROXY` | `socks5h://anon-client:9050` | the `hs` profile's buyer-side proxy, on the `hs-payer` network the gateway joins. Only validated at startup; dialled the first time a grant names a hidden member — by a gateway that carries TOON_Network #52's `.anyone` path (before that, an `.anyone` host is refused by name and answered `member_unreachable`). Under `make up-gateway` alone no such container exists and nothing is dialled |
+| `GATEWAY_DIAL_REWRITE` | three entries, below | **sandbox-only** |
+
+**The rewrite, and why it is honest.** The gateway dials two addresses it did
+not choose — a member's `connector_url` out of its Provider Profile, and the
+`access.host` a running member answers — and each names the member as *its
+own* clients reach it. Here neither is where this container can reach it:
+
+| the member says | the gateway dials | because |
+|---|---|---|
+| `http://provider-connector:3000/ilp` (the Profile) | `provider:8080` | the gateway sends `status` as the plain spec §6.1.1 body — `{ "request": <event> }` `POST`ed to the `status` path — which is what the provider **app** serves at its `handler_url`; a connector's client edge terminates *sealed* ILP packets and answers nothing on a plain `POST`. The gateway's README (*How `status` is sent*) chose that carriage on purpose: the route is free, and a sealing client would put a payment library into a process whose point is that it holds none. So the sandbox dials the connector's name at the app: the same signed request on the same free route, one hop shorter |
+| `http://provider2-connector:3000/ilp` | `provider2:8080` | the same |
+| `127.0.0.1` (`access.host`, from `public_ip` in `conf/provider*.toml`) | `host.docker.internal` | the workloads run on the **host** daemon and publish there; inside the container `127.0.0.1` is the gateway. `extra_hosts` maps the name to the host gateway |
+
+It is applied in front of the gateway's one dial seam (`src/rewrite.mjs`
+wrapping `src/dial.mjs`), so the `status` leg and the forwarding leg cannot
+disagree, and it rewrites no URL and no
+header — the request is what spec §6.5 fixes; only the socket moves. It is
+the gateway's counterpart of `TOON_ENDPOINT_REWRITE` on the directory
+publishers: "a client dials what a node publishes", and in a sandbox what a
+node publishes is a compose name. In a deployment the variable is unset.
+
+**The connector terminates nothing.** `conf/connector-workload-gateway.toml`
+is `conf/connector-gas.toml` with everything a payee needs removed: no
+`[[routes]]`, no `[[peers]]`, no `[[peer_channels]]`, no `[settlement.*]`.
+The connector image boots that way and answers its self-description at
+`http://localhost:3260/ilp` (`g.toon.workload-gateway`); its operator surface
+is on so `GET /claims` can show an empty book. That is the shape ADR 0013
+asks for and the price Milestone 5 defers (#46, Out of Scope): a gateway is
+run by or for its tenant, and the gateway behind it holds no lease, no
+channel, no mnemonic and calls no paid route. `keys/toon/workload-gateway-connector/`
+therefore holds a signer key and operator credentials and **no settlement
+keys** — `scripts/gen-toon-keys.sh` generates exactly that. The hub does not
+peer with it: there is nothing to forward to. Its HTTP listeners are published
+on their own host ports because a browser reaches a hostname, not an ILP
+address.
+
+**The grant script pays from its own wallet.** `scripts/grant.mjs` runs
+`../../provider/tools/grant/publish.mjs` (the tenant tool of TOON_Network #48,
+where it lives, so the sandbox publishes exactly the bytes that tool's tests
+prove against the wire fixtures) with the sandbox's values filled in: the hub
+at `:3200`, `ws://localhost:7100` written on `g.toon.relay`, the gateway's
+pubkey out of `conf/workload-gateway.conf`, Standby Set members by compose
+name out of `conf/provider*.toml`, and **account index 4** of the committed
+test phrase — its own wallet, its own channel and its own store
+(`.toon-client/grant-channels.json`), because a Milestone 5 smoke holds the
+smokes' buyer (index 0, `channels.json`) open while it runs this script, and
+two processes on one channel share one nonce watermark. `scripts/seed-toon-solana.mjs`
+funds it on every profile, like the three publishers' wallets. `scripts/spawn.mjs`,
+by contrast, *is* the smokes' buyer — it is the smokes' spawn as one command,
+for the README walk-through — and must not run while a smoke does.
+
+**Regenerating the certificate** (only ever needed to change the domain):
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+  -keyout conf/workload-gateway-tls/gw.localhost.key -out conf/workload-gateway-tls/gw.localhost.crt \
+  -subj '/CN=*.gw.localhost/O=TOON sandbox (development, self-signed)' \
+  -addext 'subjectAltName=DNS:*.gw.localhost,DNS:gw.localhost' \
+  -addext 'basicConstraints=critical,CA:FALSE' -addext 'extendedKeyUsage=serverAuth'
+```
+
+**Under `hs`.** `make up-gateway-hs` (after `make up-hs`) is the same two
+services plus one rendered file, `conf/.rendered/workload-gateway-hs.env`,
+written by `scripts/hs-provider-address.sh` beside the three it already
+renders: the committed `GATEWAY_DIAL_REWRITE` restated with a fourth entry,
+`<hidden provider address>.anyone:80` → `provider-hs:8080`, for the hidden
+provider's `status` (an env var cannot be merged, so the whole map is
+restated). `docker-compose.yml` reads it as an optional `env_file`, so under
+`make up-gateway` it is simply absent. The per-lease address a hidden lease
+answers in `access.host` is never rendered anywhere: the gateway dials it
+through the proxy or not at all.
+
 ## 7. Lifecycle and state
 
 - **`make down`** stops everything but keeps state: gateway/bundler data
@@ -1719,7 +2066,12 @@ lease spawned from a registry reference.
   control cookie (`anon-hs-control`) and its lease table
   (`provider-hs-state`) go the same way.
 - `make down` and `make clean` sweep **every** profile's containers, whichever
-  one brought them up, so `make up-hs && make down` leaves no daemon running.
+  one brought them up, so `make up-hs && make down` leaves no daemon running
+  (and no Workload Gateway).
+- **The Workload Gateway keeps no state worth the name.** Its grants live on the
+  relay and are re-read at every start; its connector's (empty) claim journal
+  is a named volume like every other. The grant script's channel store,
+  `.toon-client/grant-channels.json`, goes with `make clean` like the smokes'.
 
 ## 8. Troubleshooting
 
@@ -1733,6 +2085,44 @@ lease spawned from a registry reference.
 - **`*.ar.localhost` doesn't resolve**: use
   `curl -H 'Host: <name>.ar.localhost' http://localhost:3000/` (note: Node's
   `fetch()` silently drops a user-set Host header; curl is fine).
+- **`*.gw.localhost` doesn't resolve**: the same resolver, the same fix —
+  `curl --resolve '<label>.gw.localhost:3280:127.0.0.1' http://<label>.gw.localhost:3280/`
+  or the `Host` header form above against `http://localhost:3280/`. §2, *The
+  Workload Gateway*, has the `getent` check.
+- **The gateway answers `503`** — read the reason (`toon-gateway-reason`
+  header, and the body): `no_grant` means no grant naming *this* gateway's key
+  is on the relay for that label (`scripts/grant.mjs` without `--gateway` names
+  the right one; a label is the base32 of the workload id, not the hex);
+  `not_resolved` on the first request after a grant is the gateway still
+  asking — ask again; `member_unreachable` with the log saying `refused
+  status (invalid_request)` is a **provider built before Milestone 5** that
+  does not know the `grant` field — `docker compose --profile full up -d
+  --build provider provider2` rebuilds them from the provider checkout;
+  `no_running_member` means every member answered and none is running it
+  (expired, terminated, or a standby still `reserved`).
+- **A spawn through the hub refuses `T01` ("peer did not answer in time")
+  while the provider goes on and starts the lease**: the hub gives a peer 30 s,
+  and a spawn is a `docker pull` by digest plus a container start on the host
+  daemon. On a daemon that is slow — dozens of healthchecks, a `docker stats`
+  viewer, a leak of socket clients — a *local* `docker image inspect` can take
+  20 s and the spawn 200. **Measure it before blaming the code**: `time docker
+  ps -q` is milliseconds on a healthy daemon here and has been seen at a
+  hundred seconds on a loaded one, and the culprit is usually one process
+  holding thousands of `docker.sock` clients — `ss -x | grep -c docker.sock`
+  counts them, and
+
+  ```bash
+  for p in /proc/[0-9]*; do echo "$(ls $p/fd 2>/dev/null | wc -l) $(tr '\0' ' ' < $p/cmdline)"; done | sort -rn | head -3
+  ```
+
+  names it (a `lazydocker` or `docker stats` left open in another terminal is
+  the usual answer). Closing it is the fix — its connections go with it and
+  nothing in this sandbox needs restarting. `scripts/spawn.mjs --direct` pays the
+  provider's own edge instead, where the only timeout is the client's; the
+  Milestone 1 smoke's second half does the same. The refusal is billed
+  (ADR 0003). Every smoke that spawns through the hub — `smoke-m1`,
+  `smoke-m2`, `smoke-m3`, `smoke-m5` — fails this way on a loaded daemon, and
+  the failure is the machine rather than the change under test.
 - **Connector refuses to boot**: its startup is fail-closed on every
   settlement backend AND on every quote path — check that anvil is healthy
   (the healthcheck requires code at the registry, the sandbox extras, AND a

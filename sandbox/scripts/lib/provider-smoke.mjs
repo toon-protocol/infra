@@ -20,6 +20,18 @@ import { ToonClient } from '@toon-protocol/client';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
+/**
+ * A host-run script's usage: its own header comment, printed to stderr, then
+ * exit 2 (or 0 for an explicit --help). `problem` is printed first when given.
+ * Pass `import.meta.url`.
+ */
+export function usageFromHeader(scriptUrl, tag, problem) {
+  if (problem) console.error(`[${tag}] ${problem}\n`);
+  console.error(
+    readFileSync(new URL(scriptUrl), 'utf8').split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'),
+  );
+  process.exit(problem ? 2 : 0);
+}
 export const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
 export const PROVIDER_EDGE = process.env.PROVIDER_EDGE_URL ?? 'http://localhost:3240';
 export const PROVIDER2_EDGE = process.env.PROVIDER2_EDGE_URL ?? 'http://localhost:3250';
@@ -85,6 +97,24 @@ export const IMAGE = {
   digest: 'sha256:39ba37d50fdd6be1bf70644c871e5dcb9234ee79ac56424ea03ca08cadf1e7b0',
 };
 export const SSH_USER = 'tenant';
+
+// The HTTP workload image, PINNED BY DIGEST like the sshd one above:
+// `traefik/whoami` v1.10.2, an echo server on port 80 that answers with the
+// request it saw — the forwarding headers included — and with the name of the
+// container it is running in.
+//
+// THAT NAME IS WHY THIS IMAGE. A Standby Set's two copies of one image are two
+// containers on the host daemon, so they answer with two different
+// `Hostname:` lines, and a workload that MOVED from the primary to the standby
+// says so in its own body rather than in anybody's log (scripts/lib/
+// gateway-smoke.mjs's `whoamiHostname`). scripts/spawn.mjs and
+// scripts/smoke-milestone5.mjs both run it.
+export const HTTP_IMAGE = {
+  reference: 'traefik/whoami',
+  digest: 'sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420',
+};
+/** The container port `HTTP_IMAGE` serves on — what a Gateway Grant's `http_port` names (spec §3.1.3). */
+export const HTTP_CONTAINER_PORT = 80;
 
 // ── the providers, each its own config file ───────────────────────────────
 // The sandbox runs TWO compute providers (TOON_Network #34): `provider` behind
@@ -155,6 +185,20 @@ function readProvider({ service, connectorNode, confFile, edge, sol, channel }) 
     // does not.
     standbyRoute: (listing, version) => `${addr}.${listing}.v${version}.standby`,
     standbyExtendRoute: (listing, version) => `${addr}.${listing}.v${version}.standby.extend`,
+    /**
+     * The `toon-<id>` container names this provider may use, from the range it
+     * commits to in its own config — `{ lo, hi, holds('toon-1100') }`.
+     *
+     * The sandbox's two providers run their workloads on ONE host daemon, so
+     * which of them started a container is read off its name and nowhere else:
+     * a container in 1000-1099 is the first provider's and one in 1100-1199 is
+     * the second's, which is how a Takeover is seen from outside.
+     */
+    workloadIdRange() {
+      const lo = Number(confValue('workload_id_range_start'));
+      const hi = Number(confValue('workload_id_range_end'));
+      return { lo, hi, holds: (name) => { const id = Number(name.slice('toon-'.length)); return id >= lo && id <= hi; } };
+    },
   };
 }
 
@@ -495,6 +539,21 @@ export const spawnContent = (workloadId, tenant) => ({
   ssh_public_key: tenant.sshPublicKey,
   entrypoint: ['/bin/sh'],
   args: ['-c', 'PUBLIC_KEY="$SSH_PUBLIC_KEY" exec /init'],
+});
+/**
+ * The spawn content for `HTTP_IMAGE`: the whoami echo server, with the ports
+ * it serves on PUBLISHED — which is the difference that matters. A workload a
+ * gateway can front is one whose spawn asked for the HTTP port (spec §6.2), so
+ * that the provider publishes a `host_port` for it and `status` reports the
+ * pair the grant's `http_port` picks out (spec §12.4). The image needs no env,
+ * no entrypoint and no arguments; `ssh_public_key` is the tenant's as always.
+ */
+export const httpSpawnContent = (workloadId, tenant) => ({
+  workload_id: workloadId,
+  image: HTTP_IMAGE,
+  env: {},
+  ports: [{ container_port: HTTP_CONTAINER_PORT, protocol: 'tcp' }],
+  ssh_public_key: tenant.sshPublicKey,
 });
 
 /**

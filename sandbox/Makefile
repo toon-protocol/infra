@@ -12,6 +12,10 @@
 #                proxy and THE HIDDEN PROVIDER (its own daemon, connector,
 #                publisher and provider app, TOON_Network #43) — OPT-IN
 #                (`make up-hs`), never part of `up`/`smoke`
+#   gateway      `full` (or `payments`) PLUS the WORKLOAD GATEWAY and its own
+#                connector (TOON_Network ADR 0013, spec §12, Milestone 5) —
+#                `make up-gateway`; `make up-gateway-hs` puts it on top of
+#                `up-hs` for the hidden path by hand
 # Recursively expanded (`=`, not `:=`) so the payments targets can override
 # COMPOSE_PROFILE for their own recipes.
 COMPOSE_PROFILE ?= full
@@ -25,9 +29,14 @@ COMPOSE = docker compose --profile $(COMPOSE_PROFILE)
 # aimed straight at localhost:3230 is not. See README §2 + §6.6.
 COMPOSE_HS = docker compose --profile full --profile hs
 
+# `up-gateway` is `$(COMPOSE_PROFILE)` PLUS `gateway`: the Workload Gateway and
+# its connector on top of the whole stack (or, with COMPOSE_PROFILE=payments,
+# of the payment layer — the two providers and the relay are all it needs).
+COMPOSE_GW = $(COMPOSE) --profile gateway
+
 # down/clean must sweep EVERY profile's containers, whichever one brought them
 # up — otherwise `make up-hs && make down` leaves three daemons running.
-COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs
+COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway
 
 # The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
 # own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
@@ -52,16 +61,30 @@ HS_CONNECTOR_CONF = ./conf/.rendered/connector-anytoon.toml
 HS_PROVIDER_CONNECTOR_CONF = ./conf/.rendered/connector-provider-hs.toml
 HS_PROVIDER_CONF = ./conf/.rendered/provider-hs.toml
 
+# THE WORKLOAD GATEWAY (TOON_Network #53) is BUILT from the gateway sibling
+# checkout (toon-protocol/gateway; it publishes no image). Exported, so
+# docker-compose.yml's build context `${GATEWAY_CONTEXT:-../../gateway}` picks
+# it up — repoint it here (or in your environment) if your checkout lives
+# elsewhere. Keep the default RELATIVE: the compose file has to stay portable.
+export GATEWAY_CONTEXT ?= ../../gateway
+
+# The tenant-side `grant` tool (provider/tools/grant, TOON_Network #48) that
+# scripts/grant.mjs runs. It lives in the provider checkout — the same one the
+# provider images build from — and is run from there rather than vendored, so
+# the sandbox publishes exactly the bytes the tool's own tests prove.
+# `make setup` installs its dependencies when the checkout is present.
+export PROVIDER_CONTEXT ?= ../../provider
+
 # The anvil service bind-mounts the connector sibling's Foundry project
 # READ-WRITE and runs as the invoking user so forge's artifacts stay owned by
 # the developer (vendored pattern from connector/docker-compose.yml).
 export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
-.PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
+.PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-ci smoke-hs hs-address \
-        logs ps test require-store-context require-anytoon-context
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-ci smoke-hs hs-address \
+        logs ps test require-store-context require-anytoon-context require-gateway-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -112,6 +135,20 @@ require-anytoon-context:
 		exit 1; \
 	fi
 
+# Hard gate for the paths that BUILD the Workload Gateway image — `make
+# up-gateway` and `make up-gateway-hs`. Nothing else renders it.
+require-gateway-context:
+	@if [ ! -f "$(GATEWAY_CONTEXT)/Dockerfile" ]; then \
+		echo "ERROR: gateway checkout not found at $(GATEWAY_CONTEXT)"; \
+		echo "The sandbox builds the Workload Gateway image from a sibling checkout"; \
+		echo "of the gateway repo (toon-protocol/gateway; it publishes no image)."; \
+		echo "Clone it there, or set GATEWAY_CONTEXT to where your checkout lives:"; \
+		echo "    make up-gateway GATEWAY_CONTEXT=/path/to/gateway"; \
+		echo; \
+		echo "Only \`make up-gateway\` and \`make up-gateway-hs\` need it."; \
+		exit 1; \
+	fi
+
 ## one-time: install the script deps (needed by `make smoke` on the host).
 ## Deliberately does NOT require the store or anytoon checkouts — a
 ## payments-only developer must be able to run setup, up-payments and
@@ -132,6 +169,13 @@ setup:
 		echo; \
 	fi
 	npm ci
+	@if [ -f "$(PROVIDER_CONTEXT)/tools/grant/package.json" ]; then \
+		echo; echo "installing the grant tool's deps in $(PROVIDER_CONTEXT)/tools/grant (scripts/grant.mjs runs it from there)"; \
+		npm install --prefix "$(PROVIDER_CONTEXT)/tools/grant" --omit=dev --no-package-lock --no-audit --no-fund; \
+	else \
+		echo "NOTE: no provider checkout at $(PROVIDER_CONTEXT) — scripts/grant.mjs (the"; \
+		echo "      Workload Gateway's tenant side) will stop and explain until it exists."; \
+	fi
 
 ## start everything (chains + init jobs + gateway + bundler + TOON layer)
 up: require-store-context require-anytoon-context
@@ -210,6 +254,36 @@ up-hs: require-store-context require-anytoon-context
 	@echo "the production shape being rehearsed — so \`make smoke\` no longer reaches it"
 	@echo "directly on clearnet (its hub-routed leg is unaffected). Run \`make smoke\`"
 	@echo "against \`make up\`; run \`make smoke-hs\` against this. See README §2 + §6.6."
+
+## THE WORKLOAD GATEWAY (TOON_Network ADR 0013, spec §12; Milestone 5, #53):
+## `full` PLUS the gateway and its own connector — two services, built from the
+## gateway sibling checkout. `make up-gateway COMPOSE_PROFILE=payments` puts
+## them on the payment layer instead (the two providers and the relay are all
+## the gateway needs; no store checkout). Then a tenant spawns, publishes a
+## grant with `node scripts/grant.mjs …` and opens
+## http://<canonical label>.gw.localhost:3280/ — README §2, "The Workload
+## Gateway", walks the whole path. The `hs` profile is NOT part of this: the
+## hidden path is `make up-gateway-hs`, by hand.
+up-gateway: require-gateway-context
+	@if [ "$(COMPOSE_PROFILE)" = full ]; then $(MAKE) --no-print-directory require-store-context require-anytoon-context; fi
+	$(COMPOSE_GW) up -d --build
+
+## The gateway ON TOP OF `make up-hs` (run that first): the same two services
+## plus the hidden provider's `status` rewrite, rendered at the address
+## `anon-hs` generated (conf/.rendered/workload-gateway-hs.env, written by
+## scripts/hs-provider-address.sh). Nothing else is touched — the rendered
+## configs `up-hs` mounted are passed again so compose has no reason to
+## recreate the anytoon or hidden-provider containers and lose their circuits.
+## The recipe that uses it is README §2, "Reaching a hidden workload by hand".
+up-gateway-hs: require-gateway-context
+	@if [ ! -f "$(HS_PROVIDER_CONF)" ]; then \
+		echo "ERROR: $(HS_PROVIDER_CONF) is not rendered — run \`make up-hs\` first."; exit 1; \
+	fi
+	./scripts/hs-provider-address.sh
+	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) \
+	PROVIDER_HS_CONNECTOR_CONF=$(HS_PROVIDER_CONNECTOR_CONF) \
+	PROVIDER_HS_CONF=$(HS_PROVIDER_CONF) \
+	  $(COMPOSE_HS) --profile gateway up -d --build workload-gateway workload-gateway-connector
 
 ## print this sandbox's TWO `.anyone` addresses — the anytoon issuer path's and
 ## the HIDDEN PROVIDER's — re-rendering the three configs that name them.
@@ -462,6 +536,32 @@ smoke-hs:
 ## part); two to three minutes. TOON_M4_LISTING overrides the tier.
 smoke-m4:
 	node scripts/smoke-milestone4.mjs
+
+## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
+## for `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
+## WORKLOAD GATEWAY end to end — a workload has a stable URL that survives a
+## Takeover with no tenant online. The gateway's own connector terminates no
+## paid route and an unknown hostname is answered `no_grant` by the gateway
+## itself. A tenant spawns `traefik/whoami` on container port 80 across a
+## two-member Standby Set (the `make smoke-m3` shape, with ports), publishes ONE
+## Gateway Grant with `node scripts/grant.mjs` — kind 30438 on the relay, naming
+## the sandbox gateway, the workload, http_port 80, both members primary first,
+## an expiry and a fresh name — and stops there. Both the canonical hostname
+## (the 52-character base32 of the workload id) and the grant's name then answer
+## with the workload's OWN body over HTTP and HTTPS, `Host` preserved and the
+## §12.5 forwarding headers set. `docker compose stop provider`: the standby
+## announces a Takeover, settles and starts the workload, and THE SAME TWO URLS
+## come back answered by the copy on the STANDBY — whoami names its own
+## container, so the move is visible in the response body and in no log. The
+## restarted primary stands down; `terminate` leaves both URLs answering 503
+## `no_running_member` in the spec's error shape; and neither provider's book
+## grew by a unit for anything the gateway asked, because `status` is free and a
+## gateway calls no other route. Buys the 600 s `warm` tier on both providers;
+## six to seven minutes, four of them the takeover timeline. It stops and
+## restarts the FIRST provider's container, so nothing else should be spawning
+## on it meanwhile.
+smoke-m5:
+	node scripts/smoke-milestone5.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100
