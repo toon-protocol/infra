@@ -60,7 +60,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-ci smoke-hs hs-address \
         logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -437,6 +437,31 @@ test:
 ## (EX_TEMPFAIL) means network-side; exit 1 means this sandbox.
 smoke-hs:
 	node scripts/smoke-hs.mjs
+
+## MILESTONE 4 ACCEPTANCE TEST (TOON_Network #12 / #44, scripts/smoke-milestone4.mjs)
+## for `make up-hs` ONLY — it dials the REAL Anyone network, and like
+## `smoke-hs` it is a rehearsal with two verdicts, not a gate: exit 1 is this
+## sandbox, exit 75 (EX_TEMPFAIL) is the overlay not carrying. The hidden
+## provider end to end: its Profile on the relay says `hidden: true` with no
+## `host` and an `.anyone` connector_url, every Listing carries `hidden:true`
+## and the two public providers' carry none; a buyer with only that address
+## and the SOCKS proxy (account index 6, minting its own mock USDC over the
+## circuit) opens an EVM channel against the hidden connector and pays a
+## spawn there — no hub in the path; the answer's access.host is a PER-LEASE
+## `.anyone` address and no IP appears anywhere; on the host the lease is
+## three containers on the anon egress network in the 1200-1299 range and
+## anon-hs holds the address as a detached service; SSH to that address
+## through the proxy (an `nc -X 5` ProxyCommand) with the tenant's key, the
+## published port answering at the same address; from inside, a what-is-my-IP
+## service sees an exit and not this host, and a dial to the host at
+## anon.forward_host carries nothing back; terminate drops the address from
+## the daemon, the address stops answering, no `toon-<id>*` container
+## remains, Liveness recovers; the hidden connector's book grew by exactly the
+## listing price, on the sandbox chains (the private-RPC gate is asserted in
+## preflight). Buys the 180 s `basic` tier (a fresh descriptor is the slow
+## part); two to three minutes. TOON_M4_LISTING overrides the tier.
+smoke-m4:
+	node scripts/smoke-milestone4.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100
