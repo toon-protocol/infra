@@ -1235,14 +1235,20 @@ service acquires a fixed IP, this project pins no subnet that could collide with
 someone else's, and `make up-hs` can recreate the connector without leaving the
 daemon pointed at an address that has moved.
 
-**Two virtual ports on one address**, both in `conf/anonrc`:
+**Four virtual ports on one address**, all in `conf/anonrc`:
 
 | virtual port | forwards to | why |
 |---|---|---|
 | `80` | `anytoon-connector:3000` | the issuer path — the client edge a buyer pays through |
 | `8545` | `anvil:8545` | the buyer's chain RPC, on the same address and the same circuit |
+| `3200` | `relay-connector:3000` | the hub, for the HIDDEN PROVIDER's publisher (§6.8) |
+| `7100` | `relay:7100` | the relay, for the HIDDEN PROVIDER's own reads and writes (§6.8) |
 
 The second is not a second ingress; it is what makes the first honest. See §2.
+The last two are not this node's business at all: they are this sandbox's
+stand-in for "somewhere on clearnet an exit could reach", and they are on THIS
+daemon because the provider that dials them must not have to dial its own
+hidden service — §6.8.
 
 **The connector's config is rendered, and that is the load-bearing step.**
 `scripts/hs-address.sh` reads `hidden_service/hostname` out of the daemon and
