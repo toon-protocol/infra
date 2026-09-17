@@ -440,10 +440,14 @@ async function directory(address) {
 
   const patience = 2 * L.lease_interval_s + SWEEP_S + CADENCE;
   let liveness = null;
+  // UNEXPIRED, as well as at capacity: the relay keeps a Liveness across
+  // `make down`, and a hidden provider's first one after a restart arrives
+  // over a circuit, a cadence or two later — so the stale one is waited out.
   const settled = await waitFor(async () => {
     const found = await relayRead(directoryFilter(K_LIVENESS, P), 'liveness').catch(() => []);
     liveness = found[0] ?? null;
-    return found.length === 1 && JSON.parse(found[0].content).available?.[L.name] === L.capacity;
+    return found.length === 1 && Number(tagValues(found[0], 'expiration')[0]?.[0]) > nowSec()
+      && JSON.parse(found[0].content).available?.[L.name] === L.capacity;
   }, patience, 2000);
   if (!liveness) throw new SandboxFault(`no Liveness from ${P.pubkey} on the relay`);
   const expiration = Number(tagValues(liveness, 'expiration')[0]?.[0]);
