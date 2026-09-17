@@ -167,6 +167,16 @@ export const PROVIDERS = {
     service: 'provider2', connectorNode: 'provider2-connector', confFile: 'provider2.toml',
     edge: PROVIDER2_EDGE, sol: PROVIDER2_SOL, channel: PROVIDER2_CHANNEL,
   }),
+  // The HIDDEN provider (TOON_Network Milestone 4, `hs` profile only): no
+  // clearnet edge — its connector is reached at an `.anyone` address that
+  // exists only once `anon-hs` has generated it (conf/.rendered/) — and no hub
+  // peering, so no committed channel. Its pubkey, prices, listings, ranges and
+  // `[anon]` values are read from the committed template as for the other two;
+  // scripts/smoke-milestone4.mjs reads the address from the rendered copy.
+  'provider-hs': readProvider({
+    service: 'provider-hs', connectorNode: 'provider-hs-connector', confFile: 'provider-hs.toml',
+    edge: null, sol: null, channel: null,
+  }),
 };
 /** The first provider: what every helper here means by "the provider" unless told otherwise. */
 export const PROVIDER = PROVIDERS.provider;

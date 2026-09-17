@@ -8,8 +8,10 @@
 #   credentials  `payments` PLUS the Anyone credentials issuer path and the
 #                swap driver — the denomination boundary without the permaweb
 #                half. Needs the anytoon checkout, NOT the store one
-#   hs           `full` PLUS the anon daemon, its forwarder and the buyer's
-#                SOCKS proxy — OPT-IN (`make up-hs`), never part of `up`/`smoke`
+#   hs           `full` PLUS the anon daemon, its forwarder, the buyer's SOCKS
+#                proxy and THE HIDDEN PROVIDER (its own daemon, connector,
+#                publisher and provider app, TOON_Network #43) — OPT-IN
+#                (`make up-hs`), never part of `up`/`smoke`
 # Recursively expanded (`=`, not `:=`) so the payments targets can override
 # COMPOSE_PROFILE for their own recipes.
 COMPOSE_PROFILE ?= full
@@ -39,6 +41,17 @@ export ANON_SOCKS_PORT ?= 19050
 # target renders the committed config.
 HS_CONNECTOR_CONF = ./conf/.rendered/connector-anytoon.toml
 
+# THE HIDDEN PROVIDER'S rendered configs (TOON_Network #43), written by
+# scripts/hs-provider-address.sh with the address `anon-hs` generated. Two of
+# them are named here because two services mount them; the third
+# (conf/.rendered/hs-provider.env, the publisher's endpoints) is named by
+# docker-compose.yml's `env_file` instead. A hidden provider publishes its
+# address twice over — its connector advertises it, and its Provider Profile
+# carries it as `connector_url`, which `hidden = true` refuses to start
+# without — and reaches its own relay and hub over it as well.
+HS_PROVIDER_CONNECTOR_CONF = ./conf/.rendered/connector-provider-hs.toml
+HS_PROVIDER_CONF = ./conf/.rendered/provider-hs.toml
+
 # The anvil service bind-mounts the connector sibling's Foundry project
 # READ-WRITE and runs as the invoking user so forge's artifacts stay owned by
 # the developer (vendored pattern from connector/docker-compose.yml).
@@ -47,7 +60,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-ci smoke-hs hs-address \
         logs ps test require-store-context require-anytoon-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -156,23 +169,40 @@ up-hs: require-store-context require-anytoon-context
 	# circuits this target just spent two minutes waiting for, moments before
 	# smoke-hs needs them. (anytoon's Makefile learned this the same way.)
 	$(COMPOSE_HS) build
+	# The image a HIDDEN lease's two sidecars run, pre-pulled. A hidden lease is
+	# three containers (TOON_Network #41): `toon-<id>-egress`, which owns the
+	# network namespace on `hs-egress` and sets the one route out;
+	# `toon-<id>`, the workload itself, sharing that namespace; and
+	# `toon-<id>-ingress`, which republishes the lease's ports on the host. The
+	# first and last are this image, and without this line the FIRST hidden
+	# spawn pays for the pull inside the tenant's lease. Pinned by digest in
+	# provider/src/docker.rs (`HIDDEN_SIDECAR_IMAGE`) — keep the two in step.
+	@docker pull -q alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc >/dev/null
 	# The daemons FIRST and alone: the connector's config has to name an
 	# address only the daemon can generate, so the daemon cannot wait for it.
-	$(COMPOSE_HS) up -d anon anon-client
+	# THREE of them now — the hidden provider (TOON_Network #43) has one of its
+	# own, and `hs-provider-ingress` comes with it because the daemon's config
+	# names its pinned address.
+	$(COMPOSE_HS) up -d anon anon-client hs-provider-ingress anon-hs
 	@echo
-	@echo "waiting for both daemons to bootstrap against the REAL Anyone network."
+	@echo "waiting for all three daemons to bootstrap against the REAL Anyone network."
 	@echo "a minute or two is normal; a cold volume takes longer. Watch it with:"
-	@echo "    docker compose --profile hs logs -f anon anon-client"
+	@echo "    docker compose --profile hs logs -f anon anon-client anon-hs"
 	@echo
-	@$(call wait_healthy,anon anon-client)
-	# The address, out of the daemon and into the config the connector mounts.
+	@$(call wait_healthy,anon anon-client anon-hs)
+	# The addresses, out of the daemons and into the configs that mount them.
 	./scripts/hs-address.sh
+	./scripts/hs-provider-address.sh
 	# Now the rest of the stack, with the anytoon-connector recreated against
 	# the rendered config so it PUBLISHES the .anyone endpoint. A client dials
-	# what a node publishes, not what the caller typed.
-	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) $(COMPOSE_HS) up -d
+	# what a node publishes, not what the caller typed. The hidden provider and
+	# its connector mount their rendered configs for the same reason.
+	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) \
+	PROVIDER_HS_CONNECTOR_CONF=$(HS_PROVIDER_CONNECTOR_CONF) \
+	PROVIDER_HS_CONF=$(HS_PROVIDER_CONF) \
+	  $(COMPOSE_HS) up -d
 	@echo "  re-checking the daemons, in case the rest of the stack disturbed them"
-	@$(call wait_healthy,anon anon-client)
+	@$(call wait_healthy,anon anon-client anon-hs)
 	@echo
 	@echo "up. \`make smoke-hs\` buys a bundle over the circuit."
 	@echo
@@ -181,9 +211,11 @@ up-hs: require-store-context require-anytoon-context
 	@echo "directly on clearnet (its hub-routed leg is unaffected). Run \`make smoke\`"
 	@echo "against \`make up\`; run \`make smoke-hs\` against this. See README §2 + §6.6."
 
-## print this sandbox's `.anyone` address (re-renders the connector config).
+## print this sandbox's TWO `.anyone` addresses — the anytoon issuer path's and
+## the HIDDEN PROVIDER's — re-rendering the three configs that name them.
 hs-address:
 	./scripts/hs-address.sh
+	./scripts/hs-provider-address.sh
 
 # Waits until the named services report docker-healthy. `anon`'s healthcheck is
 # "hostname file exists AND Bootstrapped 100%", so this is a wait for a CIRCUIT,
@@ -405,6 +437,31 @@ test:
 ## (EX_TEMPFAIL) means network-side; exit 1 means this sandbox.
 smoke-hs:
 	node scripts/smoke-hs.mjs
+
+## MILESTONE 4 ACCEPTANCE TEST (TOON_Network #12 / #44, scripts/smoke-milestone4.mjs)
+## for `make up-hs` ONLY — it dials the REAL Anyone network, and like
+## `smoke-hs` it is a rehearsal with two verdicts, not a gate: exit 1 is this
+## sandbox, exit 75 (EX_TEMPFAIL) is the overlay not carrying. The hidden
+## provider end to end: its Profile on the relay says `hidden: true` with no
+## `host` and an `.anyone` connector_url, every Listing carries `hidden:true`
+## and the two public providers' carry none; a buyer with only that address
+## and the SOCKS proxy (account index 6, minting its own mock USDC over the
+## circuit) opens an EVM channel against the hidden connector and pays a
+## spawn there — no hub in the path; the answer's access.host is a PER-LEASE
+## `.anyone` address and no IP appears anywhere; on the host the lease is
+## three containers on the anon egress network in the 1200-1299 range and
+## anon-hs holds the address as a detached service; SSH to that address
+## through the proxy (an `nc -X 5` ProxyCommand) with the tenant's key, the
+## published port answering at the same address; from inside, a what-is-my-IP
+## service sees an exit and not this host, and a dial to the host at
+## anon.forward_host carries nothing back; terminate drops the address from
+## the daemon, the address stops answering, no `toon-<id>*` container
+## remains, Liveness recovers; the hidden connector's book grew by exactly the
+## listing price, on the sandbox chains (the private-RPC gate is asserted in
+## preflight). Buys the 180 s `basic` tier (a fresh descriptor is the slow
+## part); two to three minutes. TOON_M4_LISTING overrides the tier.
+smoke-m4:
+	node scripts/smoke-milestone4.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100

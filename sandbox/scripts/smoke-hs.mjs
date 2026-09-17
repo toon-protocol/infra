@@ -430,7 +430,9 @@ async function purchase({ address, price, token }, attempt) {
       info(`the chain does not back channel ${opened.channelId} (on-chain collateral below ${price}) —`);
       info('anvil is wiped by any restart, so a kept channel store can outlive its chain. Starting fresh.');
       await client.close?.().catch(() => {});
-      rmSync(STORE, { force: true });
+      // The watermark AND the binding beside it (`<store>.peers.json`): a
+      // binding left behind without its watermark refuses to open at all.
+      for (const f of [STORE, STORE.replace(/\.json$/, '.peers.json')]) rmSync(f, { force: true });
       client = await makeClient();
       opened = await client.channel.open({ deposit: DEPOSIT });
       const collateral = await collateralOf();

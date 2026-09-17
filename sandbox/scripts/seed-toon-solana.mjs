@@ -52,7 +52,11 @@ const TOKEN = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = address('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR');
 const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector',
-  'provider-connector', 'provider2-connector'];
+  'provider-connector', 'provider2-connector',
+  // The HIDDEN provider's connector (TOON_Network #43, the `hs` profile). It
+  // is seeded on every profile, like every other node here: a chain is seeded
+  // once and cold, and `make up-hs` must not need a re-seed to work.
+  'provider-hs-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
@@ -75,6 +79,10 @@ const PUBLISHER_USDC = 1_000_000_000n; // 1000 USDC — it deposits 10 of it
 // on account index 2 of the same phrase. It is a second wallet for the same
 // reason index 1 is a first one: one channel, one nonce watermark, one payer.
 const PUBLISHER2 = address('CqMbRgMuEhQi9BUS8xP44Wk5nENm48FqJnfjEi4eNb1k');
+// THE HIDDEN PROVIDER'S PUBLISHER (`directory-publisher-hs`, TOON_Network #43,
+// the `hs` profile), on account index 3. A third wallet for the reason the
+// second one exists: one channel, one nonce watermark, one payer.
+const PUBLISHER3 = address('9Tj3srBSxH7RFRCm8uharreY7ZBS49XSfpwCeYa7Xaqp');
 
 const rpc = createSolanaRpc(RPC_URL);
 const rpcSubscriptions = createSolanaRpcSubscriptions(WS_URL);
@@ -128,7 +136,7 @@ async function ata(owner) {
       return bal !== null && BigInt(bal.value.amount) > 0n;
     };
     const allFunded = (await Promise.all(
-      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER, PUBLISHER2].map(funded),
+      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER, PUBLISHER2, PUBLISHER3].map(funded),
     )).every(Boolean);
     if (allFunded) {
       console.log('[seed-toon-solana] mint + funded connector/buyer/publisher ATAs already exist — nothing to do.');
@@ -157,6 +165,7 @@ const airdropTargets = [
   ['buyer (the smoke test)', BUYER],
   ['directory-publisher (the provider’s relay-write payer)', PUBLISHER],
   ['directory-publisher2 (the second provider’s)', PUBLISHER2],
+  ['directory-publisher-hs (the hidden provider’s)', PUBLISHER3],
   ...NODES.map((n) => [n, nodeSigners[n].address]),
 ];
 for (const [who, addr] of airdropTargets) {
@@ -274,6 +283,16 @@ for (const n of NODES) {
   const publisher2Ata = await ata(PUBLISHER2);
   await sendIxs(authority, [createAtaIx(publisher2Ata, PUBLISHER2), mintToIx(publisher2Ata, PUBLISHER_USDC)],
     `directory-publisher2: ATA + 1000 USDC (${PUBLISHER2})`);
+}
+
+// ── 7. the HIDDEN provider's publisher ────────────────────────────────────
+// Its own wallet, its own ATA, its own channel — see section 6. Funded on
+// every profile even though only `hs` runs it: re-seeding a live chain to add
+// a wallet is the thing this avoids.
+{
+  const publisher3Ata = await ata(PUBLISHER3);
+  await sendIxs(authority, [createAtaIx(publisher3Ata, PUBLISHER3), mintToIx(publisher3Ata, PUBLISHER_USDC)],
+    `directory-publisher-hs: ATA + 1000 USDC (${PUBLISHER3})`);
 }
 
 console.log('\n[seed-toon-solana] done.');
