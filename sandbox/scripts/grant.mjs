@@ -59,18 +59,13 @@
 // (PROVIDER_CONTEXT overrides), rather than copied here: the sandbox publishes
 // exactly the bytes the tool's own tests prove against the wire fixtures.
 // `make setup` installs its dependencies.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { getPublicKey } from 'nostr-tools/pure';
 import { HUB, MNEMONIC, PROVIDERS, RELAY_WS, ROOT, RPC_URL, usageFromHeader } from './lib/provider-smoke.mjs';
+import { canonicalLabel, gatewayDomain, gatewayPubkey, urlsFor } from './lib/gateway-smoke.mjs';
 
-// The sandbox gateway's HOST-side listeners (docker-compose.yml publishes
-// 8080 -> 3280 and 8443 -> 3443), for the URLs printed at the end.
-const GATEWAY_HTTP_PORT = Number(process.env.GATEWAY_HTTP_PORT ?? 3280);
-const GATEWAY_HTTPS_PORT = Number(process.env.GATEWAY_HTTPS_PORT ?? 3443);
-const GATEWAY_CONF = join(ROOT, 'conf', 'workload-gateway.conf');
 const PROVIDER_CONTEXT = process.env.PROVIDER_CONTEXT ?? join(ROOT, '..', '..', 'provider');
 const TOOL_DIR = join(PROVIDER_CONTEXT, 'tools', 'grant');
 // Account index 4 of the committed test phrase: see scripts/seed-toon-solana.mjs.
@@ -80,40 +75,6 @@ const CHANNEL_STORE = join(ROOT, '.toon-client', 'grant-channels.json');
 const log = (m) => console.error(`[grant] ${m}`);
 const usage = (problem) => usageFromHeader(import.meta.url, 'grant', problem);
 
-/** A `KEY=value` line out of the gateway's env file, or throw naming it. */
-function gatewayConf(key) {
-  const text = readFileSync(GATEWAY_CONF, 'utf8');
-  const value = text.match(new RegExp(`^${key}=(.*)$`, 'm'))?.[1]?.trim();
-  if (!value) throw new Error(`conf/workload-gateway.conf has no ${key} line`);
-  return value;
-}
-/** The sandbox gateway's public key: what `make up-gateway` runs it with. */
-const sandboxGatewayPubkey = () =>
-  getPublicKey(Uint8Array.from(Buffer.from(gatewayConf('GATEWAY_SECRET_KEY'), 'hex')));
-const sandboxGatewayDomain = () => gatewayConf('GATEWAY_DOMAIN').toLowerCase();
-
-/**
- * RFC 4648 base32, lowercase, unpadded — the canonical label of spec §12.2, as
- * the gateway derives it (its src/hostname.mjs), so the URL printed here is
- * the one it serves. A smoke that wants this lifts it into scripts/lib/.
- */
-function canonicalLabel(workloadId) {
-  const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
-  let out = '';
-  let bits = 0;
-  let value = 0;
-  for (const byte of Buffer.from(workloadId, 'hex')) {
-    value = (value << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      out += alphabet[(value >>> bits) & 31];
-    }
-  }
-  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
-  return out;
-}
-
 /** A Standby Set member as given on the command line: a sandbox provider's name, or a pubkey. */
 function memberPubkey(member) {
   if (/^[0-9a-f]{64}$/.test(member)) return member;
@@ -122,14 +83,6 @@ function memberPubkey(member) {
     throw new Error(`--standby ${member} is neither a 64-hex pubkey nor a sandbox provider (${Object.keys(PROVIDERS).join(', ')})`);
   }
   return provider.pubkey;
-}
-
-/** The URLs a workload is served at under the sandbox gateway. */
-function urlsFor(labels, domain) {
-  return labels.flatMap((label) => [
-    `http://${label}.${domain}:${GATEWAY_HTTP_PORT}/`,
-    `https://${label}.${domain}:${GATEWAY_HTTPS_PORT}/`,
-  ]);
 }
 
 const { values } = (() => {
@@ -175,9 +128,9 @@ let gateway;
 let members;
 let domain;
 try {
-  gateway = values.gateway ?? sandboxGatewayPubkey();
+  gateway = values.gateway ?? gatewayPubkey();
   members = values.standby.map(memberPubkey);
-  domain = sandboxGatewayDomain();
+  domain = gatewayDomain();
 } catch (e) {
   usage(e.message);
 }
