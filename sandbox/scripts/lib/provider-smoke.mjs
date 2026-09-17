@@ -185,6 +185,20 @@ function readProvider({ service, connectorNode, confFile, edge, sol, channel }) 
     // does not.
     standbyRoute: (listing, version) => `${addr}.${listing}.v${version}.standby`,
     standbyExtendRoute: (listing, version) => `${addr}.${listing}.v${version}.standby.extend`,
+    /**
+     * The `toon-<id>` container names this provider may use, from the range it
+     * commits to in its own config — `{ lo, hi, holds('toon-1100') }`.
+     *
+     * The sandbox's two providers run their workloads on ONE host daemon, so
+     * which of them started a container is read off its name and nowhere else:
+     * a container in 1000-1099 is the first provider's and one in 1100-1199 is
+     * the second's, which is how a Takeover is seen from outside.
+     */
+    workloadIdRange() {
+      const lo = Number(confValue('workload_id_range_start'));
+      const hi = Number(confValue('workload_id_range_end'));
+      return { lo, hi, holds: (name) => { const id = Number(name.slice('toon-'.length)); return id >= lo && id <= hi; } };
+    },
   };
 }
 
@@ -534,11 +548,11 @@ export const spawnContent = (workloadId, tenant) => ({
  * pair the grant's `http_port` picks out (spec §12.4). The image needs no env,
  * no entrypoint and no arguments; `ssh_public_key` is the tenant's as always.
  */
-export const httpSpawnContent = (workloadId, tenant, ports = [HTTP_CONTAINER_PORT]) => ({
+export const httpSpawnContent = (workloadId, tenant) => ({
   workload_id: workloadId,
   image: HTTP_IMAGE,
   env: {},
-  ports: ports.map((container_port) => ({ container_port, protocol: 'tcp' })),
+  ports: [{ container_port: HTTP_CONTAINER_PORT, protocol: 'tcp' }],
   ssh_public_key: tenant.sshPublicKey,
 });
 

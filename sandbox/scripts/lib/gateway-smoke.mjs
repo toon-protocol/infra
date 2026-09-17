@@ -26,13 +26,13 @@ import { ROOT } from './provider-smoke.mjs';
 export const GATEWAY_HTTP_PORT = Number(process.env.GATEWAY_HTTP_PORT ?? 3280);
 export const GATEWAY_HTTPS_PORT = Number(process.env.GATEWAY_HTTPS_PORT ?? 3443);
 export const GATEWAY_EDGE = process.env.GATEWAY_EDGE_URL ?? 'http://localhost:3260';
-export const GATEWAY_CONF = join(ROOT, 'conf', 'workload-gateway.conf');
-export const GATEWAY_TLS_CERT = join(ROOT, 'conf', 'workload-gateway-tls', 'gw.localhost.crt');
+const GATEWAY_CONF = join(ROOT, 'conf', 'workload-gateway.conf');
+const GATEWAY_TLS_CERT = join(ROOT, 'conf', 'workload-gateway-tls', 'gw.localhost.crt');
 /** Mirrored from the provider's src/nostr/kinds.rs, as provider-smoke.mjs mirrors the rest: the Gateway Grant (spec §3.1.3). */
 export const K_GATEWAY_GRANT = 30438;
 
 /** A `KEY=value` line out of conf/workload-gateway.conf, or throw naming it. */
-export function gatewayConf(key) {
+function gatewayConf(key) {
   const text = readFileSync(GATEWAY_CONF, 'utf8');
   const value = text.match(new RegExp(`^${key}=(.*)$`, 'm'))?.[1]?.trim();
   if (!value) throw new Error(`conf/workload-gateway.conf has no ${key} line`);
@@ -144,3 +144,24 @@ export const whoamiHostname = (body) => body.match(/^Hostname:\s*(\S+)\s*$/m)?.[
 /** One header of a whoami answer's echoed request, e.g. `X-Forwarded-Proto`; null when absent. */
 export const whoamiHeader = (body, name) =>
   body.match(new RegExp(`^${name}:\\s*(.*)\\s*$`, 'mi'))?.[1]?.trim() ?? null;
+
+/**
+ * A gateway refusal's body, parsed and checked against spec §5's error shape —
+ * `{ error, message }` and nothing else, which is the shape every provider
+ * route answers a refusal in, so a tenant's tooling parses a gateway refusal
+ * with the code it already has (spec §12.3).
+ *
+ * Returns `{ error, message }` when the body is exactly that, and null for
+ * anything else — a body with a third key included, which is a body a tenant's
+ * parser would have to be taught about.
+ */
+export function errorBody(answer) {
+  let parsed;
+  try {
+    parsed = JSON.parse(answer.body);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  return Object.keys(parsed).sort().join() === 'error,message' ? parsed : null;
+}

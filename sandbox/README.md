@@ -2105,9 +2105,24 @@ through the proxy or not at all.
   and a spawn is a `docker pull` by digest plus a container start on the host
   daemon. On a daemon that is slow — dozens of healthchecks, a `docker stats`
   viewer, a leak of socket clients — a *local* `docker image inspect` can take
-  20 s and the spawn 200. `scripts/spawn.mjs --direct` pays the provider's own
-  edge instead, where the only timeout is the client's; the Milestone 1 smoke's
-  second half does the same. The refusal is billed (ADR 0003).
+  20 s and the spawn 200. **Measure it before blaming the code**: `time docker
+  ps -q` is milliseconds on a healthy daemon here and has been seen at a
+  hundred seconds on a loaded one, and the culprit is usually one process
+  holding thousands of `docker.sock` clients — `ss -x | grep -c docker.sock`
+  counts them, and
+
+  ```bash
+  for p in /proc/[0-9]*; do echo "$(ls $p/fd 2>/dev/null | wc -l) $(tr '\0' ' ' < $p/cmdline)"; done | sort -rn | head -3
+  ```
+
+  names it (a `lazydocker` or `docker stats` left open in another terminal is
+  the usual answer). Closing it is the fix — its connections go with it and
+  nothing in this sandbox needs restarting. `scripts/spawn.mjs --direct` pays the
+  provider's own edge instead, where the only timeout is the client's; the
+  Milestone 1 smoke's second half does the same. The refusal is billed
+  (ADR 0003). Every smoke that spawns through the hub — `smoke-m1`,
+  `smoke-m2`, `smoke-m3`, `smoke-m5` — fails this way on a loaded daemon, and
+  the failure is the machine rather than the change under test.
 - **Connector refuses to boot**: its startup is fail-closed on every
   settlement backend AND on every quote path — check that anvil is healthy
   (the healthcheck requires code at the registry, the sandbox extras, AND a

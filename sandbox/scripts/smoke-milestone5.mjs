@@ -9,7 +9,7 @@
 //   0.  the stack is up, with the gateway and its own connector; that
 //       connector terminates NO PAID ROUTE (ADR 0013: a gateway is not a
 //       party to a lease) and the gateway answers a hostname it holds no
-//       grant for with its own 503 `no_grant` — reaching no provider
+//       grant for with its OWN 503 `no_grant`, not a provider's
 //   1.  a tenant channel against the hub and the providers' books before
 //   2.  the SPAWN: one signed Lease Request with a two-member `standby_set`,
 //       an HTTP image (`traefik/whoami` on container port 80) and that port
@@ -25,16 +25,17 @@
 //       name, on the plain listener and over TLS, each carrying the workload's
 //       own body — whoami's `Hostname:` is the primary's container — and the
 //       forwarding headers of spec §12.5 with the tenant's `Host` preserved
-//   5.  the primary's container is STOPPED: the standby announces a Takeover
-//       on the relay, settles, and starts the workload in its own id range.
-//       THE TENANT DOES NOTHING. The same two URLs come back with the
-//       STANDBY's container in the body — the same names, a different copy
-//   6.  the primary is STARTED again: it finds the Takeover and stops its own
+//   5.  the primary's container is STOPPED and the standby announces a
+//       Takeover on the relay. THE TENANT DOES NOTHING
+//   6.  the standby settles, starts the workload in its own id range, and the
+//       SAME TWO URLS come back with the STANDBY's container in the body —
+//       the same names, a different copy, and no tenant in the loop
+//   7.  the primary is STARTED again: it finds the Takeover and stops its own
 //       copy, and the URLs still answer from the standby
-//   7.  the tenant TERMINATES both leases: both URLs answer `503` with the
-//       gateway's own reason (`no_running_member`), in spec §5's error shape
-//       and in the `toon-gateway-reason` header
-//   8.  the books: the gateway PAID NOTHING. Each provider's peer book grew by
+//   8.  the tenant TERMINATES both leases: both URLs answer `503` with a
+//       gateway reason that says nothing is running it, in spec §5's error
+//       shape and in the `toon-gateway-reason` header
+//   9.  the books: the gateway PAID NOTHING. Each provider's peer book grew by
 //       exactly the lease prices the tenant paid and not one unit more, though
 //       the gateway asked `status` of both members throughout
 //
@@ -45,7 +46,7 @@
 // same two cadences, measured from the claim's `created_at` (spec §12.7), so
 // it re-resolves at about the moment the standby starts the workload — and a
 // brief `503` either side of that is expected, which is why every check here
-// POLLS rather than curling once. About six minutes, four of them the takeover.
+// POLLS rather than curling once. Six to seven minutes, four of them the takeover.
 //
 // ONE SECOND BETWEEN REQUESTS, deliberately. While the gateway holds no target
 // every request re-resolves, and two resolutions in the same second sign the
@@ -66,7 +67,7 @@ import {
 } from './lib/provider-smoke.mjs';
 import {
   GATEWAY_EDGE, GATEWAY_HTTP_PORT, GATEWAY_HTTPS_PORT, K_GATEWAY_GRANT,
-  canonicalLabel, gatewayDomain, gatewayGet, gatewayPubkey, whoamiHeader, whoamiHostname,
+  canonicalLabel, errorBody, gatewayDomain, gatewayGet, gatewayPubkey, whoamiHeader, whoamiHostname,
 } from './lib/gateway-smoke.mjs';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -126,8 +127,12 @@ async function askGateway(hostname, options = {}) {
 }
 /** The gateway's refusal reason for an answer, from its header (spec §12.3); null for a 200. */
 const reasonOf = (answer) => answer.headers['toon-gateway-reason'] ?? null;
-/** A one-line summary of what a hostname answered: the status and either the container that served it or the reason. */
-const summary = (answer) => `${answer.status} ${answer.status === 200 ? `from ${whoamiHostname(answer.body)}` : reasonOf(answer)}`;
+/** A one-line summary of what a hostname answered: the container that served it, the gateway's reason, or why nothing answered at all. */
+const summary = (answer) => {
+  if (answer.status === 200) return `200 from ${whoamiHostname(answer.body)}`;
+  if (answer.status === 0) return `no answer: ${answer.body}`;
+  return `${answer.status} ${reasonOf(answer)}`;
+};
 /**
  * Poll one hostname until `satisfied(answer)`, up to `seconds`. Returns the
  * last answer either way, so a failure reports what the tenant actually saw.
@@ -142,11 +147,6 @@ async function askUntil(hostname, satisfied, seconds, options = {}) {
 }
 /** The container hostname docker gave `name` — what whoami running in it reports as its own. */
 const containerHostname = (name) => docker('inspect', '-f', '{{.Config.Hostname}}', name).trim();
-/** True when `toon-<id>` falls in provider `P`'s committed workload id range. */
-function inRangeOf(P) {
-  const [lo, hi] = [Number(P.confValue('workload_id_range_start')), Number(P.confValue('workload_id_range_end'))];
-  return Object.assign((name) => { const id = Number(name.slice('toon-'.length)); return id >= lo && id <= hi; }, { lo, hi });
-}
 
 // ── 0. the stack, the gateway, and what it answers before any grant ───────
 step('0. the stack is up with the `gateway` profile; the gateway sells nothing and serves nothing it holds no grant for');
@@ -172,10 +172,9 @@ if (!(await composeHealthy('workload-gateway', 60))) fatal('workload-gateway nev
   // not a label under gw.localhost, so it is exactly such a hostname.
   const answer = await askGateway('127.0.0.1');
   assert(answer.status === 503 && reasonOf(answer) === 'no_grant',
-    `the gateway answers a hostname it holds no grant for ${answer.status} \`${reasonOf(answer)}\` — its own refusal, dialling nothing (spec §12.3)`);
-  let body = null;
-  try { body = JSON.parse(answer.body); } catch { /* not JSON */ }
-  assert(body !== null && Object.keys(body).sort().join() === 'error,message' && body.error === 'no_grant',
+    `the gateway answers a hostname it holds no grant for ${answer.status} \`${reasonOf(answer)}\` — its OWN refusal (spec §12.3), not a provider's`);
+  const body = errorBody(answer);
+  assert(body !== null && body.error === 'no_grant',
     `in spec §5's error shape, exactly { error, message }: ${answer.body.slice(0, 120)}`);
 }
 
@@ -229,8 +228,8 @@ let primaryHostname = null;
     `access.ports carries the HTTP port: ${jstr(primaryAccess?.ports ?? [])} — the pair a grant's \`http_port\` picks out (spec §12.4 step 5)`);
   const workload = primaryAccess ? await findWorkload(primaryAccess.ssh_port, 20) : null;
   primaryContainer = workload?.name ?? null;
-  const inPrimaryRange = inRangeOf(PRIMARY);
-  if (primaryContainer === null || !inPrimaryRange(primaryContainer)) fatal(`no toon-<id> container in ${PRIMARY.service}'s range ${inPrimaryRange.lo}-${inPrimaryRange.hi} publishes ssh_port ${primaryAccess?.ssh_port}`);
+  const inPrimaryRange = PRIMARY.workloadIdRange();
+  if (primaryContainer === null || !inPrimaryRange.holds(primaryContainer)) fatal(`no toon-<id> container in ${PRIMARY.service}'s range ${inPrimaryRange.lo}-${inPrimaryRange.hi} publishes ssh_port ${primaryAccess?.ssh_port}`);
   primaryHostname = containerHostname(primaryContainer);
   ok(`the workload runs as ${primaryContainer} in ${PRIMARY.service}'s id range ${inPrimaryRange.lo}-${inPrimaryRange.hi}, serving ${HTTP_CONTAINER_PORT} at ${primaryAccess.host}:${httpPort?.host_port}`);
   // The fact every assertion below rests on: this copy of the image answers
@@ -284,8 +283,8 @@ assert(grantReport.accepted?.length >= 1, `the relay accepted the grant: ${(gran
 assert(grantReport.grant?.gateway === GATEWAY && grantReport.grant?.http_port === HTTP_CONTAINER_PORT
   && JSON.stringify(grantReport.grant?.standby_set) === JSON.stringify(SET.map((P) => P.pubkey)) && grantReport.grant?.name === NAME,
   `its content names gateway ${GATEWAY.slice(0, 12)}… (conf/workload-gateway.conf's key), http_port ${grantReport.grant?.http_port}, the set primary first, name ${grantReport.grant?.name}, until ${new Date((grantReport.grant?.expires_at ?? 0) * 1000).toISOString()}`);
-assert(grantReport.hostnames?.[0] === CANONICAL,
-  `the canonical hostname is ${CANONICAL} — the lowercase unpadded base32 of the workload id, ${canonicalLabel(workloadId).length} characters, derived and never assigned (spec §12.2)`);
+assert(grantReport.hostnames?.[0] === CANONICAL && canonicalLabel(workloadId).length === 52 && /^[a-z2-7]{52}$/.test(canonicalLabel(workloadId)),
+  `the canonical hostname is ${CANONICAL} — ${canonicalLabel(workloadId).length} characters of lowercase unpadded base32 over the workload id, where its 64 hex characters would not fit a DNS label; derived and never assigned (spec §12.2)`);
 {
   // Read back from the relay rather than trusted from the tool's own report:
   // the grant reaches the gateway the same way, as a signed event on a relay.
@@ -324,13 +323,13 @@ const servedByPrimary = (a) => a.status === 200 && whoamiHostname(a.body) === pr
   const answer = await askUntil(CANONICAL, servedByPrimary, 30, { tls: true });
   assert(servedByPrimary(answer),
     `https://${CANONICAL}:${GATEWAY_HTTPS_PORT}/ -> ${summary(answer)}, terminated by the gateway with conf/workload-gateway-tls/`);
-  assert(answer.status !== 200 || whoamiHeader(answer.body, 'X-Forwarded-Proto') === 'https',
-    `and the workload was told X-Forwarded-Proto: ${whoamiHeader(answer.body, 'X-Forwarded-Proto')} — the scheme the TENANT used, not the gateway's hop (spec §12.5)`);
+  assert(whoamiHeader(answer.body, 'X-Forwarded-Proto') === 'https',
+    `and the workload was told X-Forwarded-Proto: ${whoamiHeader(answer.body, 'X-Forwarded-Proto')} — the scheme the TENANT used, not the gateway's own hop, which was plain HTTP (spec §12.5)`);
 }
 
 // ── 5. the Takeover, with no tenant online ────────────────────────────────
 step(`5. the primary's container is STOPPED; the standby announces a Takeover within ${TAKEOVER_BUDGET_S}s — the tenant does nothing`);
-const inStandbyRange = inRangeOf(STANDBY);
+const inStandbyRange = STANDBY.workloadIdRange();
 let standbyContainer = null;
 let standbyHostname = null;
 let takeover = null;
@@ -349,7 +348,7 @@ let takeover = null;
 step(`6. the SAME two URLs come back, answered by the workload on the standby, within ${GATEWAY_FOLLOW_BUDGET_S}s`);
 {
   const started = await waitFor(async () => {
-    const fresh = runningWorkloads().filter((n) => !runningBefore.includes(n) && n !== primaryContainer && inStandbyRange(n));
+    const fresh = runningWorkloads().filter((n) => !runningBefore.includes(n) && n !== primaryContainer && inStandbyRange.holds(n));
     return fresh.length > 0 ? fresh : null;
   }, SETTLE_BUDGET_S, 2000);
   if (!started) fatal(`no new toon-<id> container in ${STANDBY.service}'s range ${inStandbyRange.lo}-${inStandbyRange.hi} within ${SETTLE_BUDGET_S}s of the announcement`);
@@ -392,7 +391,7 @@ step('7. the primary is STARTED again: it finds the Takeover, stops its own copy
 }
 
 // ── 8. the tenant ends the leases; the URLs say why ───────────────────────
-step(`8. the tenant terminates both leases; within ${WITHDRAW_BUDGET_S}s both URLs answer 503 with the gateway's reason`);
+step(`8. the tenant terminates both leases; within ${WITHDRAW_BUDGET_S}s both URLs answer 503 with a gateway reason that nothing is running it`);
 for (const P of SET) {
   const res = await sendTo(P, P.terminateRoute, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!res.fulfilled) { bad(`terminate on ${P.service} was refused short of the app: ${res.code} (${res.refusedBy})`); continue; }
@@ -401,21 +400,25 @@ for (const P of SET) {
     `${P.service} answered ${res.status} ${res.text().slice(0, 160)}`);
   took(P, res, `the terminate on ${P.service}`, HUB_FEE);
 }
+// WHICH of the two reasons is the provider's to decide, not the gateway's, so
+// both are a pass and the message says which came back. A provider that still
+// knows the lease answers about it and none is running: `no_running_member`.
+// One that has forgotten it refuses `unknown_workload`, and a refusal is not an
+// answer about the lease — §12.4 step 4 has the gateway count that member with
+// the ones it could not reach, which is `member_unreachable`. The sandbox's
+// provider does the first; the poll below prefers it and accepts the other.
+const NOT_RUNNING = ['no_running_member', 'member_unreachable'];
 for (const hostname of [CANONICAL, NAMED]) {
-  // `no_running_member` and not `member_unreachable`: every member ANSWERED
-  // about the lease and none of them is running it, which is a fact about the
-  // lease rather than about this gateway's reach (spec §12.3, §12.4 step 4).
   const answer = await askUntil(hostname, (a) => a.status === 503 && reasonOf(a) === 'no_running_member', WITHDRAW_BUDGET_S);
-  assert(answer.status === 503 && reasonOf(answer) === 'no_running_member',
+  assert(answer.status === 503 && NOT_RUNNING.includes(reasonOf(answer)),
     `http://${hostname}:${GATEWAY_HTTP_PORT}/ -> ${answer.status} \`${reasonOf(answer)}\` — the gateway's own answer, naming the reason in the \`toon-gateway-reason\` header`);
-  let body = null;
-  try { body = JSON.parse(answer.body); } catch { /* not JSON */ }
-  assert(body !== null && Object.keys(body).sort().join() === 'error,message' && body.error === reasonOf(answer),
-    `in spec §5's error shape: ${answer.body.slice(0, 200)}`);
+  const body = errorBody(answer);
+  assert(body !== null && body.error === reasonOf(answer),
+    `in spec §5's error shape, the header and the body agreeing: ${answer.body.slice(0, 200)}`);
 }
 
 // ── 9. the books: the gateway paid nothing ────────────────────────────────
-step('9. the books, to the unit: the gateway asked `status` of both members throughout and paid for none of it');
+step('9. the books, to the unit: every unit either provider took is one the TENANT paid, so the gateway bought nothing');
 {
   const after = await waitFor(async () => {
     const now = await readBooks();
