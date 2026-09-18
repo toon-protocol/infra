@@ -109,17 +109,17 @@ name: toon-sandbox
 #             "The hidden-service ingress" section at the bottom of this file.
 #   gateway   TWO EXTRA SERVICES ON TOP OF `full` (or `payments`), never on
 #             their own: the WORKLOAD GATEWAY (TOON_Network ADR 0013, spec
-#             §12, Milestone 5) — a stable hostname per workload, keyed by its
-#             workload id, resolved to whichever provider is running it — and
-#             its own connector, which in this milestone terminates no paid
-#             route. It holds no lease and pays nothing; its whole authority
-#             is the Gateway Grant a tenant publishes (scripts/grant.mjs).
-#             Entry point `make up-gateway` (= --profile full --profile
-#             gateway; `COMPOSE_PROFILE=payments` for the payment layer alone)
-#             + `curl http://<label>.gw.localhost:3280/`. Nothing in `full`
-#             names it and it names nothing `hs`-only: `make up-gateway-hs`
-#             adds it on top of `make up-hs` for the hidden path by hand. See
-#             "The Workload Gateway" below.
+#             §12, Milestones 5 and 6) — a stable hostname per workload, keyed
+#             by its workload id, resolved to whichever provider is running
+#             it — and its own connector, which terminates ONE FREE route: the
+#             sealed Gateway Handover a tenant sends it (scripts/handover.mjs),
+#             its whole authority. It holds no lease and pays nothing, and
+#             NOTHING ON THIS PATH IS PUBLISHED. Entry point `make up-gateway`
+#             (= --profile full --profile gateway; `COMPOSE_PROFILE=payments`
+#             for the payment layer alone) + `curl http://<label>.gw.localhost:3280/`.
+#             Nothing in `full` names it and it names nothing `hs`-only:
+#             `make up-gateway-hs` adds it on top of `make up-hs` for the
+#             hidden path by hand. See "The Workload Gateway" below.
 #
 # `make up` / `make up-payments` / `make up-credentials` / `make up-hs` /
 # `make up-gateway` are the supported entry points; see Makefile.
@@ -1454,16 +1454,24 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # The Workload Gateway — profile `gateway` (`make up-gateway`)
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # TOON_Network ADR 0013, spec §12; Milestone 5 (#46), ticket #53. A workload
-  # is reachable today only at whichever provider runs it, on a host and port
-  # that provider chose, and a Hidden Provider gives no host at all; a Takeover
-  # moves it. The Workload Gateway is the party that owns the stable name: it
-  # serves `<canonical label>.gw.localhost` — the label derived from the
-  # workload id and from nothing else — and forwards to the running member of
-  # the workload's Standby Set, which it finds by sending each member a
-  # `status` signed with its own key and carrying the tenant's GATEWAY GRANT
-  # (kind 30438). No tenant contacts it: publishing the grant is the whole
-  # ceremony, and scripts/grant.mjs is the one command that does it.
+  # TOON_Network ADR 0013, spec §12; Milestone 5 (#46, #53) and Milestone 6
+  # (#56, #62). A workload is reachable today only at whichever provider runs
+  # it, on a host and port that provider chose, and a Hidden Provider gives no
+  # host at all; a Takeover moves it. The Workload Gateway is the party that
+  # owns the stable name: it serves `<canonical label>.gw.localhost` — the
+  # label derived from the workload id and from nothing else — and forwards to
+  # the running member of the workload's Standby Set, which it finds by sending
+  # each member a plain `status` presenting the tenant's GATEWAY GRANT: a value
+  # derived from that member's Continuation Token, which the tenant derives in
+  # turn from the lease's root secret (spec §6.1.1, §6.5.1) — not an event.
+  #
+  # HOW IT IS TOLD WHAT TO SERVE: one sealed packet. The tenant seals a
+  # Gateway Handover to the connector below (scripts/handover.mjs is the one
+  # command), the connector unseals it and forwards plain JSON to
+  # GATEWAY_HANDOVER_PORT, and the gateway admits it by asking the members
+  # whether the grant works (spec §12.1). NOTHING IS PUBLISHED and the gateway
+  # reads no relay for it; a Gateway Withdrawal, over the same route, takes
+  # the workload off again (§12.7). It has no key of its own any more.
   #
   # NOT the AR.IO gateway (`envoy`/`core`, the permaweb half): CONTEXT.md keeps
   # the two apart, so nothing here is called "gateway" unqualified.
@@ -1471,8 +1479,8 @@ services:
   # IT HOLDS NO LEASE AND PAYS NOTHING. No channel, no mnemonic, no seed job
   # funds it, and it calls no paid route: `status` is free, a relay read is
   # free, and the grant is its whole authority. Its own connector below
-  # terminates no paid route in this milestone (#46, Out of Scope) — the shape
-  # is here, the price is not.
+  # terminates the handover route FREE (#46 still defers the price) — the
+  # shape is here, the price is not.
   #
   # TWO THINGS ABOUT THIS SANDBOX, and only this sandbox, are in
   # conf/workload-gateway.conf's GATEWAY_DIAL_REWRITE: a Profile's
@@ -1504,6 +1512,10 @@ services:
     ports:
       - '3280:8080' # plain HTTP: `curl http://<label>.gw.localhost:3280/`
       - '3443:8443' # HTTPS with the dev certificate: `curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://<label>.gw.localhost:3443/`
+      # NOT 8081, GATEWAY_HANDOVER_PORT: a handover reaches it only through
+      # workload-gateway-connector, on the compose network, unsealed. A host
+      # port here would be a way to tell the gateway something without paying
+      # its connector a packet, which is not a path this sandbox rehearses.
     extra_hosts:
       # Where GATEWAY_DIAL_REWRITE sends a member's 127.0.0.1: this host, as
       # the daemon publishes the workloads' ports on it.
@@ -1511,8 +1523,8 @@ services:
     networks:
       default: {}
       # The buyer's SOCKS proxy (`anon-client`, `hs` only) lives on this network
-      # and nowhere else; TOON_SOCKS_PROXY names it, and a gateway carrying
-      # TOON_Network #52's `.anyone` path dials it. Joining it under
+      # and nowhere else; TOON_SOCKS_PROXY names it, and the gateway dials it
+      # for every `.anyone` host (TOON_Network #52). Joining it under
       # `make up-gateway` alone creates an empty network and dials nothing.
       hs-payer: {}
     healthcheck:
@@ -1527,18 +1539,31 @@ services:
       retries: 8
       start_period: 5s
     depends_on:
+      # `required: false` for the reason the connector below carries it, and
+      # the hub's chain gates before that: `gateway` alone disables `relay`,
+      # and a depends_on naming a disabled service renders NOTHING — which
+      # made `docker compose --profile gateway logs workload-gateway`, a
+      # command README §2 tells you to run, answer "invalid compose project".
+      # Every real run brings this profile up on top of `full` or `payments`,
+      # both of which enable the relay, so the gate holds as written.
       relay:
         condition: service_healthy
+        required: false
     restart: unless-stopped
     logging: *chain-logging
 
   # The gateway's OWN connector (ADR 0013): the next free client edge, 3260,
-  # its own key directory and its own state volume — and NO routes, peers,
-  # channels or settlement, because it terminates no paid route in this
-  # milestone (conf/connector-workload-gateway.toml says why). It is the one
-  # connector here the hub does not peer with: there is nothing to forward to.
-  # It starts after the gateway is healthy for the same reason the provider
-  # connectors start after their apps.
+  # its own key directory and its own state volume. It terminates ONE route,
+  # free — `g.toon.workload-gateway.handover`, the sealed Gateway Handover and
+  # Withdrawal, forwarded to the gateway's GATEWAY_HANDOVER_PORT at the path
+  # its door serves — and settles on Solana so that a tenant can open a
+  # channel against it and pay it DIRECTLY at :3260 (scripts/handover.mjs;
+  # conf/connector-workload-gateway.toml says why direct and why Solana only).
+  # It is still the one connector here the hub does not peer with. It starts
+  # after the gateway is healthy for the same reason the provider connectors
+  # start after their apps, and after the chain and its seed for the same
+  # reason they do: a connector whose settlement key holds no SOL refuses to
+  # boot, and scripts/seed-toon-solana.mjs is what funds it.
   workload-gateway-connector:
     profiles: ['gateway']
     image: ghcr.io/toon-protocol/connector@sha256:a41f5a8e6b120ebc62430675741f8afc37267561c377abb39446691b470e79ec # rust-sha-f278cd6, 2026-09
@@ -1551,6 +1576,21 @@ services:
       - '3260:3000'
     healthcheck: *connector-healthcheck
     depends_on:
+      # `required: false` for the reason the hub's chain gates carry it: a
+      # depends_on naming a service the ACTIVE profiles disable is a hard
+      # config error that renders nothing at all, and `gateway` alone disables
+      # both of these — which is what `docker compose --profile gateway logs
+      # workload-gateway` (README §2) and the hidden recipe's `--profile hs
+      # --profile gateway` select. This profile is never brought up on its own
+      # (`make up-gateway` is `full`-or-`payments` PLUS `gateway`, and both of
+      # those enable the chain and its seed), so under every real run these
+      # gate exactly as written.
+      solana-validator:
+        condition: service_healthy
+        required: false
+      seed-toon-solana:
+        condition: service_completed_successfully
+        required: false
       workload-gateway:
         condition: service_healthy
     restart: unless-stopped
@@ -2137,5 +2177,5 @@ volumes:
   provider-hs-connector-state:
   directory-publisher-hs-state:
   # The Workload Gateway's connector (`gateway` profile): a claim journal that
-  # stays empty in this milestone, on a volume of its own like every other.
+  # stays empty — its one route is free — on a volume of its own like every other.
   workload-gateway-connector-state:

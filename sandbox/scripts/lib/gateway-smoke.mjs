@@ -1,35 +1,42 @@
 // The WORKLOAD GATEWAY side of the sandbox's host-run tooling (TOON_Network
-// Milestone 5, spec §12): the values `make up-gateway` runs the gateway with,
-// the hostname a workload id derives, and a request that arrives at the
-// gateway under a hostname of our choosing.
+// Milestone 5 and 6, spec §12): the values `make up-gateway` runs the gateway
+// and its connector with, the hostname a workload id derives, and a request
+// that arrives at the gateway under a hostname of our choosing.
 //
 // scripts/lib/provider-smoke.mjs is the same idea for the PROVIDER — the
 // sandbox's committed addresses and the ceremony every smoke repeats — and
 // this file is its counterpart rather than an extension of it, because a
 // gateway is not a provider: it holds no lease, sells nothing and is asked
-// nothing over ILP (spec §12). scripts/grant.mjs and scripts/smoke-milestone5.mjs
-// both read it, so the canonical label a grant PRINTS and the one a smoke
-// ASKS FOR are one function and can never drift.
+// nothing over ILP but the one free handover route (spec §12).
+// scripts/handover.mjs and the gateway smokes both read it, so the canonical
+// label a handover PRINTS and the one a smoke ASKS FOR are one function and
+// can never drift — and so are the route a handover is sealed to and the key
+// it is sealed with.
 //
 // Nothing here asserts anything; every function returns what it found.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { getPublicKey } from 'nostr-tools/pure';
+// `ethers`, a DECLARED dependency of this sandbox (package.json), rather than
+// @noble/curves — which is only hoisted here transitively through nostr-tools
+// and would break this file the day that bump stops hoisting it.
+import { SigningKey } from 'ethers';
 import { ROOT } from './provider-smoke.mjs';
 
 // The sandbox gateway's HOST-side listeners: docker-compose.yml publishes the
 // container's 8080 at 3280 (plain) and 8443 at 3443 (TLS, with the committed
-// self-signed wildcard below). Its own connector's client edge is 3260 — an
-// ILP identity that terminates NO paid route (ADR 0013, README §6.9).
+// self-signed wildcard below). Its own connector's client edge is 3260, where
+// it terminates the ONE free route below (ADR 0013, README §6.9). Its
+// GATEWAY_HANDOVER_PORT is published on no host port: a handover reaches the
+// gateway through that connector or not at all.
 export const GATEWAY_HTTP_PORT = Number(process.env.GATEWAY_HTTP_PORT ?? 3280);
 export const GATEWAY_HTTPS_PORT = Number(process.env.GATEWAY_HTTPS_PORT ?? 3443);
 export const GATEWAY_EDGE = process.env.GATEWAY_EDGE_URL ?? 'http://localhost:3260';
 const GATEWAY_CONF = join(ROOT, 'conf', 'workload-gateway.conf');
+const GATEWAY_CONNECTOR_CONF = join(ROOT, 'conf', 'connector-workload-gateway.toml');
+const GATEWAY_CONNECTOR_SIGNER = join(ROOT, 'keys', 'toon', 'workload-gateway-connector', 'signer.key');
 const GATEWAY_TLS_CERT = join(ROOT, 'conf', 'workload-gateway-tls', 'gw.localhost.crt');
-/** Mirrored from the provider's src/nostr/kinds.rs, as provider-smoke.mjs mirrors the rest: the Gateway Grant (spec §3.1.3). */
-export const K_GATEWAY_GRANT = 30438;
 
 /** A `KEY=value` line out of conf/workload-gateway.conf, or throw naming it. */
 function gatewayConf(key) {
@@ -38,11 +45,66 @@ function gatewayConf(key) {
   if (!value) throw new Error(`conf/workload-gateway.conf has no ${key} line`);
   return value;
 }
-/** The sandbox gateway's public key: what `make up-gateway` runs it with, and what a grant names. */
-export const gatewayPubkey = () =>
-  getPublicKey(Uint8Array.from(Buffer.from(gatewayConf('GATEWAY_SECRET_KEY'), 'hex')));
 /** The sandbox gateway's domain: `gw.localhost`. */
 export const gatewayDomain = () => gatewayConf('GATEWAY_DOMAIN').toLowerCase();
+
+// ── the pre-Milestone-6 shape, kept only so scripts/smoke-milestone5.mjs
+// still LOADS ────────────────────────────────────────────────────────────────
+// Milestone 5's smoke publishes a Gateway Grant naming the gateway's own key.
+// Neither thing exists any more: kind 30438 is removed and the gateway has no
+// key (spec §12.1, ADR 0016), so that smoke cannot pass against this checkout
+// and the Milestone 6 smoke (TOON_Network #63) is what proves the gateway path
+// now. These two are exported so it fails where it should — at the protocol,
+// visibly, like the other milestones' smokes against a Milestone 6 provider —
+// rather than at an import it cannot resolve, which says nothing to whoever
+// runs it. It now gets as far as step 0 (which demands this gateway's
+// connector terminate NO paid route, where it terminates one free one) and
+// step 2 (a signed Lease Request, refused `invalid_request`); it never reaches
+// the step 3 that shells out to scripts/grant.mjs, which this checkout
+// replaced with scripts/handover.mjs. Moving that smoke is #63's; deleting
+// these is that ticket's too. `leaseRequest` in provider-smoke.mjs is kept for
+// the same reason.
+/** Mirrored from the provider's src/nostr/kinds.rs: the Gateway Grant, as Milestone 5 had it. */
+export const K_GATEWAY_GRANT = 30438;
+/**
+ * The public key Milestone 5's gateway ran with — a committed throwaway that
+ * `conf/workload-gateway.conf` set as GATEWAY_SECRET_KEY until Milestone 6
+ * removed the line. A frozen literal, not a derivation: there is no longer a
+ * key in that file to derive it from, and nothing but that smoke reads this.
+ */
+export const gatewayPubkey = () => 'e5bbfb596a6aa05d1de8058a50258c8c198b7b8901ccf602db8ebb81c8a674ed';
+
+/**
+ * The route the sandbox gateway's connector terminates for a sealed Gateway
+ * Handover and Gateway Withdrawal (spec §12.1, §12.7): the one `[[routes]]`
+ * prefix in conf/connector-workload-gateway.toml, read from there so the
+ * value a tenant seals to is the value the connector serves.
+ */
+export function handoverRoute() {
+  const text = readFileSync(GATEWAY_CONNECTOR_CONF, 'utf8');
+  const prefixes = [...text.matchAll(/^prefix\s*=\s*"([^"]+)"/gm)].map((m) => m[1]);
+  if (prefixes.length !== 1) {
+    throw new Error(`conf/connector-workload-gateway.toml terminates ${prefixes.length} routes; expected exactly one, the handover's`);
+  }
+  return prefixes[0];
+}
+
+/**
+ * The sandbox gateway connector's SEALING KEY — the 65-byte uncompressed
+ * secp256k1 public key its `GET /ilp` reports, as 130 lowercase hex — derived
+ * from the committed keys/toon/workload-gateway-connector/signer.key.
+ *
+ * DERIVED, NOT FETCHED, on purpose. A tenant pins a gateway connector's key
+ * out of band exactly as it pins a Provider Profile's (ADR 0011): nothing on
+ * the way to the gateway may name that key on its behalf, and the tenant tool
+ * (provider/tools/grant) accordingly takes it as bytes and fetches nothing.
+ * In this sandbox "out of band" is the committed key material itself, which
+ * is why this reads the private key's file rather than asking :3260 — and why
+ * a gateway connector whose key was regenerated is a gateway this returns the
+ * right key for without anybody re-pasting a constant.
+ */
+export const gatewaySealKey = () =>
+  new SigningKey(`0x${readFileSync(GATEWAY_CONNECTOR_SIGNER, 'utf8').trim()}`).publicKey.slice(2);
 
 /**
  * The CANONICAL LABEL of spec §12.2: the lowercase, unpadded base32 (RFC 4648)

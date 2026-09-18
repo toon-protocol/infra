@@ -56,7 +56,13 @@ const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-c
   // The HIDDEN provider's connector (TOON_Network #43, the `hs` profile). It
   // is seeded on every profile, like every other node here: a chain is seeded
   // once and cold, and `make up-hs` must not need a re-seed to work.
-  'provider-hs-connector'];
+  'provider-hs-connector',
+  // The WORKLOAD GATEWAY's connector (TOON_Network #62, the `gateway`
+  // profile), for the same reason: it terminates the FREE Gateway Handover
+  // route, books nothing and redeems nothing, but a connector whose settlement
+  // key holds no SOL refuses to boot (below), and a tenant opens its channel
+  // against that key to reach it at all (conf/connector-workload-gateway.toml).
+  'workload-gateway-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published
@@ -83,19 +89,21 @@ const PUBLISHER2 = address('CqMbRgMuEhQi9BUS8xP44Wk5nENm48FqJnfjEi4eNb1k');
 // the `hs` profile), on account index 3. A third wallet for the reason the
 // second one exists: one channel, one nonce watermark, one payer.
 const PUBLISHER3 = address('9Tj3srBSxH7RFRCm8uharreY7ZBS49XSfpwCeYa7Xaqp');
-// THE GRANT SCRIPT'S PAYER (scripts/grant.mjs, the tenant side of the Workload
-// Gateway, TOON_Network #53), on account index 4. A Gateway Grant is a paid
-// relay write like any other, and the script that publishes it must not
-// share a channel with the smokes' buyer at index 0: a Milestone 5 smoke holds
-// its own client open on that channel while it calls the script, and two
-// processes on one channel share one nonce watermark, whose loser has every
-// later claim refused. Index 4 is the first free one (5 and 6 are smoke-hs's
-// and smoke-m4's own buyers). Funded on every profile, like index 3: re-seeding
-// a live chain to add a wallet is the thing this avoids. On a chain seeded
-// BEFORE this wallet existed the guard below finds it unfunded and the whole
-// seed runs once more, exactly as it did when provider-hs-connector was added:
-// every mint is additive and the smokes count deltas, so that is harmless.
-const GRANT_PAYER = address('6gYw7q94fJdEwL8WkT1a6LHBdTMbix1aciALwEWPx3Wp');
+// THE HANDOVER SCRIPT'S PAYER (scripts/handover.mjs, the tenant side of the
+// Workload Gateway, TOON_Network #53 and #62), on account index 4. Since
+// Milestone 6 it publishes nothing: it pays the gateway's OWN connector for
+// the free Gateway Handover route (opening a channel against it, which is
+// what the deposit is for). It must not share a channel store with the
+// smokes' buyer at index 0: a smoke holds its own client open while it calls
+// the script, and two processes on one channel share one nonce watermark,
+// whose loser has every later claim refused. Index 4 is the first free one
+// (5 and 6 are smoke-hs's and smoke-m4's own buyers). Funded on every
+// profile, like index 3: re-seeding a live chain to add a wallet is the thing
+// this avoids. On a chain seeded BEFORE this wallet existed the guard below
+// finds it unfunded and the whole seed runs once more, exactly as it did when
+// provider-hs-connector was added: every mint is additive and the smokes
+// count deltas, so that is harmless.
+const HANDOVER_PAYER = address('6gYw7q94fJdEwL8WkT1a6LHBdTMbix1aciALwEWPx3Wp');
 
 const rpc = createSolanaRpc(RPC_URL);
 const rpcSubscriptions = createSolanaRpcSubscriptions(WS_URL);
@@ -149,7 +157,7 @@ async function ata(owner) {
       return bal !== null && BigInt(bal.value.amount) > 0n;
     };
     const allFunded = (await Promise.all(
-      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER, PUBLISHER2, PUBLISHER3, GRANT_PAYER].map(funded),
+      [...NODES.map((n) => nodeSigners[n].address), BUYER, PUBLISHER, PUBLISHER2, PUBLISHER3, HANDOVER_PAYER].map(funded),
     )).every(Boolean);
     if (allFunded) {
       console.log('[seed-toon-solana] mint + funded connector/buyer/publisher ATAs already exist — nothing to do.');
@@ -179,7 +187,7 @@ const airdropTargets = [
   ['directory-publisher (the provider’s relay-write payer)', PUBLISHER],
   ['directory-publisher2 (the second provider’s)', PUBLISHER2],
   ['directory-publisher-hs (the hidden provider’s)', PUBLISHER3],
-  ['the grant script’s payer (scripts/grant.mjs)', GRANT_PAYER],
+  ['the handover script’s payer (scripts/handover.mjs)', HANDOVER_PAYER],
   ...NODES.map((n) => [n, nodeSigners[n].address]),
 ];
 for (const [who, addr] of airdropTargets) {
@@ -309,13 +317,14 @@ for (const n of NODES) {
     `directory-publisher-hs: ATA + 1000 USDC (${PUBLISHER3})`);
 }
 
-// ── 8. the grant script's payer ───────────────────────────────────────────
-// The tenant side of the Workload Gateway (TOON_Network #53): its own wallet
-// and its own channel against the hub, for the same reason as sections 5-7.
+// ── 8. the handover script's payer ────────────────────────────────────────
+// The tenant side of the Workload Gateway (TOON_Network #53, #62): its own
+// wallet and its own channel — against the gateway's own connector, since
+// Milestone 6 — for the same reason as sections 5-7.
 {
-  const grantPayerAta = await ata(GRANT_PAYER);
-  await sendIxs(authority, [createAtaIx(grantPayerAta, GRANT_PAYER), mintToIx(grantPayerAta, PUBLISHER_USDC)],
-    `grant script payer: ATA + 1000 USDC (${GRANT_PAYER})`);
+  const handoverPayerAta = await ata(HANDOVER_PAYER);
+  await sendIxs(authority, [createAtaIx(handoverPayerAta, HANDOVER_PAYER), mintToIx(handoverPayerAta, PUBLISHER_USDC)],
+    `handover script payer: ATA + 1000 USDC (${HANDOVER_PAYER})`);
 }
 
 console.log('\n[seed-toon-solana] done.');

@@ -68,10 +68,10 @@ HS_PROVIDER_CONF = ./conf/.rendered/provider-hs.toml
 # elsewhere. Keep the default RELATIVE: the compose file has to stay portable.
 export GATEWAY_CONTEXT ?= ../../gateway
 
-# The tenant-side `grant` tool (provider/tools/grant, TOON_Network #48) that
-# scripts/grant.mjs runs. It lives in the provider checkout — the same one the
-# provider images build from — and is run from there rather than vendored, so
-# the sandbox publishes exactly the bytes the tool's own tests prove.
+# The tenant-side handover tool (provider/tools/grant, TOON_Network #59) that
+# scripts/handover.mjs runs. It lives in the provider checkout — the same one
+# the provider images build from — and is run from there rather than vendored,
+# so the sandbox seals exactly the bytes the tool's own tests prove.
 # `make setup` installs its dependencies when the checkout is present.
 export PROVIDER_CONTEXT ?= ../../provider
 
@@ -170,10 +170,10 @@ setup:
 	fi
 	npm ci
 	@if [ -f "$(PROVIDER_CONTEXT)/tools/grant/package.json" ]; then \
-		echo; echo "installing the grant tool's deps in $(PROVIDER_CONTEXT)/tools/grant (scripts/grant.mjs runs it from there)"; \
+		echo; echo "installing the handover tool's deps in $(PROVIDER_CONTEXT)/tools/grant (scripts/handover.mjs runs it from there)"; \
 		npm install --prefix "$(PROVIDER_CONTEXT)/tools/grant" --omit=dev --no-package-lock --no-audit --no-fund; \
 	else \
-		echo "NOTE: no provider checkout at $(PROVIDER_CONTEXT) — scripts/grant.mjs (the"; \
+		echo "NOTE: no provider checkout at $(PROVIDER_CONTEXT) — scripts/handover.mjs (the"; \
 		echo "      Workload Gateway's tenant side) will stop and explain until it exists."; \
 	fi
 
@@ -255,15 +255,17 @@ up-hs: require-store-context require-anytoon-context
 	@echo "directly on clearnet (its hub-routed leg is unaffected). Run \`make smoke\`"
 	@echo "against \`make up\`; run \`make smoke-hs\` against this. See README §2 + §6.6."
 
-## THE WORKLOAD GATEWAY (TOON_Network ADR 0013, spec §12; Milestone 5, #53):
-## `full` PLUS the gateway and its own connector — two services, built from the
-## gateway sibling checkout. `make up-gateway COMPOSE_PROFILE=payments` puts
-## them on the payment layer instead (the two providers and the relay are all
-## the gateway needs; no store checkout). Then a tenant spawns, publishes a
-## grant with `node scripts/grant.mjs …` and opens
-## http://<canonical label>.gw.localhost:3280/ — README §2, "The Workload
-## Gateway", walks the whole path. The `hs` profile is NOT part of this: the
-## hidden path is `make up-gateway-hs`, by hand.
+## THE WORKLOAD GATEWAY (TOON_Network ADR 0013, spec §12; Milestones 5 and 6,
+## #53 and #62): `full` PLUS the gateway and its own connector — two services,
+## built from the gateway sibling checkout. `make up-gateway
+## COMPOSE_PROFILE=payments` puts them on the payment layer instead (the two
+## providers and the relay are all the gateway needs; no store checkout). Then
+## a tenant spawns (`node scripts/spawn.mjs`), seals a Gateway Handover to the
+## gateway's connector with `node scripts/handover.mjs <lease.json>` — NOTHING
+## IS PUBLISHED on that path — and opens http://<canonical label>.gw.localhost:3280/;
+## `node scripts/handover.mjs --withdraw <lease.json>` takes it off again.
+## README §2, "The Workload Gateway", walks the whole path. The `hs` profile is
+## NOT part of this: the hidden path is `make up-gateway-hs`, by hand.
 up-gateway: require-gateway-context
 	@if [ "$(COMPOSE_PROFILE)" = full ]; then $(MAKE) --no-print-directory require-store-context require-anytoon-context; fi
 	$(COMPOSE_GW) up -d --build
@@ -538,7 +540,16 @@ smoke-m4:
 	node scripts/smoke-milestone4.mjs
 
 ## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
-## for `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
+## — AS MILESTONE 5 HAD IT, and it does NOT pass against this checkout. It
+## fails in three places, all of them Milestone 6 moving what it asserts: step
+## 0 demands the gateway's connector terminate no paid route (it now terminates
+## one free one), step 2 spawns with a signed Lease Request the Milestone 6
+## provider refuses `invalid_request`, and step 3 shells out to
+## scripts/grant.mjs, which this checkout replaced with scripts/handover.mjs.
+## The Milestone 6 smoke (TOON_Network #63) is what proves the gateway path
+## now. Left as it was, like every other milestone's smoke, for that ticket to
+## move; README §2's walk-through is the working path by hand today.
+## For `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
 ## WORKLOAD GATEWAY end to end — a workload has a stable URL that survives a
 ## Takeover with no tenant online. The gateway's own connector terminates no
 ## paid route and an unknown hostname is answered `no_grant` by the gateway
