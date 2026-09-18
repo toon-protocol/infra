@@ -1,22 +1,45 @@
 # =============================================================================
 # workload-gateway-connector — THE WORKLOAD GATEWAY'S OWN CONNECTOR
-# (TOON_Network ADR 0013, spec §12; Milestone 5, #53), on client edge 3260.
+# (TOON_Network ADR 0013, spec §12; Milestone 5, #53; Milestone 6, #62), on
+# client edge 3260.
 # =============================================================================
 # ADR 0013 puts a Workload Gateway behind its own connector like any other
-# TOON app, and this is that connector. What it is NOT, in this milestone, is
-# a payee: IT TERMINATES NO PAID ROUTE — pricing a gateway's service is
-# deferred (#46, Out of Scope) — and the gateway behind it holds no lease, no
-# channel and no mnemonic, and calls no paid route. So there are no
-# [[routes]], no [[peers]], no [[peer_channels]] and no [settlement.*] here:
-# nothing arrives that could be paid for and nothing leaves that pays. What
-# remains is the shape — an ILP identity, a client edge, a self-description at
-# http://localhost:3260/ilp — which is what the next milestone prices. The
-# hub does not peer with it (there is nothing to forward to), and the gateway's
-# HTTP listeners are published on their own host ports (3280, 3443), because
-# a browser reaches a hostname, not an ILP address.
+# TOON app, and this is that connector. Since Milestone 6 it TERMINATES ONE
+# ROUTE: the sealed Gateway Handover — and the Gateway Withdrawal, which rides
+# the same route — by which a tenant tells the gateway what to serve and what
+# to stop serving (spec §12.1, §12.7). Nothing is published any more, so this
+# packet is the ONLY way anything reaches the gateway, and this connector is
+# the party that unseals it: the tenant seals to THIS node's key
+# (keys/toon/workload-gateway-connector/signer.key, the `04…` this node's
+# `GET /ilp` reports) and the gateway behind it reads plaintext JSON.
 #
-# Copied from conf/connector-gas.toml with everything a payee needs removed;
-# see conf/connector-relay.toml for the shared provenance notes.
+# THE ROUTE IS FREE. Pricing a gateway's service is still deferred (#46, Out
+# of Scope): `price = 0` is written rather than left out because a terminated
+# route is never silently free (connector README §2). The gateway behind it
+# still holds no lease, no channel and no mnemonic, and calls no paid route.
+#
+# THE HANDLER PATH IS LOAD-BEARING. The tenant tool (provider/tools/grant)
+# seals with the connector client's DEFAULT target, `''`, which the connector
+# resolves to the handler_url UNCHANGED (connector ADR 0025) — and the
+# gateway's door answers `POST /handover` and 404s every other path. So the
+# path a handover lands on is decided HERE and nowhere else, which is where
+# it belongs: a tenant knows the route it pays for, not the listener behind
+# it. Change this path and every handover is refused `invalid_handover` with
+# nothing asked of anybody.
+#
+# SETTLEMENT IS HERE FOR THE TENANT'S SAKE, not this node's. The tenant pays
+# this connector DIRECTLY at http://localhost:3260 (scripts/handover.mjs; the
+# `--direct` shape scripts/spawn.mjs already has), and a connector client
+# opens its channel against the settlement key the payee's `GET /ilp`
+# reports — a node with no settlement table has nothing to open one against,
+# free route or not. Solana only: every host-run tool in this sandbox pays on
+# Solana (TOON_CHAIN=solana), and a second chain here would be a second key
+# to fund for nothing. The hub still does not peer with it: a peering funds a
+# 100 USDC channel from the hub's collateral for a route that costs nothing,
+# and the direct shape is the one this sandbox already documents.
+#
+# Copied from conf/connector-gas.toml; see conf/connector-relay.toml for the
+# shared provenance notes.
 
 client_edge_addr = "0.0.0.0:3000"
 state_dir = "/app/state"
@@ -30,8 +53,29 @@ addresses = ["g.toon.workload-gateway"]
 http_endpoint = "http://127.0.0.1:3260/ilp"
 btp_endpoint = "ws://127.0.0.1:3260/ilp/btp"
 
+# ── The terminated route ─────────────────────────────────────────────────────
+# One route, two messages: the body's single key — `handover` or
+# `withdrawal` — says which (spec §12.1, §12.7; gateway src/door.mjs). The
+# handler is the gateway's GATEWAY_HANDOVER_PORT (conf/workload-gateway.conf)
+# at the one path its door serves; the path is repeated here because the
+# tenant's envelope names none (above).
+[[routes]]
+prefix = "g.toon.workload-gateway.handover"
+handler_url = "http://workload-gateway:8081/handover"
+price = 0
+
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
 # Operator surface kept ON like every other node's, so the shape is complete:
-# `GET /claims` with the bearer token answers an empty book, which is the point.
+# `GET /claims` with the bearer token answers an empty book — a free route
+# books nothing — which is the point.
 [operator]
 bearer_token_file = "/app/data/operator-bearer.token"
 write_keys_file = "/app/data/operator-write.keys"

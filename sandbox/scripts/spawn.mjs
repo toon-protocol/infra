@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // A spawn, from the host: development tooling for putting a workload on a
 // sandbox provider so that something exists to put a hostname on (TOON_Network
-// Milestone 5, #53). Run from sandbox/ against a running stack. Not a tenant
-// product — the Milestone smokes do exactly this in code (scripts/lib/
-// provider-smoke.mjs is where every piece here comes from); this is the same
-// ceremony as one command, so README §2's walk-through can be followed by hand:
+// Milestone 5, #53; Milestone 6, #62). Run from sandbox/ against a running
+// stack. Not a tenant product — the Milestone smokes do exactly this in code
+// (scripts/lib/provider-smoke.mjs is where every piece here comes from); this
+// is the same ceremony as one command, so README §2's walk-through can be
+// followed by hand:
 //
 //   node scripts/spawn.mjs --image <reference>@sha256:<hex> --port <container port> \
 //       [--port <container port>…] [--listing warm] \
@@ -18,24 +19,34 @@
 //   --port       a container port to publish, repeatable. Default: 80
 //   --listing    the tier, by name in conf/provider.toml. Default: `warm`, the
 //                600 s tier that also sells Warm Standbys — ten minutes is
-//                enough to publish a grant and open a browser
+//                enough to hand a workload over and open a browser
 //   --standby    the Standby Set, PRIMARY FIRST, by compose name (`provider`,
 //                `provider2`); one member is a standalone lease. Default:
 //                `provider`. Two members is what `make smoke-m3` buys: the
 //                spawn is paid on the primary's `.spawn` and the reservation on
-//                the standby's `.standby`, one signed request to both
+//                the standby's `.standby`, each member sent ITS OWN request
+//                naming only itself (spec §7)
 //   --direct     pay the primary's OWN client edge (:3240 / :3250) instead of
 //                the hub — the Milestone 1 smoke's second half. Standalone only.
 //                The hub gives a peer 30 s to answer, and a spawn is a docker
 //                pull and a container start; on a slow daemon that is T01 at
 //                the hub while the provider went on and started the lease
-//   --terminate  end the lease described by a JSON file this printed, signed
-//                with the tenant key inside it, on every member. Free
+//   --terminate  end the lease described by a JSON file this printed, with the
+//                root secret inside it, on every member. Free
 //
-// Prints one JSON report on stdout — the tenant's key (THE KEY A GRANT MUST BE
-// SIGNED WITH, spec §6.5), the workload id, each member's answer, and the
-// scripts/grant.mjs command that puts the sandbox gateway in front of it — and
-// writes the same to .toon-client/spawn-<workload id>.json. Progress on stderr.
+// Prints one JSON report on stdout — the lease's ROOT SECRET (the one thing a
+// tenant holds: every Continuation Token and every Gateway Grant of the lease
+// derives from it, and nothing recovers a lease whose root secret is lost),
+// the workload id, each member's answer, and the scripts/handover.mjs command
+// that puts the sandbox gateway in front of it — and writes the same to
+// .toon-client/spawn-<workload id>.json, mode 0600, which is where that
+// command reads the secret from so it never crosses a command line. Progress
+// on stderr.
+//
+// NOTHING IS SIGNED AND NOTHING IS PUBLISHED. A Lease Request is a plain JSON
+// object bearing the token derived for the member it is sent to (spec §6.1,
+// ADR 0016); the tenant has no Nostr key on this path. The SSH key is still
+// generated, because the workload's sshd wants one.
 //
 // PAYS from the smokes' buyer: account index 0 of the committed test phrase,
 // on the shared .toon-client/channels.json (or provider-direct.json /
@@ -43,16 +54,16 @@
 // while a smoke is running: two processes on one channel share one nonce
 // watermark, and the loser has every later claim refused.
 import { writeFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, ROOT,
-  jstr, leaseRequest, listing, newTenant, newWorkloadId, openChannel, providerOf, usageFromHeader,
+  jstr, listing, newRootSecret, newTenant, newWorkloadId, openChannel, providerOf, tokenRequest, usageFromHeader,
 } from './lib/provider-smoke.mjs';
 
 // scripts/lib/provider-smoke.mjs's HTTP workload image, by reference@digest —
-// the same bytes `make smoke-m5` spawns, so this walk-through and that smoke
-// put the same thing behind the gateway.
+// the same bytes the gateway smokes spawn, so this walk-through and those
+// smokes put the same thing behind the gateway.
 const DEFAULT_IMAGE = `${HTTP_IMAGE.reference}@${HTTP_IMAGE.digest}`;
 // The provider refuses a Lease Request valid for longer than this (spec §6.1).
 const REQUEST_TTL_S = 300;
@@ -85,12 +96,17 @@ const answer = (sent) => (sent.fulfilled ? { status: sent.status, body: sent.sta
 // ── terminate ──────────────────────────────────────────────────────────────
 if (values.terminate) {
   const lease = JSON.parse(readFileSync(values.terminate, 'utf8'));
-  const tenant = { secret: Uint8Array.from(Buffer.from(lease.tenant_key, 'hex')) };
+  if (!/^[0-9a-f]{64}$/.test(lease.root_secret ?? '')) {
+    usage(`${values.terminate} holds no root_secret: a lease file from before Milestone 6 (tenant_key) cannot end a lease on a Milestone 6 provider`);
+  }
   const members = lease.standby_set.map((name) => providerOf(name));
   const { client } = await openChannel(lease.paid_at === 'hub' ? HUB : members[0].edge, lease.channel_store);
   const out = {};
   for (const P of members) {
-    const sent = await client.send(P.terminateRoute, { body: { request: leaseRequest(tenant, 'terminate', { workload_id: lease.workload_id }, 120, P) } }, { sealTo: P.edge, timeoutMs: 120_000 });
+    // Each member is asked with the token derived for ITS key: the primary's
+    // token ends nothing at a standby (spec §7).
+    const request = tokenRequest(lease.root_secret, 'terminate', { workload_id: lease.workload_id }, 120, P);
+    const sent = await client.send(P.terminateRoute, { body: { request } }, { sealTo: P.edge, timeoutMs: 120_000 });
     out[P.service] = answer(sent);
     log(`${P.service}: ${jstr(out[P.service])}`);
   }
@@ -119,36 +135,46 @@ const channelStore = values.direct ? `${PRIMARY.service}-direct.json` : 'channel
 const { client } = await openChannel(values.direct ? PRIMARY.edge : HUB, channelStore);
 const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 300_000 });
 
-const tenant = newTenant('spawn-tenant');
+// The tenant: a root secret, minted here and held in the lease file below,
+// and an SSH key for the workload. `newTenant` still mints a Nostr key with
+// the SSH one; nothing on this path uses it (spec §3, ADR 0016).
+const rootSecret = newRootSecret();
+const { sshPublicKey } = newTenant('spawn-tenant');
 const workloadId = newWorkloadId();
 const content = {
   workload_id: workloadId,
   image: { reference, digest },
   env: {},
   ports: ports.map((p) => ({ container_port: p, protocol: 'tcp' })),
-  ssh_public_key: tenant.sshPublicKey,
+  ssh_public_key: sshPublicKey,
   ...(SET.length > 1 ? { standby_set: SET.map((P) => P.pubkey) } : {}),
 };
-const request = leaseRequest(tenant, 'spawn', content, REQUEST_TTL_S, SET.length > 1 ? SET : PRIMARY);
 log(`workload ${workloadId}: ${reference}@${digest.slice(0, 19)}…, ports ${ports.join(',')}, ${L.name} v${L.version} (${L.lease_interval_s} s, ${L.price}${values.direct ? '' : ` + ${HUB_FEE} hub fee`}) on ${SET.map((P) => P.service).join(' + ')}, paid ${values.direct ? `at ${PRIMARY.edge}` : 'through the hub'}`);
 
 const members = {};
 const t0 = Date.now();
-const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request });
+// One request per member, each naming that member and bearing the token
+// derived for it — the primary's on `.spawn`, a standby's on `.standby` with
+// the same content (spec §6.1, §7).
+const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request: tokenRequest(rootSecret, 'spawn', content, REQUEST_TTL_S, PRIMARY) });
 members[PRIMARY.service] = answer(spawned);
 log(`${PRIMARY.service} (.spawn) after ${((Date.now() - t0) / 1000).toFixed(1)} s: ${jstr(members[PRIMARY.service]).slice(0, 300)}`);
 for (const S of STANDBYS) {
-  const reserved = await sendTo(S, S.standbyRoute(L.name, L.version), { request });
+  const reserved = await sendTo(S, S.standbyRoute(L.name, L.version), { request: tokenRequest(rootSecret, 'standby', content, REQUEST_TTL_S, S) });
   members[S.service] = answer(reserved);
   log(`${S.service} (.standby): ${jstr(members[S.service]).slice(0, 300)}`);
 }
 
 const primary = members[PRIMARY.service].body;
 const ok = typeof primary === 'object' && primary?.workload_id === workloadId;
+const file = join(ROOT, '.toon-client', `spawn-${workloadId.slice(0, 12)}.json`);
+const fileArg = relative(ROOT, file);
 const out = {
   workload_id: workloadId,
-  tenant_key: Buffer.from(tenant.secret).toString('hex'),
-  tenant_pubkey: tenant.pubkey,
+  // THE ONE SECRET. Everything that controls this lease derives from it and
+  // nothing else does: lose this file and no party — not the provider, not
+  // this sandbox — can produce the token that reads, extends or ends the lease.
+  root_secret: rootSecret,
   standby_set: SET.map((P) => P.service),
   listing: { name: L.name, version: L.version, lease_interval_s: L.lease_interval_s },
   ports,
@@ -156,16 +182,15 @@ const out = {
   channel_store: channelStore,
   members,
   ...(ok ? { access: primary.access, expires_at: primary.expires_at } : {}),
-  grant: ok
-    ? `node scripts/grant.mjs --workload ${workloadId} --key ${Buffer.from(tenant.secret).toString('hex')} --http-port ${ports[0]} --ports ${ports.join(',')} ${SET.map((P) => `--standby ${P.service}`).join(' ')} --expires-in 1h`
-    : null,
+  // The next step, with nothing secret on its command line: the handover
+  // script reads the root secret out of this file.
+  next: ok ? `node scripts/handover.mjs ${fileArg} --expires-in 1h` : null,
 };
-const file = join(ROOT, '.toon-client', `spawn-${workloadId.slice(0, 12)}.json`);
-writeFileSync(file, JSON.stringify(out, null, 2));
+writeFileSync(file, JSON.stringify(out, null, 2), { mode: 0o600 });
 console.log(JSON.stringify(out, null, 2));
 if (ok) {
-  log(`running at ${primary.access?.host}:${primary.access?.ports?.map((p) => p.host_port).join(',')} until ${new Date(primary.expires_at * 1000).toISOString()}; written to ${file}`);
-  log(`next: ${out.grant}`);
-  log(`end it early: node scripts/spawn.mjs --terminate ${file}`);
+  log(`running at ${primary.access?.host}:${primary.access?.ports?.map((p) => p.host_port).join(',')} until ${new Date(primary.expires_at * 1000).toISOString()}; written to ${file} (mode 0600: it holds the root secret)`);
+  log(`next: ${out.next}`);
+  log(`end it early: node scripts/spawn.mjs --terminate ${fileArg}`);
 }
 process.exit(ok ? 0 : 1);

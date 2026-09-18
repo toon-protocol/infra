@@ -15,21 +15,26 @@ import { readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { hkdfSync, randomBytes } from 'node:crypto';
 import { ToonClient } from '@toon-protocol/client';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
 /**
- * A host-run script's usage: its own header comment, printed to stderr, then
+ * A host-run script's usage: its own header comment — the LEADING block only,
+ * from the shebang to the first line that is not a comment; everything below
+ * that is a note to whoever is reading the code — printed to stderr, then
  * exit 2 (or 0 for an explicit --help). `problem` is printed first when given.
  * Pass `import.meta.url`.
  */
 export function usageFromHeader(scriptUrl, tag, problem) {
   if (problem) console.error(`[${tag}] ${problem}\n`);
-  console.error(
-    readFileSync(new URL(scriptUrl), 'utf8').split('\n').filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'),
-  );
+  const header = [];
+  for (const line of readFileSync(new URL(scriptUrl), 'utf8').split('\n').slice(1)) {
+    if (!line.startsWith('//')) break;
+    header.push(line.slice(3));
+  }
+  console.error(header.join('\n'));
   process.exit(problem ? 2 : 0);
 }
 export const HUB = process.env.HUB_URL ?? 'http://localhost:3200';
@@ -511,13 +516,20 @@ export function newTenant(keyName) {
   };
 }
 /**
- * A signed Lease Request: kind K_LEASE_REQUEST, p = the provider it is
+ * A SIGNED Lease Request: kind K_LEASE_REQUEST, p = the provider it is
  * addressed to, op, an expiration `ttl` seconds out. The `p` tag is the whole
  * reason this takes a provider: a provider refuses a request naming another
  * provider's key. `which` may also be an ARRAY of providers — a Standby Set's
  * spawn is signed ONCE, carries one `p` tag per member in the set's order,
  * and the same bytes go to every member (spec §7; only a spawn may name more
  * than one provider, and its content's `standby_set` must list the same keys).
+ *
+ * THE PRE-MILESTONE-6 SHAPE. A provider built from `milestone-6` (TOON_Network
+ * #56, #57) is not a Nostr event's reader any more and refuses this as
+ * `invalid_request`; the smokes of Milestones 1-5 still send it, and moving
+ * them is the Milestone 6 smoke's (#63). New host-run tooling uses
+ * `tokenRequest` below, which is what scripts/spawn.mjs and the Workload
+ * Gateway path send.
  */
 export function leaseRequest(tenant, op, content, ttl = 120, which) {
   const now = nowSec();
@@ -530,6 +542,52 @@ export function leaseRequest(tenant, op, content, ttl = 120, which) {
   }, tenant.secret);
 }
 export const newWorkloadId = () => randomBytes(32).toString('hex');
+
+// ── the tenant, since Milestone 6 (TOON_Network #56): a secret, not a key ──
+// A tenant signs nothing. It mints one ROOT SECRET per lease, holds it, and
+// derives from it a CONTINUATION TOKEN per provider (spec §6.1.1) that every
+// request to that provider presents; the provider stores the token and
+// compares, and holds nothing else about the tenant. The Gateway Grant a
+// Workload Gateway is handed derives from that token in turn (§6.5.1), which
+// is why the root secret is the ONE thing a developer keeps: lose it and
+// nothing — not this sandbox, not the provider — can produce the token that
+// controls the lease. scripts/spawn.mjs writes it into the lease file it
+// prints, mode 0600, and scripts/handover.mjs reads it from there.
+//
+// The derivation is the tenant tool's (provider/tools/grant/handover.mjs):
+// RFC 5869 with an EMPTY salt and an ASCII `info` of the domain string and
+// the provider's 64 lowercase hex key, for 32 bytes, as the provider's own
+// `expand` does it (src/nostr/continuation.rs) and the wire vector states it
+// (tests/fixtures/wire/continuation.vector.json).
+/** 32 fresh random bytes as 64 lowercase hex: a lease's root secret. */
+export const newRootSecret = () => randomBytes(32).toString('hex');
+/** `continuation(provider)` of spec §6.1.1: the token this lease presents to one provider. */
+export const continuationFor = (rootSecret, providerPubkey) =>
+  Buffer.from(hkdfSync('sha256', Buffer.from(rootSecret, 'hex'), Buffer.alloc(0), `toon-network-continuation:${providerPubkey}`, 32)).toString('hex');
+/**
+ * A Lease Request (spec §6.1): the plain JSON object of six keys that every
+ * authenticated route reads — a fresh `request_id` (what the replay set keys
+ * on), the `op`, the ONE `provider` it is addressed to, an `expiration` `ttl`
+ * seconds out, the Continuation Token derived for that provider, and the
+ * op's content. Nothing is hashed, nothing is signed.
+ *
+ * ONE PROVIDER, ALWAYS: a Standby Set's members are each sent their OWN
+ * request naming only themselves — the primary's on `.spawn`, each standby's
+ * on `.standby` (op `standby`, same content) — and each bears the token
+ * derived under that member's key, so a request that admits the tenant at
+ * the primary is `not_tenant` at a standby by construction (§7).
+ */
+export function tokenRequest(rootSecret, op, content, ttl = 120, which) {
+  const provider = providerOf(which);
+  return {
+    request_id: randomBytes(32).toString('hex'),
+    op,
+    provider: provider.pubkey,
+    expiration: nowSec() + ttl,
+    continuation: continuationFor(rootSecret, provider.pubkey),
+    content,
+  };
+}
 /** The spawn content the sandbox's sshd image needs: its sshd on 22 (where ssh_port forwards), the login user, the key bridged from SSH_PUBLIC_KEY. */
 export const spawnContent = (workloadId, tenant) => ({
   workload_id: workloadId,

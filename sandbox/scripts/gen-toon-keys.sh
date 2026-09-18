@@ -14,26 +14,27 @@
 #   ADDRESSES are committed in conf/connector-*.toml as counterparty_key and
 #   feed the committed channel ids, so they must be identical everywhere):
 #     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30/31
-#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-40
+#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-41
 #       (28/37 are the anytoon-connector's, 29/38 the provider-connector's,
 #        30/39 the SECOND provider's, provider2-connector, and 31/40 the HIDDEN
 #        provider's, provider-hs-connector; 27 was already spent on the gas
 #        relayer below, which is why the EVM index skips it)
+#     workload-gateway-connector/settlement-solana.key  index 41, SOLANA ONLY
+#       (TOON_Network #62): the WORKLOAD GATEWAY's connector terminates the
+#       free Gateway Handover route, and a tenant opens its channel against
+#       this key to reach it (conf/connector-workload-gateway.toml says why
+#       there is no EVM key beside it). Its address is committed nowhere: the
+#       tenant learns it from the node's own `GET /ilp`, and
+#       scripts/seed-toon-solana.mjs reads the file
 #     gas-evm-relayer.key          EVM secp256k1, index 27 — the gas station's
 #                                  DEDICATED kind:5098 relayer; its 0x-prefixed
 #                                  value is embedded in conf/gas-station.conf
 #                                  (EVM_GAS_STATION_CONFIG_JSON) and its address
 #                                  in scripts/seed-toon-evm.sh
-#   RANDOM ONLY, no settlement keys at all:
-#     workload-gateway-connector/  the WORKLOAD GATEWAY's own connector
-#                                  (TOON_Network #53): signer + operator files
-#                                  and nothing else, because it terminates no
-#                                  paid route, holds no channel and settles
-#                                  nothing in this milestone
-#   NOT HERE: the Workload Gateway's own Nostr key, a committed literal in
-#   conf/workload-gateway.conf (GATEWAY_SECRET_KEY) exactly as each provider's
-#   nostr_private_key is in conf/provider*.toml — `openssl rand -hex 32`, and
-#   its public key in the comment beside it.
+#   NOT HERE, AND NOWHERE: the Workload Gateway has no Nostr key since
+#   Milestone 6 (TOON_Network #56) — it signs nothing and publishes nothing,
+#   so conf/workload-gateway.conf's GATEWAY_SECRET_KEY line is gone. Its
+#   connector's signer.key (above) is the key a tenant seals a handover to.
 #   COPIED from the connector repo (committed there for the same reason):
 #     usdc-mint.json usdc-authority.json — the deterministic local mock-USDC
 #     mint H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H and its authority
@@ -95,9 +96,12 @@ for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anyt
   $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$si" | sed 's/^0x//' >"$KEYS/$node/settlement-solana.key"
   echo "$node: evm $($CAST wallet address --private-key 0x$(cat "$KEYS/$node/settlement.key"))"
 done
-# The Workload Gateway's connector: identity and operator credentials only.
+# The Workload Gateway's connector: identity and operator credentials, and a
+# SOLANA settlement key only (TOON_Network #62) — the chain the sandbox's
+# tenant tools pay on. No EVM key: nothing here pays it on anvil.
 random_keys workload-gateway-connector
-echo "workload-gateway-connector: no settlement key (terminates no paid route)"
+$CAST wallet private-key --mnemonic "$MN" --mnemonic-index 41 | sed 's/^0x//' >"$KEYS/workload-gateway-connector/settlement-solana.key"
+echo "workload-gateway-connector: solana only (terminates the free handover route; a tenant opens a channel against it)"
 $CAST wallet private-key --mnemonic "$MN" --mnemonic-index 27 | sed 's/^0x//' >"$KEYS/gas-evm-relayer.key"
 echo "gas-evm-relayer: evm $($CAST wallet address --private-key 0x$(cat "$KEYS/gas-evm-relayer.key"))"
 chmod -R a+rX "$KEYS"
