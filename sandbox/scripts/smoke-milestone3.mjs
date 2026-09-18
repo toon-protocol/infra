@@ -1,11 +1,13 @@
 // MILESTONE 3 ACCEPTANCE TEST (TOON_Network #11, ticket #35; spec §6, §7,
 // Appendix A): Warm Standby end to end against the real sandbox — relay, hub,
-// BOTH connectors and BOTH providers. A tenant signs ONE spawn whose content
-// names a Standby Set, `standby_set: [<provider>, <provider2>]`, and pays the
-// same bytes twice: on the first provider's `warm.v1.spawn` at the full price
-// (index 0: the PRIMARY, which runs the workload) and on the second's
-// `warm.v1.standby` at `standby_price` (index 1: the WARM STANDBY, which holds
-// capacity and runs nothing). Then the primary's container is stopped and the
+// BOTH connectors and BOTH providers. A tenant sends ONE SPAWN CONTENT naming
+// a Standby Set, `standby_set: [<provider>, <provider2>]`, to each member in a
+// REQUEST OF ITS OWN — naming only that member and bearing only that member's
+// Continuation Token (spec §6.1, §7) — and pays it twice: on the first
+// provider's `warm.v1.spawn` at the full price (index 0: the PRIMARY, which
+// runs the workload) and on the second's `warm.v1.standby`, op `standby`, at
+// `standby_price` (index 1: the WARM STANDBY, which holds capacity and runs
+// nothing). Then the primary's container is stopped and the
 // standby takes the workload over. Run from sandbox/ on the host after
 // `make up-payments` (or `make up`); `make smoke-m3`.
 //
@@ -19,7 +21,7 @@
 //   1.  a tenant channel against the hub, and every book's baseline: the
 //       hub's client book, both peer books, and the second provider's
 //       directory publisher's own channel, read right after a Liveness
-//   2.  the SPAWN, one signed Lease Request with two `p` tags: the primary
+//   2.  the SPAWN, one Lease Request per member, each naming only itself: the primary
 //       answers role primary WITH access, its workload runs on the host
 //       daemon in the first provider's id range and SSH opens with the
 //       tenant's key; the standby answers role standby with NO access and
@@ -79,7 +81,7 @@ import {
   claims, clientBookOnChannel, peerBookTotal, publisherChannel,
   relayRead, relayReadUntil, directoryFilter, takeoverFilter, tagValues, hasTag,
   docker, composeNotRunning, composeService, composeHealthy, findWorkload, containerState, runningWorkloads, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
 const STANDBY_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_M3_STANDBY_ONLY ?? '');
@@ -237,13 +239,23 @@ if (!liveness0) fatal(`no fresh Liveness from ${STANDBY.service} within a cadenc
 const before = await readBooks();
 console.log(`  books before: hub client (${channelKey}) = ${before.hub}; ${PRIMARY.connectorNode} peer = ${before[PRIMARY.service]}; ${STANDBY.connectorNode} peer = ${before[STANDBY.service]}; directory-publisher2 (${RELAY_PAYER}) = ${before.relay} as of Liveness ${liveness0.created_at}`);
 
-// ── 2. the spawn: one signed request, two routes, two roles ──────────────
-step(`2. ONE signed spawn with standby_set [${PRIMARY.pubkey.slice(0, 8)}…, ${STANDBY.pubkey.slice(0, 8)}…]: ${STANDBY_ONLY ? 'the standby half only' : 'primary on .spawn, standby on .standby'}`);
+// ── 2. the spawn: one content, one request per member, two routes, two roles ──
+step(`2. ONE spawn CONTENT with standby_set [${PRIMARY.pubkey.slice(0, 8)}…, ${STANDBY.pubkey.slice(0, 8)}…], sent to each member in its own request: ${STANDBY_ONLY ? 'the standby half only' : 'primary on .spawn, standby on .standby'}`);
 const tenant = newTenant('m3-tenant');
+// ONE root secret for the whole lease, and a DIFFERENT token at each member:
+// `continuation(provider)` derives under the member's own key (spec §6.1.1),
+// which is what stops one member of the set acting as the tenant against
+// another (§7). Step 9 sends each member its own.
+const rootSecret = newRootSecret();
 const workloadId = newWorkloadId();
-const request = leaseRequest(tenant, 'spawn', { ...spawnContent(workloadId, tenant), standby_set: SET.map((P) => P.pubkey) }, 300, SET);
-assert(tagValues(request, 'p').map((t) => t[0]).join() === SET.map((P) => P.pubkey).join(),
-  `request ${request.id.slice(0, 12)}… carries one \`p\` tag per member, in the set's order, and is signed once`);
+const content = { ...spawnContent(workloadId, tenant), standby_set: SET.map((P) => P.pubkey) };
+/** The request for ONE member: the same content, the op its route serves, naming and bearing only that member's. */
+const spawnRequestFor = (P, op) => tokenRequest(rootSecret, op, content, 300, P);
+{
+  const tokens = SET.map((P) => spawnRequestFor(P, 'spawn').continuation);
+  assert(new Set(tokens).size === SET.length && tokens.every((t) => /^[0-9a-f]{64}$/.test(t)),
+    `the ${SET.length} members are addressed with ${new Set(tokens).size} DIFFERENT Continuation Tokens, one derived under each member's key (spec §6.1.1) — and nothing is signed`);
+}
 const runningBefore = runningWorkloads();
 const inStandbyRange = inRangeOf(STANDBY);
 
@@ -252,7 +264,7 @@ let primaryContainer = null;
 let expiresAt = null;
 if (!STANDBY_ONLY) {
   const t0 = nowSec();
-  const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request });
+  const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request: spawnRequestFor(PRIMARY, 'spawn') });
   const t1 = nowSec();
   if (!spawned.fulfilled) fatal(`the primary's spawn was refused short of the app: ${spawned.code} (${spawned.refusedBy}) ${spawned.message ?? ''}`);
   const body = spawned.status === 200 ? spawned.json() : null;
@@ -277,14 +289,14 @@ if (!STANDBY_ONLY) {
 }
 {
   const t0 = nowSec();
-  const reserved = await sendTo(STANDBY, STANDBY.standbyRoute(L.name, L.version), { request });
+  const reserved = await sendTo(STANDBY, STANDBY.standbyRoute(L.name, L.version), { request: spawnRequestFor(STANDBY, 'standby') });
   const t1 = nowSec();
   if (!reserved.fulfilled) fatal(`the standby's spawn was refused short of the app: ${reserved.code} (${reserved.refusedBy}) ${reserved.message ?? ''}`);
   const body = reserved.status === 200 ? reserved.json() : null;
   assert(reserved.status === 200, `${STANDBY.service} answered ${reserved.status}: ${reserved.text().slice(0, 300)}`);
   if (!body) fatal('no reservation to continue with');
   took(STANDBY, reserved, 'the standby spawn', HUB_STANDBY_PRICE);
-  assert(body.workload_id === workloadId && body.role === 'standby', `the SAME bytes on .standby: workload ${workloadId.slice(0, 12)}…, role ${body.role}`);
+  assert(body.workload_id === workloadId && body.role === 'standby', `the SAME CONTENT on .standby under op=standby, in its own request: workload ${workloadId.slice(0, 12)}…, role ${body.role}`);
   assert(body.access === undefined && !('access' in body), 'and NO access: nothing runs until a Takeover');
   assert(body.expires_at >= t0 + L.lease_interval_s && body.expires_at <= t1 + L.lease_interval_s,
     `expires_at ${body.expires_at} = now + ${L.lease_interval_s}s: one standby payment, one Lease Interval`);
@@ -293,7 +305,7 @@ if (!STANDBY_ONLY) {
   assert(fresh.length === 0, `the standby started nothing on the host daemon: no new toon-<id> in its range ${inStandbyRange.lo}-${inStandbyRange.hi}${fresh.length ? ` (${fresh.join(', ')})` : ''}`);
 }
 const statusOf = async (P, what) => {
-  const res = await sendTo(P, P.statusRoute, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }, 120, P) });
+  const res = await sendTo(P, P.statusRoute, { request: tokenRequest(rootSecret, 'status', { workload_id: workloadId }, 120, P) });
   if (!res.fulfilled) { bad(`${what}: status was refused short of the app: ${res.code} (${res.refusedBy})`); return null; }
   took(P, res, `${what} (status, free at the provider)`, HUB_FEE);
   if (res.status !== 200) { bad(`${what}: ${P.service} answered ${res.status} ${res.text().slice(0, 200)}`); return null; }
@@ -457,7 +469,7 @@ assert(after.relay - before.relay === expectedRelay,
 // ── 9. the tenant ends its leases ────────────────────────────────────────
 step('9. the tenant ends the leases through the free terminate routes');
 for (const [P, container] of STANDBY_ONLY ? [[STANDBY, null]] : [[STANDBY, standbyContainer], [PRIMARY, primaryContainer]]) {
-  const res = await sendTo(P, P.terminateRoute, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
+  const res = await sendTo(P, P.terminateRoute, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!res.fulfilled) {
     bad(`terminate on ${P.service} was refused short of the app: ${res.code} (${res.refusedBy})`);
     continue;
@@ -473,5 +485,5 @@ console.log(`\n  total run time ${Math.round((Date.now() - startedAt) / 1000)}s`
 if (STANDBY_ONLY) {
   done('THE RESERVATION SIDE ONLY (TOON_M3_STANDBY_ONLY): a standby-set spawn on the second provider\'s .standby answered role standby with no access, held a slot its Liveness counted, was paid on .standby.extend at standby_price and refused .extend as not_running, closed the books to the unit and was released by terminate. The first provider was never paid and no Takeover ran — this is not a pass of Milestone 3.');
 } else {
-  done('one signed spawn bought a primary with access and a Warm Standby without; the reservation held capacity, was paid at standby_price and refused .extend; with the primary\'s container stopped the standby announced a Takeover on the relay, won, ran the workload in its own id range reachable with the tenant\'s key, was paid at full price and refused .standby.extend; the restarted primary stood down leaving exactly one running copy; every book grew by exactly the prices and the relay by one unit for the Takeover; the tenant ended both leases.');
+  done('one spawn content, sent to each member in a request of its own bearing that member\'s own Continuation Token, bought a primary with access and a Warm Standby without; the reservation held capacity, was paid at standby_price and refused .extend; with the primary\'s container stopped the standby announced a Takeover on the relay, won, ran the workload in its own id range reachable with the tenant\'s key, was paid at full price and refused .standby.extend; the restarted primary stood down leaving exactly one running copy; every book grew by exactly the prices and the relay by one unit for the Takeover; the tenant ended both leases.');
 }

@@ -1,25 +1,35 @@
-// MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46, ticket #54; spec §3.1.3,
-// §6.5, §12, Appendix A): the WORKLOAD GATEWAY end to end against the real
-// sandbox — relay, hub, both connectors, both providers, and the gateway
-// behind its own connector. The milestone's promise in one sentence: **a
-// workload has a stable URL that survives a Takeover with no tenant online.**
-// Run from sandbox/ on the host after `make up-gateway` (or `make up-gateway
-// COMPOSE_PROFILE=payments`); `make smoke-m5`.
+// MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46, ticket #54; spec §6.5, §12,
+// Appendix A), ON MILESTONE 6'S TENANT PATH (#56, #63): the WORKLOAD GATEWAY
+// end to end against the real sandbox — relay, hub, both connectors, both
+// providers, and the gateway behind its own connector. The milestone's promise
+// in one sentence: **a workload has a stable URL that survives a Takeover with
+// no tenant online.** That promise is unchanged; what changed underneath it is
+// how the tenant chooses the gateway — a sealed Gateway Handover instead of a
+// published Gateway Grant — and how a request authenticates: a Continuation
+// Token instead of a signature. Run from sandbox/ on the host after
+// `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`);
+// `make smoke-m5`. What Milestone 6 adds on top of this — the refusals, the
+// restart and the relay swept for anything a tenant made — is `make smoke-m6`.
 //
 //   0.  the stack is up, with the gateway and its own connector; that
-//       connector terminates NO PAID ROUTE (ADR 0013: a gateway is not a
-//       party to a lease) and the gateway answers a hostname it holds no
-//       grant for with its OWN 503 `no_grant`, not a provider's
+//       connector terminates exactly ONE route and it is FREE — the handover
+//       door (ADR 0013: a gateway is not a party to a lease, and it sells
+//       nothing) — and the gateway answers a hostname it holds no grant for
+//       with its OWN 503 `no_grant`, not a provider's
 //   1.  a tenant channel against the hub and the providers' books before
-//   2.  the SPAWN: one signed Lease Request with a two-member `standby_set`,
-//       an HTTP image (`traefik/whoami` on container port 80) and that port
-//       PUBLISHED, paid on the primary's `warm.v1.spawn` and reserved on the
-//       standby's `warm.v1.standby` — the `make smoke-m3` shape with ports
-//   3.  the GRANT, published by the tenant with `node scripts/grant.mjs`:
-//       kind 30438 on the relay, naming THE SANDBOX GATEWAY, this workload,
-//       `http_port` 80, both members primary first, an expiry and a fresh
-//       short name. NOTHING is told to the gateway out of band — publishing
-//       the grant is the whole ceremony (spec §12.1)
+//   2.  the SPAWN: one spawn content with a two-member `standby_set`, an HTTP
+//       image (`traefik/whoami` on container port 80) and that port PUBLISHED,
+//       sent to each member in a REQUEST OF ITS OWN bearing that member's
+//       Continuation Token — paid on the primary's `warm.v1.spawn` and
+//       reserved on the standby's `warm.v1.standby` (op `standby`) — the
+//       `make smoke-m3` shape with ports
+//   3.  the HANDOVER, sealed to the gateway's own connector by `node
+//       scripts/handover.mjs`: one Gateway Grant DERIVED PER MEMBER from the
+//       lease's root secret for one moment, `http_port` 80, both members
+//       primary first, and a fresh short name. NOTHING IS PUBLISHED — the
+//       relay carries nothing naming this workload — and the gateway admits
+//       the handover by asking the members whether the grant works (spec
+//       §12.1, ADR 0017)
 //   4.  the two URLs answer FROM THE PRIMARY: the canonical hostname (the
 //       52-character base32 of the workload id, spec §12.2) and the grant's
 //       name, on the plain listener and over TLS, each carrying the workload's
@@ -48,30 +58,31 @@
 // brief `503` either side of that is expected, which is why every check here
 // POLLS rather than curling once. Six to seven minutes, four of them the takeover.
 //
-// ONE SECOND BETWEEN REQUESTS, deliberately. While the gateway holds no target
-// every request re-resolves, and two resolutions in the same second sign the
-// same `status` bytes twice — same `created_at`, same content, same member —
-// so the provider refuses the second as `stale_request` (its replay book,
-// spec §6.1) and the tenant is told `member_unreachable` instead of the true
-// reason. `askGateway` below spaces its requests so that what this smoke reads
-// is the answer and not that artefact.
+// ONE SECOND BETWEEN REQUESTS, still. While the gateway holds no target every
+// request re-resolves, and under Milestone 5 two resolutions in the same
+// second built the same `status` bytes twice — same `created_at`, same
+// content, same member — so the provider refused the second as
+// `stale_request` and the tenant was told `member_unreachable` instead of the
+// true reason. A Lease Request now carries a RANDOM `request_id` and is what
+// the replay set keys on (spec §6.1), so two resolutions a second apart are
+// two different requests and that hazard is gone. The spacing is kept anyway,
+// because it also keeps this smoke from hammering a gateway that is mid-round
+// and because nothing here is in a hurry.
 import { verifyEvent } from 'nostr-tools/pure';
 import {
-  HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, BUYER_SOL, K_TAKEOVER, TOON_LABEL,
+  HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, BUYER_SOL, K_TAKEOVER,
   providerOf, WATCHDOG_S,
   reporter, jstr, nowSec, sleep, waitFor,
   claims, clientBookOnChannel, peerBookTotal,
-  relayReadUntil, takeoverFilter, hasTag,
+  relayRead, relayReadUntil, takeoverFilter, hasTag,
   docker, composeNotRunning, composeService, composeHealthy, findWorkload, containerState, runningWorkloads,
-  newTenant, leaseRequest, newWorkloadId, httpSpawnContent, openChannel, ROOT,
+  continuationFor, gatewaySubFor, newRootSecret, newTenant, newWorkloadId, httpSpawnContent, openChannel, tokenRequest,
 } from './lib/provider-smoke.mjs';
 import {
-  GATEWAY_EDGE, GATEWAY_HTTP_PORT, GATEWAY_HTTPS_PORT, K_GATEWAY_GRANT,
-  canonicalLabel, errorBody, gatewayDomain, gatewayGet, gatewayPubkey, whoamiHeader, whoamiHostname,
+  GATEWAY_EDGE, GATEWAY_HTTP_PORT, GATEWAY_HTTPS_PORT,
+  canonicalLabel, errorBody, gatewayDomain, gatewayGet, runHandover, whoamiHeader, whoamiHostname,
 } from './lib/gateway-smoke.mjs';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
 
 const { step, ok, bad, assert, fatal, done } = reporter('MILESTONE 5 SMOKE');
 const startedAt = Date.now();
@@ -104,14 +115,15 @@ const SETTLE_BUDGET_S = 2 * CADENCE + 2 * WATCHDOG_S + 60; // + the image start
 // that answered nothing, after which every request resolves again. So the
 // URL is back within a cadence or two of the standby's start, plus the image.
 const GATEWAY_FOLLOW_BUDGET_S = SETTLE_BUDGET_S + 2 * CADENCE;
-// A grant reaches the gateway on the relay it watches, which is one hop.
+// The admission round (spec §12.1) already asked the members and kept where
+// the workload was running, so the first request is normally a 200; this is
+// the budget for the gateway finishing that round, not for finding anything.
 const RESOLVE_BUDGET_S = 90;
 // After `terminate` every member answers about the lease, so the target is
 // withdrawn on the next re-ask: one cadence plus the gateway's own tick.
 const WITHDRAW_BUDGET_S = 2 * CADENCE + 30;
 
 const DOMAIN = gatewayDomain();
-const GATEWAY = gatewayPubkey();
 
 // ── asking the gateway ────────────────────────────────────────────────────
 let lastAsked = 0;
@@ -158,13 +170,17 @@ step('0. the stack is up with the `gateway` profile; the gateway sells nothing a
 if (!(await composeHealthy('workload-gateway', 60))) fatal('workload-gateway never reported healthy — its own healthcheck is the `no_grant` 503 below');
 {
   // ADR 0013 and spec §12: a gateway is reached through its own connector, and
-  // in this milestone that connector terminates NO PAID ROUTE. Nothing to
-  // price, nothing to settle, and no way for a gateway to sell its service yet.
+  // that connector terminates exactly ONE route — the door a tenant seals a
+  // Gateway Handover or a Gateway Withdrawal to (§12.1, §12.7) — AT PRICE 0.
+  // A gateway holds no lease, pays nothing and sells nothing, so the one route
+  // it does terminate being free is the whole of what there is to check.
   const res = await fetch(`${GATEWAY_EDGE}/ilp`).catch((e) => fatal(`the gateway's connector is unreachable at ${GATEWAY_EDGE}: ${e.message}`));
   if (!res.ok) fatal(`the gateway's connector GET /ilp -> ${res.status}`);
   const desc = await res.json();
-  assert((desc.routes ?? []).length === 0,
-    `${GATEWAY_EDGE} is ${desc.ilpAddresses?.join(', ')} and terminates ${(desc.routes ?? []).length} paid route(s) — a gateway holds no lease, pays nothing and sells nothing (ADR 0013)`);
+  const routes = desc.routes ?? [];
+  const priced = routes.filter((r) => BigInt(r.price ?? 0) !== 0n);
+  assert(routes.length === 1 && priced.length === 0,
+    `${GATEWAY_EDGE} is ${desc.ilpAddresses?.join(', ')} and terminates ${routes.length} route(s), ${priced.length} of them priced — one free door and nothing to sell (ADR 0013): ${jstr(routes.map((r) => `${r.prefix ?? r.route ?? '?'}@${r.price ?? 0}`))}`);
 }
 {
   // Spec §12.3's last paragraph: an unknown hostname is answered by the
@@ -207,16 +223,20 @@ const before = await readBooks();
 console.log(`  books before: hub client (${channelKey}) = ${before.hub}; ${PRIMARY.connectorNode} peer = ${before[PRIMARY.service]}; ${STANDBY.connectorNode} peer = ${before[STANDBY.service]}`);
 
 // ── 2. the spawn: an HTTP workload on a two-member Standby Set ────────────
-step(`2. ONE signed spawn of ${HTTP_IMAGE.reference} with container port ${HTTP_CONTAINER_PORT} published, standby_set [${PRIMARY.service}, ${STANDBY.service}]`);
+step(`2. ONE spawn CONTENT for ${HTTP_IMAGE.reference} with container port ${HTTP_CONTAINER_PORT} published, standby_set [${PRIMARY.service}, ${STANDBY.service}], sent to each member in its own request`);
 const tenant = newTenant('m5-tenant');
+// The lease's ROOT SECRET: minted here, never sent anywhere, and the only
+// thing this tenant holds. Every member's Continuation Token and every Gateway
+// Grant below derives from it (spec §6.1.1, §6.5.1).
+const rootSecret = newRootSecret();
 const workloadId = newWorkloadId();
-const request = leaseRequest(tenant, 'spawn', { ...httpSpawnContent(workloadId, tenant), standby_set: SET.map((P) => P.pubkey) }, 300, SET);
+const content = { ...httpSpawnContent(workloadId, tenant), standby_set: SET.map((P) => P.pubkey) };
 const runningBefore = runningWorkloads();
 let primaryAccess = null;
 let primaryContainer = null;
 let primaryHostname = null;
 {
-  const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request });
+  const spawned = await sendTo(PRIMARY, PRIMARY.spawnRoute(L.name, L.version), { request: tokenRequest(rootSecret, 'spawn', content, 300, PRIMARY) });
   if (!spawned.fulfilled) fatal(`the primary's spawn was refused short of the app: ${spawned.code} (${spawned.refusedBy}) ${spawned.message ?? ''}`);
   const body = spawned.status === 200 ? spawned.json() : null;
   if (!body) fatal(`${PRIMARY.service} answered ${spawned.status}: ${spawned.text().slice(0, 300)}`);
@@ -239,62 +259,73 @@ let primaryHostname = null;
   ok(`and reports itself as \`${primaryHostname}\` — the name whoami answers with, so the primary's copy is tellable from any other`);
 }
 {
-  const reserved = await sendTo(STANDBY, STANDBY.standbyRoute(L.name, L.version), { request });
+  const reserved = await sendTo(STANDBY, STANDBY.standbyRoute(L.name, L.version), { request: tokenRequest(rootSecret, 'standby', content, 300, STANDBY) });
   if (!reserved.fulfilled) fatal(`the standby's spawn was refused short of the app: ${reserved.code} (${reserved.refusedBy}) ${reserved.message ?? ''}`);
   const body = reserved.status === 200 ? reserved.json() : null;
   if (!body) fatal(`${STANDBY.service} answered ${reserved.status}: ${reserved.text().slice(0, 300)}`);
   took(STANDBY, reserved, 'the standby reservation', HUB_STANDBY_PRICE);
   assert(body.workload_id === workloadId && body.role === 'standby' && !('access' in body),
-    `the SAME bytes on .standby: role ${body.role}, no access — a Warm Standby holds capacity and runs nothing until a Takeover`);
+    `the SAME CONTENT on .standby, in its own request under op=standby: role ${body.role}, no access — a Warm Standby holds capacity and runs nothing until a Takeover`);
 }
 
-// ── 3. the grant: the tenant's whole side of this milestone ───────────────
+// ── 3. the handover: the tenant's whole side of this milestone ────────────
 // A FRESH NAME PER RUN. A readable name is first come, first served across
 // every grant still in force on the gateway (spec §12.6), and an earlier run's
 // grant outlives its lease, so a fixed name would be the *old* run's and this
 // one would be served at the canonical hostname alone.
 const NAME = `m5-${randomBytes(4).toString('hex')}`;
-step(`3. the tenant publishes a Gateway Grant (kind ${K_GATEWAY_GRANT}) naming the sandbox gateway, with the name \`${NAME}\``);
-const grantReport = (() => {
-  const args = [
-    join(ROOT, 'scripts', 'grant.mjs'),
-    '--workload', workloadId,
-    '--key', Buffer.from(tenant.secret).toString('hex'),
-    '--http-port', String(HTTP_CONTAINER_PORT),
-    '--ports', String(HTTP_CONTAINER_PORT),
-    ...SET.flatMap((P) => ['--standby', P.service]),
-    '--expires-in', '1h',
-    '--name', NAME,
-  ];
-  console.log(`  node scripts/grant.mjs --workload ${workloadId.slice(0, 12)}… --key <the tenant's> --http-port ${HTTP_CONTAINER_PORT} --ports ${HTTP_CONTAINER_PORT} ${SET.map((P) => `--standby ${P.service}`).join(' ')} --expires-in 1h --name ${NAME}`);
-  const ran = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
-  if (ran.status !== 0) {
-    fatal(`scripts/grant.mjs exited ${ran.status}: ${(ran.stderr ?? '').trim().split('\n').slice(-6).join('\n')}`);
-  }
-  try {
-    return JSON.parse(ran.stdout);
-  } catch {
-    return fatal(`scripts/grant.mjs printed no JSON report: ${ran.stdout.slice(0, 400)}`);
-  }
-})();
+step(`3. the tenant SEALS a Gateway Handover to the gateway's own connector — nothing is published — with the name \`${NAME}\``);
 const CANONICAL = `${canonicalLabel(workloadId)}.${DOMAIN}`;
 const NAMED = `${NAME}.${DOMAIN}`;
-assert(grantReport.accepted?.length >= 1, `the relay accepted the grant: ${(grantReport.accepted ?? []).join(', ') || 'NONE'} (${jstr(grantReport.failed ?? {})})`);
-assert(grantReport.grant?.gateway === GATEWAY && grantReport.grant?.http_port === HTTP_CONTAINER_PORT
-  && JSON.stringify(grantReport.grant?.standby_set) === JSON.stringify(SET.map((P) => P.pubkey)) && grantReport.grant?.name === NAME,
-  `its content names gateway ${GATEWAY.slice(0, 12)}… (conf/workload-gateway.conf's key), http_port ${grantReport.grant?.http_port}, the set primary first, name ${grantReport.grant?.name}, until ${new Date((grantReport.grant?.expires_at ?? 0) * 1000).toISOString()}`);
-assert(grantReport.hostnames?.[0] === CANONICAL && canonicalLabel(workloadId).length === 52 && /^[a-z2-7]{52}$/.test(canonicalLabel(workloadId)),
+// The command a developer runs (README §2), with the root secret in the
+// environment and never on the command line. A lease spawned in code has no
+// lease file, so the values are flags — which is the script's own by-hand mode.
+const handoverArgs = [
+  '--workload', workloadId,
+  ...SET.flatMap((P) => ['--standby', P.service]),
+  '--http-port', String(HTTP_CONTAINER_PORT),
+  '--ports', String(HTTP_CONTAINER_PORT),
+  '--expires-in', '1h',
+  '--name', NAME,
+];
+console.log(`  TOON_ROOT_SECRET=<the lease's> node scripts/handover.mjs ${handoverArgs.join(' ').replace(workloadId, workloadId.slice(0, 12) + '…')}`);
+const handed = runHandover(handoverArgs, { rootSecret });
+if (handed.status !== 0 || handed.report === null) {
+  fatal(`scripts/handover.mjs exited ${handed.status}: ${(handed.stderr ?? '').trim().split('\n').slice(-6).join('\n')}`);
+}
+const handover = handed.report.handover;
+assert(handed.report.delivered === true,
+  `the gateway TOOK the handover: delivered ${handed.report.delivered}${handed.report.failed ? ` (${handed.report.failed})` : ''} — it admitted it by asking the members whether the grant works (spec §12.1)`);
+assert(handover?.http_port === HTTP_CONTAINER_PORT && handover?.name === NAME
+  && JSON.stringify(handover?.standby_set?.map((m) => m.provider)) === JSON.stringify(SET.map((P) => P.pubkey)),
+  `the message names http_port ${handover?.http_port}, the set primary first, name ${handover?.name}, until ${new Date((handover?.expires_at ?? 0) * 1000).toISOString()} — and no gateway: being sealed to that connector is what names one (spec §12.1)`);
+{
+  // ONE GRANT PER MEMBER, derived under that member's own key — the thing a
+  // single shared value would have broken (spec §6.5.1, §7). Re-derived here
+  // from the root secret rather than read out of the tool's report, so the
+  // sandbox and the tenant tool agreeing is itself the assertion.
+  const ours = SET.map((P) => gatewaySubFor(continuationFor(rootSecret, P.pubkey), handover.expires_at));
+  const theirs = handover.standby_set.map((m) => m.grant);
+  assert(new Set(theirs).size === SET.length && JSON.stringify(theirs) === JSON.stringify(ours),
+    `${theirs.length} DIFFERENT grants, one per member, each the gateway_sub of that member's own Continuation Token for ${handover.expires_at} — derived here independently and matching the tool's byte for byte`);
+}
+assert(handed.report.hostnames?.[0] === CANONICAL && canonicalLabel(workloadId).length === 52 && /^[a-z2-7]{52}$/.test(canonicalLabel(workloadId)),
   `the canonical hostname is ${CANONICAL} — ${canonicalLabel(workloadId).length} characters of lowercase unpadded base32 over the workload id, where its 64 hex characters would not fit a DNS label; derived and never assigned (spec §12.2)`);
 {
-  // Read back from the relay rather than trusted from the tool's own report:
-  // the grant reaches the gateway the same way, as a signed event on a relay.
-  const found = await relayReadUntil({ kinds: [K_GATEWAY_GRANT], '#d': [workloadId] }, 'grant', 30);
-  const event = found.find((e) => e.pubkey === tenant.pubkey) ?? null;
-  assert(event !== null && verifyEvent(event) && hasTag(event, ['d', workloadId]) && hasTag(event, ['p', GATEWAY]) && hasTag(event, ['L', TOON_LABEL]),
-    event ? `on the relay: kind ${event.kind}, d = the workload id, ["p","${GATEWAY.slice(0, 12)}…"] (the one filter a gateway watches, spec §12.1), ["L","${TOON_LABEL}"], signed by the tenant`
-      : `no kind ${K_GATEWAY_GRANT} on d=${workloadId.slice(0, 12)}… from the tenant within 30s`);
+  // The absence that replaced the read-back Milestone 5 made here. There is no
+  // grant event to find, so what is asserted is that the RELAY CARRIES NOTHING
+  // NAMING THIS WORKLOAD at all — no tenant-published `workload_id`, which is
+  // the join key ADR 0016 removed. `make smoke-m6` makes this over the whole
+  // namespace and over every key a tenant of its run held; here it is the one
+  // fact this step used to establish, inverted.
+  const everything = await relayRead({ limit: 5000 }, 'nothing-published');
+  const naming = everything.filter((e) => JSON.stringify(e).includes(workloadId));
+  assert(naming.length === 0,
+    naming.length === 0
+      ? `the relay holds ${everything.length} event(s) and NOT ONE of them names workload ${workloadId.slice(0, 12)}… — the handover went to the gateway's connector as a sealed packet and nowhere else (spec §12.1, ADR 0017)`
+      : `${naming.length} event(s) on the relay name this workload: ${naming.map((e) => `kind ${e.kind} by ${e.pubkey.slice(0, 12)}…`).join(', ')}`);
 }
-ok('and NOTHING was told to the gateway out of band: publishing the grant is the whole ceremony');
+ok('and the gateway was told NOTHING else: one sealed packet is the whole ceremony, and the tenant signed nothing to send it (ADR 0016, ADR 0017)');
 
 // ── 4. the two URLs, answered by the workload on the primary ──────────────
 step(`4. both URLs answer with the workload's own body, served from the primary (${primaryContainer})`);
@@ -371,7 +402,7 @@ const servedByStandby = (a) => a.status === 200 && whoamiHostname(a.body) === st
   assert(servedByStandby(answer),
     `http://${NAMED}:${GATEWAY_HTTP_PORT}/ -> ${summary(answer)}: the readable name followed the workload too`);
 }
-ok('the tenant published nothing, signed nothing and was not online for any of it: the grant it published in step 3 is the whole of its part (ADR 0010, spec §12.7)');
+ok('the tenant published nothing, signed nothing and was not online for any of it: the one packet it sealed in step 3 is the whole of its part (ADR 0010, ADR 0016, spec §12.7)');
 
 // ── 7. the primary comes back and stands down ─────────────────────────────
 step('7. the primary is STARTED again: it finds the Takeover, stops its own copy, and the URLs still answer from the standby');
@@ -393,7 +424,7 @@ step('7. the primary is STARTED again: it finds the Takeover, stops its own copy
 // ── 8. the tenant ends the leases; the URLs say why ───────────────────────
 step(`8. the tenant terminates both leases; within ${WITHDRAW_BUDGET_S}s both URLs answer 503 with a gateway reason that nothing is running it`);
 for (const P of SET) {
-  const res = await sendTo(P, P.terminateRoute, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
+  const res = await sendTo(P, P.terminateRoute, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!res.fulfilled) { bad(`terminate on ${P.service} was refused short of the app: ${res.code} (${res.refusedBy})`); continue; }
   const body = res.status === 200 ? res.json() : null;
   assert(res.status === 200 && body?.workload_id === workloadId && JSON.stringify(body?.state) === JSON.stringify({ ended: 'termination' }),
@@ -435,4 +466,4 @@ step('9. the books, to the unit: every unit either provider took is one the TENA
 }
 
 console.log(`\n  total run time ${Math.round((Date.now() - startedAt) / 1000)}s`);
-done(`a tenant spawned an HTTP workload on a two-member Standby Set, published one Gateway Grant and stopped there; the gateway found the grant on the relay by itself, resolved the workload across the set with a \`status\` signed by its own key, and served it at ${CANONICAL} and ${NAMED} over HTTP and HTTPS with the tenant's Host preserved. With the primary stopped, the standby took the workload over and THE SAME TWO URLS came back answered by the copy on the standby — the milestone's promise, with the tenant offline throughout. The restarted primary stood down leaving one copy; terminate left both URLs answering 503 ${[...new Set(refused)].join(' / ')} in the spec's error shape; and neither provider's book grew by a single unit for anything the gateway asked.`);
+done(`a tenant spawned an HTTP workload on a two-member Standby Set — one content, one request per member, each bearing that member's own Continuation Token — sealed ONE Gateway Handover to the gateway's connector and stopped there; the gateway admitted it by asking the members, resolved the workload across the set with a free \`status\` presenting the grant it was handed, and served it at ${CANONICAL} and ${NAMED} over HTTP and HTTPS with the tenant's Host preserved. Nothing was published: not one event on the relay names this workload. With the primary stopped, the standby took the workload over and THE SAME TWO URLS came back answered by the copy on the standby — the milestone's promise, with the tenant offline throughout. The restarted primary stood down leaving one copy; terminate left both URLs answering 503 ${[...new Set(refused)].join(' / ')} in the spec's error shape; and neither provider's book grew by a single unit for anything the gateway asked.`);

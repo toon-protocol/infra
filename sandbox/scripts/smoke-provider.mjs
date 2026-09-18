@@ -18,9 +18,11 @@
 //   1.  a real client (@toon-protocol/client) opens a SOLANA mock-USDC channel
 //       against the hub — the same payer, mnemonic and channel store as
 //       scripts/smoke-toon.mjs, so both smokes share one channel
-//   2.  a TENANT signs a Lease Request with a fresh Nostr key: kind
-//       K_LEASE_REQUEST, tags p = the provider's pubkey, op = spawn,
-//       expiration; content names the image by reference + digest, an
+//   2.  a TENANT mints a lease's ROOT SECRET and builds a Lease Request from
+//       it: a plain JSON object (spec §6.1) with a fresh request_id, op =
+//       spawn, provider = this provider's pubkey, an expiration, and the
+//       Continuation Token derived for that key. Nothing is signed; the
+//       content names the image by reference + digest, an
 //       ed25519 SSH public key made just now, and the env/entrypoint that
 //       make the image's sshd install that key
 //   3.  the client PAYS g.toon.provider.basic.v1.spawn through the hub,
@@ -53,7 +55,7 @@ import {
   reporter, jstr, nowSec, waitFor,
   claims, clientBookTotal, peerBookTotal, readSolanaChannel,
   docker, findWorkload, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
 // WHICH PROVIDER this run is about. Everything below asks it, rather than the
@@ -131,12 +133,13 @@ console.log(`  books before: hub client=${hubBefore}, provider peer=${providerBe
 // one its Profile publishes (ADR 0011), and the two providers publish two.
 const send = (route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
 
-// ── 2. the tenant, its key, its Lease Request ────────────────────────────
-step('2. a tenant signs a Lease Request with a fresh Nostr key and a fresh SSH key');
+// ── 2. the tenant, its secret, its Lease Request ─────────────────────────
+step('2. a tenant mints a root secret and builds a Lease Request bearing the token derived for this provider');
 const tenant = newTenant('tenant');
+const rootSecret = newRootSecret();
 const workloadId = newWorkloadId();
-const request = leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant), 120, P);
-ok(`tenant ${tenant.pubkey} signed request ${request.id} for workload ${workloadId} (p = ${request.tags[0][1]})`);
+const request = tokenRequest(rootSecret, 'spawn', spawnContent(workloadId, tenant), 120, P);
+ok(`request ${request.request_id.slice(0, 12)}… for workload ${workloadId}, addressed to ${request.provider.slice(0, 12)}… and bearing this lease's token — signed by nobody`);
 
 // ── 3. the PAID spawn, through the hub ───────────────────────────────────
 step(`3. a PAID ${SPAWN_ROUTE} routes hub -> peering -> provider connector -> provider`);
@@ -216,7 +219,7 @@ if (!access) {
 } else if (KEEP_WORKLOAD) {
   console.log(`  ${workload?.name ?? 'the workload'} is left running (TOON_SMOKE_KEEP_WORKLOAD); the provider's expiry sweep destroys it ~${L.lease_interval_s}s after the spawn.`);
 } else {
-  const terminated = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
+  const terminated = await send(TERMINATE_ROUTE, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!terminated.fulfilled) {
     bad(`terminate was refused short of the app: ${terminated.code} (${terminated.refusedBy})`);
   } else {

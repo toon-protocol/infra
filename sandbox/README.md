@@ -98,13 +98,15 @@ hub's edge:
    both ends of the run and requires the ANYONE rate to have **moved**: every
    other assertion would pass against a frozen TWAP.
 
-Opt-in on top of all that, the **Workload Gateway** (TOON_Network Milestone 5,
-ADR 0013, spec §12): a stable hostname per workload, keyed by its workload id
-and resolved to whichever sandbox provider is running it, behind a connector
-of its own — `make up-gateway`, then publish a Gateway Grant with one command
-and `curl http://<label>.gw.localhost:3280/` (§2, *The Workload Gateway*).
-`make smoke-m5` is that path as an acceptance test, with a Takeover in the
-middle of it.
+Opt-in on top of all that, the **Workload Gateway** (TOON_Network Milestones 5
+and 6, ADR 0013, spec §12): a stable hostname per workload, keyed by its
+workload id and resolved to whichever sandbox provider is running it, behind a
+connector of its own — `make up-gateway`, then seal a Gateway Handover to it
+with one command and `curl http://<label>.gw.localhost:3280/` (§2, *The
+Workload Gateway*). **Nothing on that path is published.** `make smoke-m5` is
+that path as an acceptance test, with a Takeover in the middle of it;
+`make smoke-m6` is the whole tenant path with nothing signed and nothing
+published, and it sweeps the relay to say so.
 
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
@@ -219,7 +221,7 @@ Thirteen services instead of thirty-five:
 **The compute provider** (TOON_Network Milestone 1) lives on this profile
 too, and has five smokes of its own, all runnable back to back in any order:
 `make smoke-provider` (one paid spawn through the hub, SSH in, the books,
-a billed replay, a tenant-signed terminate), `make smoke-provider2` (THE SAME
+a billed replay, a terminate bearing the lease's token), `make smoke-provider2` (THE SAME
 SCRIPT against the second provider — `TOON_SMOKE_PROVIDER=provider2`, one
 provider argument through the same helpers: its edge at :3250, its pubkey,
 its config, its peering channel), `make smoke-directory` (the
@@ -295,9 +297,11 @@ provider argument.
 
 **`make smoke-m3` — Milestone 3's acceptance test** (TOON_Network #11 / #35,
 `scripts/smoke-milestone3.mjs`): Warm Standby end to end, across both
-providers. A tenant signs ONE spawn whose content names the Standby Set
-`[provider, provider2]` — one `p` tag per member, the same bytes to each —
-and pays it on the first provider's `g.toon.provider.warm.v1.spawn` at the
+providers. A tenant sends ONE spawn content naming the Standby Set
+`[provider, provider2]` to each member in a **request of its own** — naming
+only that member and bearing only that member's Continuation Token, under the
+`op` its route serves (spec §6.1, §7) — and pays it on the first provider's
+`g.toon.provider.warm.v1.spawn` at the
 full price and on the second's `g.toon.provider2.warm.v1.standby` at
 `standby_price`. The primary answers `role: primary` with access and runs
 the workload in its own id range (`toon-10xx`), reachable over SSH with the
@@ -328,38 +332,34 @@ pass afterwards. **Milestone 4's, `make smoke-m4`, lives on the `hs` profile**
 documented with `make smoke-hs` under *Hidden-service ingress* below.
 
 **`make smoke-m5` — Milestone 5's acceptance test** (TOON_Network #46 / #54,
-`scripts/smoke-milestone5.mjs`), **as Milestone 5 had it**: against this
-checkout it does not pass, and it fails in three places for the same reason —
-Milestone 6 moved what it asserts. Step 0 reads the gateway's connector and
-demands it terminate **no** paid route, which is now one free one; step 2
-spawns with a signed Lease Request the Milestone 6 provider refuses
-`invalid_request`; step 3 publishes a Gateway Grant (kind `30438`) no gateway
-reads any more. The Milestone 6 smoke (TOON_Network #63) is what proves the
-gateway path now, and moving the older smokes is that ticket's — §2's *The
-Workload Gateway* is the same path by hand, and it works today.
-What it proved: the **Workload Gateway** end to end, and the
-milestone's promise in one sentence — *a workload has a stable URL that
-survives a Takeover with no tenant online*. It needs the `gateway` profile
-(`make up-gateway`, or `make up-gateway COMPOSE_PROFILE=payments`); §2's *The
-Workload Gateway* is the same path by hand. First the gateway's own connector
-(`http://localhost:3260/ilp`) is read and terminates **no paid route** — a
-gateway is party to no lease (ADR 0013) — and a hostname it holds no grant for
-is answered by the gateway itself, `503 no_grant`, dialling nothing. Then a
-tenant spawns `traefik/whoami` on container port **80** across the Standby Set
-`[provider, provider2]` (the `smoke-m3` shape, with `ports`) and publishes ONE
-**Gateway Grant** with `node scripts/grant.mjs` — a script this checkout no
-longer has, replaced by `scripts/handover.mjs`, so the smoke cannot reach even
-this far: kind 30438 on the relay, read
-back from it, naming the sandbox gateway in its `p` tag, this workload, the
-`http_port`, both members primary first, an expiry and a fresh short name.
-**Nothing else is told to the gateway**; publishing the grant is the whole
-ceremony, and the tenant's part ends there. The canonical hostname (the
-52-character base32 of the workload id) and the grant's name then both answer
-with the workload's **own body**, over HTTP and over HTTPS with the committed
-dev certificate, carrying the tenant's `Host` unchanged and the
-`X-Forwarded-For` / `-Proto` / `-Host` of spec §12.5. `docker compose stop
-provider` next, and the `smoke-m3` timeline runs underneath: the standby
-announces a Takeover on the relay, the gateway's own settle window (two
+`scripts/smoke-milestone5.mjs`), on Milestone 6's tenant path: the **Workload
+Gateway** end to end, and the milestone's promise in one sentence — *a workload
+has a stable URL that survives a Takeover with no tenant online*. That promise
+is unchanged; what moved underneath it is how a tenant chooses a gateway (a
+sealed handover, not a published grant) and how a request authenticates (a
+Continuation Token, not a signature). It needs the `gateway` profile (`make
+up-gateway`, or `make up-gateway COMPOSE_PROFILE=payments`); §2's *The Workload
+Gateway* is the same path by hand. First the gateway's own connector
+(`http://localhost:3260/ilp`) is read and terminates **exactly one route, and
+it is free** — the handover door; a gateway is party to no lease and sells
+nothing (ADR 0013) — and a hostname it holds no grant for is answered by the
+gateway itself, `503 no_grant`, dialling nothing. Then a tenant spawns
+`traefik/whoami` on container port **80** across the Standby Set `[provider,
+provider2]` (the `smoke-m3` shape, with `ports`) and **seals ONE Gateway
+Handover** to the gateway's connector with `node scripts/handover.mjs`: one
+Gateway Grant derived per member from the lease's root secret for one moment,
+the `http_port`, both members primary first, and a fresh short name. The smoke
+re-derives all of those itself and requires them to match the tool's byte for
+byte, and it reads the relay and requires **not one event on it to name the
+workload** — there is no publish step any more, and the absence is asserted
+where the read-back used to be. **Nothing else is told to the gateway**; the
+one packet is the whole ceremony, and the tenant signed nothing to send it. The
+canonical hostname (the 52-character base32 of the workload id) and the
+handover's name then both answer with the workload's **own body**, over HTTP
+and over HTTPS with the committed dev certificate, carrying the tenant's `Host`
+unchanged and the `X-Forwarded-For` / `-Proto` / `-Host` of spec §12.5. `docker
+compose stop provider` next, and the `smoke-m3` timeline runs underneath: the
+standby announces a Takeover on the relay, the gateway's own settle window (two
 cadences from the claim's `created_at`) passes, and **the same two URLs come
 back answered by the copy on the standby** — whoami reports its own container,
 so the move is visible in the response body and in nobody's log. The restarted
@@ -367,10 +367,53 @@ primary stands down, leaving one copy; `terminate` on both leases leaves both
 URLs answering `503 no_running_member` in spec §5's error shape and in the
 `toon-gateway-reason` header; and neither provider's peer book grew by a single
 unit for anything the gateway asked, because `status` is free and a gateway
-calls no other route. Buys the 600 s `warm` tier on both providers; six to
+calls no other route. Buys the 600 s `warm` tier on both providers; five to
 seven minutes, four of them the takeover timeline. Like `smoke-m3` it stops and
 restarts the FIRST provider's container, so run it alone. `make smoke-m1` to
 `make smoke-m4` still pass afterwards.
+
+**`make smoke-m6` — Milestone 6's acceptance test** (TOON_Network #56 / #63,
+`scripts/smoke-milestone6.mjs`): the whole path a tenant walks — pay, spawn,
+poll, delegate, front, withdraw, terminate — **without signing anything and
+without publishing anything**, with every step asserting that what the
+milestone removed is really gone rather than merely unused. Same profile as
+`smoke-m5` (`make up-gateway`), two to three minutes.
+
+- **The lease path.** A paid spawn bearing the Continuation Token derived for
+  the provider starts a workload, and `status` with that token answers. Then
+  the four refusals, each with its own code (spec §6.1.2): a **wrong** token is
+  `not_tenant` and quotes no token back; an **absent** token is `not_tenant`
+  too, so nothing reads as an unauthenticated success; a **replayed**
+  `request_id` is `stale_request`; and a request naming the **other provider**
+  is `invalid_request`. The lease is untouched by all four.
+- **The restart.** `provider`'s container is stopped — the workload goes on
+  running on the host daemon, which is the point — and started again, and the
+  **same token still reads and still ends the lease**. A provider that forgot
+  the token would have left a paid workload nobody could read, extend or stop.
+- **The gateway path.** `node scripts/handover.mjs` seals a handover and a
+  `curl` of the canonical hostname reaches the workload's own body. A
+  **delegated `status`** — the grant as the request's `continuation`, its
+  moment in `gateway_expires_at` — is answered byte for byte what the tenant is
+  answered; a grant derived for a moment that has passed is `bad_grant`; and a
+  **delegated `terminate` is refused both ways it can be sent**
+  (`invalid_request` with the moment, `not_tenant` without it). A **Gateway
+  Withdrawal** then takes the workload off and the same `curl` answers the
+  gateway's own `no_grant`, while the lease runs on untouched.
+- **The Standby Set.** A spawn forms a set across both providers, one request
+  per member, and then the regression the per-provider derivation exists to
+  prevent: a request bearing the **primary's** token is refused `not_tenant` at
+  the **standby**, on `status` and on `terminate` alike, while the standby's own
+  token reads it perfectly — so the refusal is about the token and not about the
+  standby.
+- **The assertion that closes the milestone,** which no other test can make:
+  the relay is read across the whole namespace and **no event on it is signed
+  by a key this run's tenants held**, none is of kind `4432` or `30438`, none
+  names either `workload_id` the run chose, and every author in the namespace
+  is a provider or a publisher. Before that sweep runs for real it is run over
+  a **fabricated** relay carrying exactly those events and required to catch
+  all four — because a sweep that finds nothing is worth only what its ability
+  to find something is worth. Nothing is ever published to make that point: a
+  relay keeps what it is given, and there would be no taking it back.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -836,6 +879,16 @@ is not in the lease's Standby Set, or a lease that has ended), `no_proxy`,
 `admission_failed` (spec §12.1); a withdrawal bearing the wrong grant is
 `not_withdrawn` and changes nothing (§12.7).
 
+**Two smokes walk this path in code.** `make smoke-m5` is the URL surviving a
+Takeover with no tenant online, and `make smoke-m6` is the whole tenant path
+with nothing signed and nothing published — including the delegated `status`
+that works, the delegated `terminate` that does not, the withdrawal that leaves
+the lease running, and a sweep of the relay for anything a tenant could have
+put there; §2 describes each in full. Both run `scripts/handover.mjs` — this
+same script, these same flags — rather than sealing a
+handover of their own, so a walk-through that drifts from the smokes fails one
+of them.
+
 **How `*.gw.localhost` resolves, and what to do when it does not.** Nothing is
 added to anyone's DNS or `/etc/hosts`. A modern stub resolver answers every
 name under `.localhost` with loopback — systemd-resolved does, and so do the
@@ -919,10 +972,9 @@ address, nothing rewrites it, and the gateway can only dial it through
 ```bash
 # a lease on the hidden provider, over the circuit: scripts/smoke-milestone4.mjs step 3 is the
 # reference — a buyer with the address and the proxy (account index 6, minting its own USDC),
-# a spawn with `ports: [{ container_port: 80 }]` and an HTTP image — with ONE change until
-# TOON_Network #63 moves that smoke: the request is `tokenRequest(rootSecret, 'spawn', …)`
-# from scripts/lib/provider-smoke.mjs, not the signed `leaseRequest` the smoke still builds.
-# Mint the root secret with `newRootSecret()`; keep it and the workload id.
+# a spawn with `ports: [{ container_port: 80 }]` and an HTTP image, the request built by
+# `tokenRequest(rootSecret, 'spawn', …)` from scripts/lib/provider-smoke.mjs. Mint the root
+# secret with `newRootSecret()`; keep it and the workload id — the handover below needs both.
 #
 # the handover, naming the hidden provider as the one member. The lease was spawned by hand,
 # so there is no lease file: the values are flags, and the root secret is the environment's
@@ -2347,6 +2399,29 @@ through the proxy or not at all.
 - **`make smoke` fails at step 4c after `make up-hs`**: expected, not a
   regression. That node now advertises its `.anyone` address, and a clearnet
   client has no proxy to reach it with — §2, *Hidden-service ingress*.
+- **A directory publisher publishes nothing and logs `F03 claim rejected:
+  advances value by 0, less than this route's price of 1`** (seen on
+  `directory-publisher-hs`; any publisher can reach it). Its LOCAL channel
+  store has fallen behind the connector's claim journal, so every claim it
+  signs is one the connector has already booked and nothing can ever advance.
+  It does not heal on its own and it is not a code fault: a smoke that reads
+  Liveness off the relay then fails on a descriptor hundreds of seconds stale,
+  before it has dialled anything (`make smoke-m4` step 1 is the one that says
+  so most loudly). Confirm it by comparing the two numbers —
+
+  ```bash
+  docker compose --profile hs exec -T directory-publisher-hs cat /var/lib/toon-publisher/channels.json
+  curl -s -H "authorization: Bearer $(cat keys/toon/relay-connector/operator-bearer.token)" \
+      http://localhost:3200/claims | grep <that channel account>
+  ```
+
+  — a publisher `cumulativeAmount` at or below the connector's
+  `cumulative_amount` for the same channel is the condition. The clean remedy
+  is `make clean` (it takes the claim journals AND the stores together, which
+  is exactly why `-v` is there) followed by a cold start; on the `hs` profile
+  that also publishes new `.anyone` addresses, so on a stack you want to keep,
+  the alternative is to stop the publisher and raise its stored
+  `cumulativeAmount` past the connector's before starting it again.
 - **`F01 … no record of that channel` after `make down` + `make up-hs`**:
   anvil keeps nothing across a restart, so a kept channel store outlives its
   chain. `smoke-hs` reads its channel's collateral back off the chain before it

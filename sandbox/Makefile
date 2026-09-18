@@ -83,7 +83,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-ci smoke-hs hs-address \
         logs ps test require-store-context require-anytoon-context require-gateway-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -491,7 +491,7 @@ smoke-m3:
 ## sidecar, both under the lease's cgroup slice carrying the tier's limits;
 ## over SSH, as the tenant, /var/run/docker.sock answers, is NOT the host's
 ## daemon, pulls hello-world and runs it; the books grow by the tier's price;
-## a tenant-signed terminate removes the workload, the sidecar, its volumes,
+## a terminate bearing the lease's token removes the workload, the sidecar, its volumes,
 ## its network and its slice. Pre-pulls the dind image so the spawn does not
 ## pay for it. About a minute.
 smoke-ci:
@@ -540,27 +540,21 @@ smoke-m4:
 	node scripts/smoke-milestone4.mjs
 
 ## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
-## — AS MILESTONE 5 HAD IT, and it does NOT pass against this checkout. It
-## fails in three places, all of them Milestone 6 moving what it asserts: step
-## 0 demands the gateway's connector terminate no paid route (it now terminates
-## one free one), step 2 spawns with a signed Lease Request the Milestone 6
-## provider refuses `invalid_request`, and step 3 shells out to
-## scripts/grant.mjs, which this checkout replaced with scripts/handover.mjs.
-## The Milestone 6 smoke (TOON_Network #63) is what proves the gateway path
-## now. Left as it was, like every other milestone's smoke, for that ticket to
-## move; README §2's walk-through is the working path by hand today.
-## For `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
+## for `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
 ## WORKLOAD GATEWAY end to end — a workload has a stable URL that survives a
-## Takeover with no tenant online. The gateway's own connector terminates no
-## paid route and an unknown hostname is answered `no_grant` by the gateway
-## itself. A tenant spawns `traefik/whoami` on container port 80 across a
-## two-member Standby Set (the `make smoke-m3` shape, with ports), publishes ONE
-## Gateway Grant with `node scripts/grant.mjs` — kind 30438 on the relay, naming
-## the sandbox gateway, the workload, http_port 80, both members primary first,
-## an expiry and a fresh name — and stops there. Both the canonical hostname
-## (the 52-character base32 of the workload id) and the grant's name then answer
-## with the workload's OWN body over HTTP and HTTPS, `Host` preserved and the
-## §12.5 forwarding headers set. `docker compose stop provider`: the standby
+## Takeover with no tenant online. That promise is Milestone 5's and is
+## unchanged; the tenant path underneath it is Milestone 6's (#56, #63). The
+## gateway's own connector terminates exactly ONE route and it is free, and an
+## unknown hostname is answered `no_grant` by the gateway itself. A tenant
+## spawns `traefik/whoami` on container port 80 across a two-member Standby Set
+## (the `make smoke-m3` shape, with ports) — one content, one request per
+## member, each bearing that member's own Continuation Token — SEALS ONE Gateway
+## Handover to the gateway's connector with `node scripts/handover.mjs`
+## (nothing is published: the smoke asserts the relay holds no event naming the
+## workload) and stops there. Both the canonical hostname (the 52-character
+## base32 of the workload id) and the handover's name then answer with the
+## workload's OWN body over HTTP and HTTPS, `Host` preserved and the §12.5
+## forwarding headers set. `docker compose stop provider`: the standby
 ## announces a Takeover, settles and starts the workload, and THE SAME TWO URLS
 ## come back answered by the copy on the STANDBY — whoami names its own
 ## container, so the move is visible in the response body and in no log. The
@@ -573,6 +567,39 @@ smoke-m4:
 ## on it meanwhile.
 smoke-m5:
 	node scripts/smoke-milestone5.mjs
+
+## MILESTONE 6 ACCEPTANCE TEST (TOON_Network #56 / #63, scripts/smoke-milestone6.mjs)
+## for `make up-gateway` (or `make up-gateway COMPOSE_PROFILE=payments`): the
+## whole path a tenant walks — pay, spawn, poll, delegate, front, withdraw,
+## terminate — WITHOUT SIGNING ANYTHING AND WITHOUT PUBLISHING ANYTHING, with
+## each step asserting that what the milestone removed is really gone rather
+## than merely unused. A paid spawn bearing the Continuation Token derived for
+## the provider starts a workload and `status` with that token answers; a wrong
+## token and an absent one are both `not_tenant`, a replayed `request_id` is
+## `stale_request`, and a request naming the other provider is
+## `invalid_request` — and the lease is untouched by all four. The provider's
+## container is then STOPPED (the workload goes on running) and STARTED, and
+## the same token still reads and still ends the lease: a restart does not
+## orphan a paid workload. `node scripts/handover.mjs` seals a Gateway Handover
+## to the gateway's connector and a `curl` of the canonical hostname reaches
+## the workload's own body; a DELEGATED `status` is answered byte for byte what
+## the tenant is answered, an expired grant is `bad_grant`, and a delegated
+## `terminate` is refused both ways it can be sent; a Gateway Withdrawal takes
+## the workload off and the same `curl` answers the gateway's own `no_grant`.
+## Then a Standby Set across both providers — one content, one request per
+## member — and THE REGRESSION per-provider derivation exists to prevent: a
+## request bearing the primary's token is refused `not_tenant` at the standby,
+## on `status` and on `terminate`, while the standby's own token reads it fine.
+## Finally the relay is swept across the whole namespace: no event signed by a
+## key this run's tenants held, none of kind 4432 or 30438, none naming either
+## workload id, and every author a provider or a publisher — the sweep having
+## first been run against a FABRICATED relay carrying exactly those events and
+## shown to catch them, so that finding nothing means something. Buys the 600 s
+## `warm` tier twice on the first provider (one lease at a time) and once as a
+## standby on the second; two to three minutes. It stops and restarts the FIRST
+## provider's container, so nothing else should be spawning on it meanwhile.
+smoke-m6:
+	node scripts/smoke-milestone6.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100
