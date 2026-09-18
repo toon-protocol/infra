@@ -491,9 +491,9 @@ smoke-m3:
 ## sidecar, both under the lease's cgroup slice carrying the tier's limits;
 ## over SSH, as the tenant, /var/run/docker.sock answers, is NOT the host's
 ## daemon, pulls hello-world and runs it; the books grow by the tier's price;
-## a terminate bearing the lease's token removes the workload, the sidecar, its volumes,
-## its network and its slice. Pre-pulls the dind image so the spawn does not
-## pay for it. About a minute.
+## a terminate bearing the lease's token removes the workload, the sidecar,
+## its volumes, its network and its slice. Pre-pulls the dind image so the
+## spawn does not pay for it. About a minute.
 smoke-ci:
 	@docker pull -q $$(node -e "process.stdout.write(require('fs').readFileSync('scripts/smoke-ci.mjs','utf8').match(/DIND_IMAGE = '([^']+)'/)[1])") >/dev/null
 	node scripts/smoke-ci.mjs

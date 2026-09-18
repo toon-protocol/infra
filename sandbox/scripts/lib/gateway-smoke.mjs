@@ -212,6 +212,43 @@ export function gatewayGet(hostname, { path = '/', tls = false, timeoutMs = 20_0
 }
 
 /**
+ * The ONE refusal reason a gateway names for an answer (spec §12.3), out of
+ * the `toon-gateway-reason` header; null for a 200.
+ */
+export const gatewayReason = (answer) => answer.headers['toon-gateway-reason'] ?? null;
+
+/**
+ * Is this answer the gateway refusing with `code`, ITS OWN way — a 503, the
+ * reason in the header, AND the same code in a body that is spec §5's error
+ * shape and nothing else (§12.3)?
+ *
+ * The header and the body have to agree, which is the whole reason this is one
+ * function rather than two checks written out wherever a refusal is read: a
+ * gateway that named a reason in one place and not the other would be a
+ * gateway a tenant's parser could not trust either half of.
+ */
+export const gatewayRefused = (answer, code) =>
+  answer.status === 503 && gatewayReason(answer) === code && errorBody(answer)?.error === code;
+
+/**
+ * What a gateway's own connector says it terminates, from its `GET /ilp`:
+ * `{ ilpAddresses, routes, priced }`, where `priced` is the routes whose price
+ * is not zero.
+ *
+ * ADR 0013 is why a smoke asks: a gateway holds no lease, buys nothing and
+ * sells nothing, so the only route its connector terminates is the free door a
+ * tenant seals a Gateway Handover or a Gateway Withdrawal to (spec §12.1,
+ * §12.7). What that ought to be is the caller's to assert; this reads it.
+ */
+export async function gatewayConnector(edge = GATEWAY_EDGE) {
+  const res = await fetch(`${edge}/ilp`);
+  if (!res.ok) throw new Error(`${edge} GET /ilp -> ${res.status}`);
+  const desc = await res.json();
+  const routes = desc.routes ?? [];
+  return { ilpAddresses: desc.ilpAddresses ?? [], routes, priced: routes.filter((r) => BigInt(r.price ?? 0) !== 0n) };
+}
+
+/**
  * What `traefik/whoami` says its own container is: the `Hostname:` line of its
  * answer, which docker sets per container.
  *

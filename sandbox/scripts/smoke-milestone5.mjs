@@ -80,7 +80,8 @@ import {
 } from './lib/provider-smoke.mjs';
 import {
   GATEWAY_EDGE, GATEWAY_HTTP_PORT, GATEWAY_HTTPS_PORT,
-  canonicalLabel, errorBody, gatewayDomain, gatewayGet, runHandover, whoamiHeader, whoamiHostname,
+  canonicalLabel, errorBody, gatewayConnector, gatewayDomain, gatewayGet, gatewayReason, gatewayRefused,
+  handoverRoute, runHandover, whoamiHeader, whoamiHostname,
 } from './lib/gateway-smoke.mjs';
 import { randomBytes } from 'node:crypto';
 
@@ -138,7 +139,7 @@ async function askGateway(hostname, options = {}) {
   return gatewayGet(hostname, options);
 }
 /** The gateway's refusal reason for an answer, from its header (spec §12.3); null for a 200. */
-const reasonOf = (answer) => answer.headers['toon-gateway-reason'] ?? null;
+const reasonOf = gatewayReason;
 /** A one-line summary of what a hostname answered: the container that served it, the gateway's reason, or why nothing answered at all. */
 const summary = (answer) => {
   if (answer.status === 200) return `200 from ${whoamiHostname(answer.body)}`;
@@ -174,24 +175,18 @@ if (!(await composeHealthy('workload-gateway', 60))) fatal('workload-gateway nev
   // Gateway Handover or a Gateway Withdrawal to (§12.1, §12.7) — AT PRICE 0.
   // A gateway holds no lease, pays nothing and sells nothing, so the one route
   // it does terminate being free is the whole of what there is to check.
-  const res = await fetch(`${GATEWAY_EDGE}/ilp`).catch((e) => fatal(`the gateway's connector is unreachable at ${GATEWAY_EDGE}: ${e.message}`));
-  if (!res.ok) fatal(`the gateway's connector GET /ilp -> ${res.status}`);
-  const desc = await res.json();
-  const routes = desc.routes ?? [];
-  const priced = routes.filter((r) => BigInt(r.price ?? 0) !== 0n);
-  assert(routes.length === 1 && priced.length === 0,
-    `${GATEWAY_EDGE} is ${desc.ilpAddresses?.join(', ')} and terminates ${routes.length} route(s), ${priced.length} of them priced — one free door and nothing to sell (ADR 0013): ${jstr(routes.map((r) => `${r.prefix ?? r.route ?? '?'}@${r.price ?? 0}`))}`);
+  const { ilpAddresses, routes, priced } = await gatewayConnector()
+    .catch((e) => fatal(`the gateway's connector at ${GATEWAY_EDGE}: ${e.message}`));
+  assert(routes.length === 1 && priced.length === 0 && routes[0].prefix === handoverRoute(),
+    `${GATEWAY_EDGE} is ${ilpAddresses.join(', ')} and terminates ${routes.length} route(s), ${priced.length} of them priced — the handover door conf/connector-workload-gateway.toml names, free, and nothing to sell (ADR 0013): ${jstr(routes.map((r) => `${r.prefix}@${r.price}`))}`);
 }
 {
   // Spec §12.3's last paragraph: an unknown hostname is answered by the
   // gateway ITSELF and must reach no provider and no workload. `127.0.0.1` is
   // not a label under gw.localhost, so it is exactly such a hostname.
   const answer = await askGateway('127.0.0.1');
-  assert(answer.status === 503 && reasonOf(answer) === 'no_grant',
-    `the gateway answers a hostname it holds no grant for ${answer.status} \`${reasonOf(answer)}\` — its OWN refusal (spec §12.3), not a provider's`);
-  const body = errorBody(answer);
-  assert(body !== null && body.error === 'no_grant',
-    `in spec §5's error shape, exactly { error, message }: ${answer.body.slice(0, 120)}`);
+  assert(gatewayRefused(answer, 'no_grant'),
+    `the gateway answers a hostname it holds no grant for ${answer.status} \`${reasonOf(answer)}\` — its OWN refusal (spec §12.3), not a provider's, with the header and spec §5's two-key body agreeing: ${answer.body.slice(0, 120)}`);
 }
 
 // ── 1. the tenant, its channel, the books before ──────────────────────────

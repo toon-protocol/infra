@@ -220,9 +220,9 @@ Thirteen services instead of thirty-five:
 
 **The compute provider** (TOON_Network Milestone 1) lives on this profile
 too, and has five smokes of its own, all runnable back to back in any order:
-`make smoke-provider` (one paid spawn through the hub, SSH in, the books,
-a billed replay, a terminate bearing the lease's token), `make smoke-provider2` (THE SAME
-SCRIPT against the second provider — `TOON_SMOKE_PROVIDER=provider2`, one
+`make smoke-provider` (one paid spawn through the hub, SSH in, the books, a
+billed replay, a terminate bearing the lease's token), `make smoke-provider2`
+(THE SAME SCRIPT against the second provider — `TOON_SMOKE_PROVIDER=provider2`, one
 provider argument through the same helpers: its edge at :3250, its pubkey,
 its config, its peering channel), `make smoke-directory` (the
 Profile, Listings and Liveness read back off the relay, paid writes only),
@@ -301,11 +301,10 @@ providers. A tenant sends ONE spawn content naming the Standby Set
 `[provider, provider2]` to each member in a **request of its own** — naming
 only that member and bearing only that member's Continuation Token, under the
 `op` its route serves (spec §6.1, §7) — and pays it on the first provider's
-`g.toon.provider.warm.v1.spawn` at the
-full price and on the second's `g.toon.provider2.warm.v1.standby` at
-`standby_price`. The primary answers `role: primary` with access and runs
-the workload in its own id range (`toon-10xx`), reachable over SSH with the
-tenant's key; the standby answers `role: standby` with no access, `status`
+`g.toon.provider.warm.v1.spawn` at the full price and on the second's
+`g.toon.provider2.warm.v1.standby` at `standby_price`. The primary answers
+`role: primary` with access and runs the workload in its own id range
+(`toon-10xx`), reachable over SSH with the tenant's key; the standby answers `role: standby` with no access, `status`
 says `reserved`, its next Liveness has `available.warm` one lower, it is
 paid on `.standby.extend` and refuses `.extend` as `not_running`. The smoke
 then runs `docker compose stop provider` and waits: the primary's Liveness
@@ -885,9 +884,8 @@ with nothing signed and nothing published — including the delegated `status`
 that works, the delegated `terminate` that does not, the withdrawal that leaves
 the lease running, and a sweep of the relay for anything a tenant could have
 put there; §2 describes each in full. Both run `scripts/handover.mjs` — this
-same script, these same flags — rather than sealing a
-handover of their own, so a walk-through that drifts from the smokes fails one
-of them.
+same script, these same flags — rather than sealing a handover of their own,
+so a walk-through that drifts from the smokes fails one of them.
 
 **How `*.gw.localhost` resolves, and what to do when it does not.** Nothing is
 added to anyone's DNS or `/etc/hosts`. A modern stub resolver answers every
