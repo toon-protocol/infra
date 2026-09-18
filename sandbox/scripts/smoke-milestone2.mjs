@@ -65,7 +65,7 @@ import {
   claims, clientBookOnChannel, peerBookTotal,
   relayReadUntil, directoryFilter, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 import { publishImage } from './publisher/image.mjs';
 import { hexOf } from './publisher/blob.mjs';
@@ -288,9 +288,15 @@ step(`5. the free ${AVAILABILITY_ROUTE} resolves the image through its entry; th
   const body = avail.fulfilled && avail.status === 200 ? avail.json() : null;
   assert(body?.would_run === true, `would_run: ${avail.fulfilled ? `${avail.status} ${avail.text()}` : `${avail.code} ${avail.message ?? ''}`}`);
 }
+// ONE ROOT SECRET PER LEASE (spec §6.1.1), minted here and handed back with
+// the lease: the token this spawn presents derives from it, and so does the
+// one `status` and `terminate` present later. Two leases of this one tenant
+// therefore share no observable value, which is the point of minting it per
+// lease rather than per tenant.
 async function paidSpawn(content, what) {
   const t0 = nowSec();
-  const spawned = await send(SPAWN_ROUTE, { request: leaseRequest(tenant, 'spawn', content) });
+  const rootSecret = newRootSecret();
+  const spawned = await send(SPAWN_ROUTE, { request: tokenRequest(rootSecret, 'spawn', content) });
   if (!spawned.fulfilled) fatal(`${what} was refused short of the app: ${spawned.code} (${spawned.refusedBy}) ${spawned.message ?? ''}`);
   const body = spawned.status === 200 ? spawned.json() : null;
   assert(spawned.status === 200, `${what}: the provider answered ${spawned.status} ${spawned.text().slice(0, 300)}`);
@@ -299,10 +305,10 @@ async function paidSpawn(content, what) {
     `workload ${content.workload_id.slice(0, 12)}…, role ${body.role}, expires_at ${body.expires_at}, ssh ${body.access?.host}:${body.access?.ssh_port} (${nowSec() - t0}s)`);
   const workload = await findWorkload(body.access.ssh_port);
   assert(workload !== null, workload ? `RUNNING on the host daemon: ${workload.line}` : `no toon-<id> container publishes ${body.access.ssh_port} -> 22/tcp`);
-  return { body, workload };
+  return { body, workload, rootSecret };
 }
-async function endLease(workloadId, workload, what) {
-  const ended = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }) });
+async function endLease(workloadId, workload, what, rootSecret) {
+  const ended = await send(TERMINATE_ROUTE, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }) });
   const body = ended.fulfilled && ended.status === 200 ? ended.json() : null;
   assert(jstr(body?.state) === jstr({ ended: 'termination' }), `${what} ended by the tenant: state ${jstr(body?.state)}`);
   const gone = workload ? await workloadGone(workload.name, 30) : false;
@@ -318,12 +324,12 @@ if (a.workload) {
   assert(ssh.ok === true, ssh.err ? `ssh never succeeded: ${ssh.err}` : `ssh -p ${a.body.access.ssh_port} ${SSH_USER}@${a.body.access.host}: toon-ssh-ok, user ${ssh.user}`);
 }
 {
-  const status = await send(STATUS_ROUTE, { request: leaseRequest(tenant, 'status', { workload_id: workloadA }) });
+  const status = await send(STATUS_ROUTE, { request: tokenRequest(a.rootSecret, 'status', { workload_id: workloadA }) });
   const body = status.fulfilled && status.status === 200 ? status.json() : null;
   assert(body?.state === 'running' && body?.template === template.address,
     `status: state ${jstr(body?.state)}, template ${body?.template} — the address the values came from, echoed, never resolved`);
 }
-await endLease(workloadA, a.workload, 'the Template spawn');
+await endLease(workloadA, a.workload, 'the Template spawn', a.rootSecret);
 
 // ── 6. the all-store image, by bare digest, twice ────────────────────────
 step(`6. publish ${NAME}:store with EVERY blob in the TOON store, spawn it by { digest } alone, then again from the cache`);
@@ -355,7 +361,7 @@ if (b1.workload) {
   const image = docker('inspect', '-f', '{{.Config.Image}}', b1.workload.name).trim();
   assert(image === store.digest, `it runs the all-store image BY DIGEST with no registry entry and no upstream registry: ${image}`);
 }
-await endLease(b1Content.workload_id, b1.workload, 'the first bare-digest spawn');
+await endLease(b1Content.workload_id, b1.workload, 'the first bare-digest spawn', b1.rootSecret);
 const cacheBefore = cacheListing();
 const cachedBlobs = cacheBefore.split('\n').filter(Boolean).length;
 assert(cachedBlobs >= store.blobs.length, `the provider's blob cache holds ${cachedBlobs} verified blobs after the fetches so far (${PROVIDER_CACHE})`);
@@ -365,7 +371,7 @@ const b2 = await paidSpawn(b2Content, 'the second bare-digest spawn');
 const cacheAfter = cacheListing();
 assert(cacheAfter === cacheBefore,
   `the second spawn fetched NOTHING: the blob cache is the same ${cachedBlobs} files, sizes and mtimes as before (every fetch writes what it verified), and the spawn took ${Math.round((Date.now() - tB2) / 1000)}s`);
-await endLease(b2Content.workload_id, b2.workload, 'the second bare-digest spawn');
+await endLease(b2Content.workload_id, b2.workload, 'the second bare-digest spawn', b2.rootSecret);
 
 // ── 7. everything read back the way a provider would ─────────────────────
 step('7. entries by address, Blob Records by #x, store copies and every part at the gateway\'s /raw/, every hash checked');

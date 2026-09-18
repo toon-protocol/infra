@@ -38,8 +38,8 @@
 //       spends no claim
 //   3.  THE SPAWN, paid on the connector's `.anyone` endpoint: the answer's
 //       `access.host` is a PER-LEASE `.anyone` address — not the connector's,
-//       not an IP; no IP appears anywhere in the answer; the free, signed
-//       status returns the same access. On the host daemon the lease is
+//       not an IP; no IP appears anywhere in the answer; the free status,
+//       bearing the lease's Continuation Token, returns the same access. On the host daemon the lease is
 //       THREE containers (toon-<id>-egress owning the namespace on the
 //       egress network alone, toon-<id> sharing it, toon-<id>-ingress
 //       publishing the ports), the id in the hidden provider's own range,
@@ -58,7 +58,8 @@
 //       bytes back. A bare TCP connect proves nothing here, because the
 //       transparent proxy completes every handshake itself; the dial has to
 //       carry bytes
-//   6.  TERMINATE, free and signed: { ended: termination }; the daemon no
+//   6.  TERMINATE, free and bearing the same token: { ended: termination };
+//       the daemon no
 //       longer holds the lease's address, the address no longer answers
 //       through the proxy, no `toon-<id>*` container exists on the host
 //       daemon, and the next Liveness has the capacity back
@@ -96,7 +97,7 @@ import {
   ROOT, MNEMONIC, K_PROFILE, K_LISTING, K_LIVENESS, TOON_LABEL, IMAGE, SSH_USER, SWEEP_S,
   providerOf, reporter, sleep, jstr, nowSec, waitFor,
   relayRead, relayReadUntil, directoryFilter, tagValues, hasTag, clientBookOnChannel,
-  docker, containerState, newTenant, leaseRequest, newWorkloadId,
+  docker, containerState, newTenant, newRootSecret, tokenRequest, newWorkloadId,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done, failures } = reporter('MILESTONE 4 SMOKE');
@@ -569,10 +570,11 @@ try {
   // ── 3. the spawn ───────────────────────────────────────────────────────
   step(`3. a PAID ${SPAWN_ROUTE} over the circuit: access.host is a per-lease .anyone address; three containers on the host`);
   const tenant = newTenant('m4-hidden-tenant');
+  const rootSecret = newRootSecret();
   const workloadId = newWorkloadId();
   const t2 = nowSec();
   const spawned = await send(SPAWN_ROUTE, {
-    request: leaseRequest(tenant, 'spawn', {
+    request: tokenRequest(rootSecret, 'spawn', {
       workload_id: workloadId, image: IMAGE,
       env: { LISTEN_PORT: '22', USER_NAME: SSH_USER },
       ports: [{ container_port: 8080, protocol: 'tcp' }],
@@ -587,7 +589,7 @@ try {
   if (!spawnBody) throw new SandboxFault('no lease to continue with');
   assertPaid(spawned, 'the spawn');
   const access = spawnBody.access;
-  lease = { tenant, workloadId, access, send };
+  lease = { rootSecret, workloadId, access, send };
   assert(spawnBody.workload_id === workloadId && spawnBody.role === 'standalone', `workload ${workloadId.slice(0, 12)}…, role ${spawnBody.role}`);
   assert(spawnBody.expires_at >= t2 + L.lease_interval_s && spawnBody.expires_at <= t3 + L.lease_interval_s, `expires_at ${spawnBody.expires_at} = now + ${L.lease_interval_s}s`);
   assert(ANYONE_ADDRESS.test(access?.host ?? '') && access.host !== target.address,
@@ -597,11 +599,11 @@ try {
   `ssh_port ${access?.ssh_port} and ports ${jstr(access?.ports ?? [])} — the usual host ports, on that address`);
   assert(!IPV4.test(spawned.text()), 'no IPv4 address appears anywhere in the answer');
 
-  const status = await send(P.statusRoute, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }, 120, P) });
+  const status = await send(P.statusRoute, { request: tokenRequest(rootSecret, 'status', { workload_id: workloadId }, 120, P) });
   if (!status.fulfilled) throw new SandboxFault(`status was refused ${status.code} (${status.refusedBy})`);
   const statusBody = status.status === 200 ? status.json() : null;
   assert(status.status === 200 && statusBody?.state === 'running' && JSON.stringify(statusBody?.access) === JSON.stringify(access),
-    `the free, signed status says ${jstr(statusBody?.state)} with the same access block: host ${statusBody?.access?.host}`);
+    `the free status, bearing the lease's token, says ${jstr(statusBody?.state)} with the same access block: host ${statusBody?.access?.host}`);
   assertFree(status, 'the status call');
 
   // The host daemon's side of the lease, all sandbox-side.
@@ -664,7 +666,7 @@ try {
   // ── 6. terminate ───────────────────────────────────────────────────────
   step('6. terminate: the address is gone from the daemon, no longer answers, and no container of the lease remains');
   const t6 = nowSec();
-  const ended = await send(P.terminateRoute, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }, 120, P) });
+  const ended = await send(P.terminateRoute, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }, 120, P) });
   if (!ended.fulfilled) throw new SandboxFault(`terminate was refused ${ended.code} (${ended.refusedBy})`);
   const endedBody = ended.status === 200 ? ended.json() : null;
   assert(ended.status === 200 && JSON.stringify(endedBody?.state) === JSON.stringify({ ended: 'termination' }) && endedBody?.access === undefined,
@@ -697,7 +699,7 @@ try {
     // carries; otherwise it expires on its own within the Lease Interval.
     console.log(`\n  ending lease ${lease.workloadId.slice(0, 12)}… (${lease.access?.host}) before reporting…`);
     try {
-      const res = await lease.send(P.terminateRoute, { request: leaseRequest(lease.tenant, 'terminate', { workload_id: lease.workloadId }, 120, P) });
+      const res = await lease.send(P.terminateRoute, { request: tokenRequest(lease.rootSecret, 'terminate', { workload_id: lease.workloadId }, 120, P) });
       console.log(`  terminate -> ${res.fulfilled ? `${res.status} ${res.text().slice(0, 120)}` : `${res.code} (${res.refusedBy})`}`);
     } catch (e2) {
       console.log(`  terminate did not go through (${e2.message}); the lease expires by itself within ${L.lease_interval_s}s + the sweep`);

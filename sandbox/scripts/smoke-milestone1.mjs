@@ -23,14 +23,15 @@
 //       arrives at the provider (via the hub the client pays exactly the
 //       hub's fee; direct it pays nothing and spends no claim), and the
 //       provider's own book does not move
-//   3.  SPAWN, paid: a tenant-signed Lease Request buys
+//   3.  SPAWN, paid: a Lease Request bearing the lease's Continuation Token
+//       (spec §6.1 — a plain JSON object, signed by nobody) buys
 //       g.toon.provider.<listing>.v1.spawn; the answer names the workload id,
 //       role standalone, expires_at = now + lease_interval_s and the access
 //       block; the workload is RUNNING on the host daemon as a toon-<id>
 //       container by reference@digest
 //   4.  EXTEND, paid, with { workload_id } and no signature: expires_at grew
 //       by EXACTLY lease_interval_s; SSH with the tenant's key opens the
-//       workload; the free, tenant-signed STATUS reports `running`, the new
+//       workload; the free STATUS, bearing the same token, reports `running`, the new
 //       expiry and the same access; and the next Liveness counts the lease
 //       (available = capacity - 1)
 //   5.  EXPIRY: once expires_at passes and the sweep (<= 30 s) has run, the
@@ -72,7 +73,7 @@ import {
   claims, clientBookOnChannel, peerBookTotal,
   relayRead, relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('MILESTONE 1 SMOKE');
@@ -227,11 +228,14 @@ async function runVariant(v) {
   }
 
   // 3. spawn
-  step(`${tag} 3. a PAID ${SPAWN_ROUTE}: a tenant-signed Lease Request, a running workload`);
+  step(`${tag} 3. a PAID ${SPAWN_ROUTE}: a Lease Request bearing a freshly minted Continuation Token, a running workload`);
   const tenant = newTenant(`m1-${v.slug}-tenant`);
+  // One root secret per lease (spec §6.1.1). The token every request below
+  // presents derives from it under this provider's key; nothing is signed.
+  const rootSecret = newRootSecret();
   const workloadId = newWorkloadId();
   const t0 = nowSec();
-  const spawned = await send(SPAWN_ROUTE, { request: leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant)) });
+  const spawned = await send(SPAWN_ROUTE, { request: tokenRequest(rootSecret, 'spawn', spawnContent(workloadId, tenant)) });
   const t1 = nowSec();
   if (!spawned.fulfilled) fatal(`the spawn was refused: ${spawned.code} (refusedBy ${spawned.refusedBy}) ${spawned.message ?? ''}`);
   const spawnBody = spawned.status === 200 ? spawned.json() : null;
@@ -276,7 +280,7 @@ async function runVariant(v) {
     assert(ssh.ok === true,
       ssh.err ? `ssh never succeeded: ${ssh.err}` : `ssh -p ${access.ssh_port} ${SSH_USER}@${access.host}: toon-ssh-ok, user ${ssh.user}`);
   }
-  const status = await send(STATUS_ROUTE, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }) });
+  const status = await send(STATUS_ROUTE, { request: tokenRequest(rootSecret, 'status', { workload_id: workloadId }) });
   if (!status.fulfilled) {
     bad(`status was refused short of the app: ${status.code} (${status.refusedBy})`);
   } else {
@@ -307,7 +311,7 @@ async function runVariant(v) {
   const gone = workload ? await workloadGone(workload.name, SWEEP_S + 15) : false;
   const tGone = nowSec();
   assert(gone, workload ? `${workload.name} is gone ${tGone - expiresAt}s after expires_at — destroyed by the sweep, no grace` : 'no workload to watch');
-  const ended = await send(STATUS_ROUTE, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }) });
+  const ended = await send(STATUS_ROUTE, { request: tokenRequest(rootSecret, 'status', { workload_id: workloadId }) });
   if (!ended.fulfilled) {
     bad(`status after expiry was refused short of the app: ${ended.code} (${ended.refusedBy})`);
   } else {

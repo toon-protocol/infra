@@ -5,9 +5,10 @@
 // four times over — the sandbox's committed addresses, the provider's config
 // as the source of truth for prices and keys, the ok/FAIL reporter, the
 // connectors' claim-book readers (the same ones scripts/smoke-toon.mjs uses),
-// a NIP-01 reader for the relay, and the tenant ceremony: a fresh Nostr key,
-// a fresh SSH key, a signed Lease Request, the spawn body the sandbox's sshd
-// image needs, and SSH into the workload it produces.
+// a NIP-01 reader for the relay, and the tenant ceremony: a lease's root
+// secret, a fresh SSH key, a Lease Request bearing the Continuation Token
+// derived for the provider it is addressed to, the spawn body the sandbox's
+// sshd image needs, and SSH into the workload it produces.
 //
 // Nothing here asserts anything by itself; every function returns what it
 // found and the calling smoke decides what that proves.
@@ -17,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { hkdfSync, randomBytes } from 'node:crypto';
 import { ToonClient } from '@toon-protocol/client';
-import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure';
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
 /**
@@ -79,7 +80,11 @@ export const WATCHDOG_S = 10;
 // §3.1 (ADR 0012: one block per NIP-01 class, `432` suffix). What is
 // normative is the class, which is why the smokes talk about replacement
 // rather than about the numbers.
-export const K_LEASE_REQUEST = 4432; // regular, never published
+// Kind 4432 was the Lease Request until Milestone 6 (TOON_Network #56): a
+// Lease Request is a plain JSON object now, signed by nobody, so that number
+// is back in the free range and this file names it nowhere. Kind 30438 was
+// the published Gateway Grant; a grant is a derived value now (§6.5.1), and
+// it is gone the same way.
 export const K_EVICTION = 4433; // regular
 export const K_PROFILE = 10432; // replaceable
 export const K_LIVENESS = 10433; // replaceable
@@ -118,7 +123,7 @@ export const HTTP_IMAGE = {
   reference: 'traefik/whoami',
   digest: 'sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420',
 };
-/** The container port `HTTP_IMAGE` serves on — what a Gateway Grant's `http_port` names (spec §3.1.3). */
+/** The container port `HTTP_IMAGE` serves on — what a Gateway Handover's `http_port` names (spec §12.1). */
 export const HTTP_CONTAINER_PORT = 80;
 
 // ── the providers, each its own config file ───────────────────────────────
@@ -501,7 +506,17 @@ export async function workloadGone(name, seconds = 10) {
 }
 
 // ── the tenant ────────────────────────────────────────────────────────────
-/** A fresh Nostr identity plus a fresh ed25519 SSH key under .toon-client/<keyName>_ed25519. */
+/**
+ * A fresh ed25519 SSH key under .toon-client/<keyName>_ed25519 — what the
+ * workload's sshd is given — plus a fresh Nostr identity that NOTHING on the
+ * request path uses (spec §3, ADR 0016: a tenant signs nothing).
+ *
+ * The key is still minted for two reasons. A sandbox tenant may still want
+ * one for something outside a lease, and — the reason it matters here —
+ * scripts/smoke-milestone6.mjs uses `pubkey` as the NEEDLE for the assertion
+ * that closes Milestone 6: a key a tenant of this run held, searched for
+ * across every event the relay carries, found nowhere.
+ */
 export function newTenant(keyName) {
   mkdirSync(join(ROOT, '.toon-client'), { recursive: true });
   const secret = generateSecretKey();
@@ -514,32 +529,6 @@ export function newTenant(keyName) {
     keyPath,
     sshPublicKey: readFileSync(`${keyPath}.pub`, 'utf8').trim(),
   };
-}
-/**
- * A SIGNED Lease Request: kind K_LEASE_REQUEST, p = the provider it is
- * addressed to, op, an expiration `ttl` seconds out. The `p` tag is the whole
- * reason this takes a provider: a provider refuses a request naming another
- * provider's key. `which` may also be an ARRAY of providers — a Standby Set's
- * spawn is signed ONCE, carries one `p` tag per member in the set's order,
- * and the same bytes go to every member (spec §7; only a spawn may name more
- * than one provider, and its content's `standby_set` must list the same keys).
- *
- * THE PRE-MILESTONE-6 SHAPE. A provider built from `milestone-6` (TOON_Network
- * #56, #57) is not a Nostr event's reader any more and refuses this as
- * `invalid_request`; the smokes of Milestones 1-5 still send it, and moving
- * them is the Milestone 6 smoke's (#63). New host-run tooling uses
- * `tokenRequest` below, which is what scripts/spawn.mjs and the Workload
- * Gateway path send.
- */
-export function leaseRequest(tenant, op, content, ttl = 120, which) {
-  const now = nowSec();
-  const members = Array.isArray(which) ? which : [which];
-  return finalizeEvent({
-    kind: K_LEASE_REQUEST,
-    created_at: now,
-    tags: [...members.map((m) => ['p', providerOf(m).pubkey]), ['op', op], ['expiration', String(now + ttl)]],
-    content: JSON.stringify(content),
-  }, tenant.secret);
 }
 export const newWorkloadId = () => randomBytes(32).toString('hex');
 
@@ -564,6 +553,23 @@ export const newRootSecret = () => randomBytes(32).toString('hex');
 /** `continuation(provider)` of spec §6.1.1: the token this lease presents to one provider. */
 export const continuationFor = (rootSecret, providerPubkey) =>
   Buffer.from(hkdfSync('sha256', Buffer.from(rootSecret, 'hex'), Buffer.alloc(0), `toon-network-continuation:${providerPubkey}`, 32)).toString('hex');
+/**
+ * `gateway_sub(provider, expires_at)` of spec §6.5.1: the GATEWAY GRANT a
+ * Workload Gateway is handed for one member and one moment.
+ *
+ * It hangs off `continuation(provider)` and NOT off the root secret, which is
+ * the whole of the design: the provider already stores the token, so it
+ * recomputes any grant it is shown and keeps nothing per gateway. `expires_at`
+ * goes into the `info` as unpadded decimal ASCII, which is what stops a
+ * gateway and a provider disagreeing about how a number was spelled.
+ *
+ * The same derivation the handover tool makes (provider/tools/grant) — the
+ * smoke derives it here INDEPENDENTLY and compares the two, so a sandbox that
+ * derived it one way and a tenant tool that derived it another is a failure
+ * rather than a mystery at the provider.
+ */
+export const gatewaySubFor = (continuation, expiresAt) =>
+  Buffer.from(hkdfSync('sha256', Buffer.from(continuation, 'hex'), Buffer.alloc(0), `toon-network-gateway:${expiresAt}`, 32)).toString('hex');
 /**
  * A Lease Request (spec §6.1): the plain JSON object of six keys that every
  * authenticated route reads — a fresh `request_id` (what the replay set keys

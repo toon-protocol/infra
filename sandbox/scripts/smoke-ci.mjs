@@ -42,7 +42,7 @@ import {
   claims, clientBookTotal, peerBookTotal,
   relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel, sshRun,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshRun,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('CI LISTING SMOKE');
@@ -115,9 +115,10 @@ const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_ED
 // ── 3. the paid spawn ────────────────────────────────────────────────────
 step(`3. a tenant PAYS ${SPAWN_ROUTE} through the hub`);
 const tenant = newTenant('ci-tenant');
+const rootSecret = newRootSecret();
 const workloadId = newWorkloadId();
 const t0 = nowSec();
-const spawned = await send(SPAWN_ROUTE, { request: leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant), 300) });
+const spawned = await send(SPAWN_ROUTE, { request: tokenRequest(rootSecret, 'spawn', spawnContent(workloadId, tenant), 300) });
 let access = null;
 if (!spawned.fulfilled) {
   bad(`the spawn was refused: ${spawned.code} (refusedBy ${spawned.refusedBy}) ${spawned.message}`);
@@ -218,7 +219,7 @@ if (!access) {
   bad('no lease to terminate');
 } else {
   const t1 = Date.now();
-  const ended = await send(TERMINATE_ROUTE, { request: leaseRequest(tenant, 'terminate', { workload_id: workloadId }) });
+  const ended = await send(TERMINATE_ROUTE, { request: tokenRequest(rootSecret, 'terminate', { workload_id: workloadId }) });
   const body = ended.fulfilled && ended.status === 200 ? ended.json() : null;
   assert(jstr(body?.state) === jstr({ ended: 'termination' }),
     `the provider answered ${ended.fulfilled ? ended.status : `${ended.code} (refusedBy ${ended.refusedBy}) ${ended.message ?? ''}`} ${jstr(body?.state)} after ${Date.now() - t1} ms — the whole teardown happens inside this request`);

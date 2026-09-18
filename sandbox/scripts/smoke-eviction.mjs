@@ -20,7 +20,8 @@
 //       container against its loopback-only operator endpoint, never a
 //       published port
 //   5.  the workload is GONE from the host daemon
-//   6.  the free `g.toon.provider.status` route, tenant-signed and paid
+//   6.  the free `g.toon.provider.status` route, bearing the lease's
+//       Continuation Token and paid
 //       through the hub (sealed to the provider connector's edge, exactly
 //       like step 2's spawn), reports `{ "ended": "eviction" }` and no
 //       `access`
@@ -40,7 +41,7 @@ import {
   listing, PROVIDER_PUBKEY, reporter,
   relayReadUntil, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, leaseRequest, newWorkloadId, spawnContent, openChannel,
+  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('EVICTION SMOKE');
@@ -77,10 +78,11 @@ const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_ED
 // ── 2. spawn a lease of our OWN, so evicting it disturbs nobody else's ────
 step('2. a tenant pays for its own lease, so this smoke evicts only what it spawned');
 const tenant = newTenant('eviction-tenant');
+const rootSecret = newRootSecret();
 const workloadId = newWorkloadId();
-ok(`tenant ${tenant.pubkey} signed a spawn for workload ${workloadId}`);
+ok(`a spawn for workload ${workloadId}, bearing the token this lease's root secret derives for the provider`);
 
-const spawned = await send(SPAWN_ROUTE, { request: leaseRequest(tenant, 'spawn', spawnContent(workloadId, tenant)) });
+const spawned = await send(SPAWN_ROUTE, { request: tokenRequest(rootSecret, 'spawn', spawnContent(workloadId, tenant)) });
 if (!spawned.fulfilled) {
   fatal(`the spawn was refused: ${spawned.code} (refusedBy ${spawned.refusedBy}) ${spawned.message}`);
 }
@@ -129,7 +131,7 @@ try {
 
   // ── 6. status reports the eviction ──────────────────────────────────────
   step('6. the free status route (paid through the hub, sealed to the provider) reports Ended(eviction)');
-  const statusSent = await send(STATUS_ROUTE, { request: leaseRequest(tenant, 'status', { workload_id: workloadId }) });
+  const statusSent = await send(STATUS_ROUTE, { request: tokenRequest(rootSecret, 'status', { workload_id: workloadId }) });
   if (!statusSent.fulfilled) {
     bad(`the status request was refused short of the app: ${statusSent.code} (${statusSent.refusedBy})`);
   } else {

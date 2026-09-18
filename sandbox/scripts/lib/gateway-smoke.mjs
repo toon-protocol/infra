@@ -16,6 +16,7 @@
 // Nothing here asserts anything; every function returns what it found.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 // `ethers`, a DECLARED dependency of this sandbox (package.json), rather than
@@ -48,31 +49,13 @@ function gatewayConf(key) {
 /** The sandbox gateway's domain: `gw.localhost`. */
 export const gatewayDomain = () => gatewayConf('GATEWAY_DOMAIN').toLowerCase();
 
-// ── the pre-Milestone-6 shape, kept only so scripts/smoke-milestone5.mjs
-// still LOADS ────────────────────────────────────────────────────────────────
-// Milestone 5's smoke publishes a Gateway Grant naming the gateway's own key.
-// Neither thing exists any more: kind 30438 is removed and the gateway has no
-// key (spec §12.1, ADR 0016), so that smoke cannot pass against this checkout
-// and the Milestone 6 smoke (TOON_Network #63) is what proves the gateway path
-// now. These two are exported so it fails where it should — at the protocol,
-// visibly, like the other milestones' smokes against a Milestone 6 provider —
-// rather than at an import it cannot resolve, which says nothing to whoever
-// runs it. It now gets as far as step 0 (which demands this gateway's
-// connector terminate NO paid route, where it terminates one free one) and
-// step 2 (a signed Lease Request, refused `invalid_request`); it never reaches
-// the step 3 that shells out to scripts/grant.mjs, which this checkout
-// replaced with scripts/handover.mjs. Moving that smoke is #63's; deleting
-// these is that ticket's too. `leaseRequest` in provider-smoke.mjs is kept for
-// the same reason.
-/** Mirrored from the provider's src/nostr/kinds.rs: the Gateway Grant, as Milestone 5 had it. */
-export const K_GATEWAY_GRANT = 30438;
-/**
- * The public key Milestone 5's gateway ran with — a committed throwaway that
- * `conf/workload-gateway.conf` set as GATEWAY_SECRET_KEY until Milestone 6
- * removed the line. A frozen literal, not a derivation: there is no longer a
- * key in that file to derive it from, and nothing but that smoke reads this.
- */
-export const gatewayPubkey = () => 'e5bbfb596a6aa05d1de8058a50258c8c198b7b8901ccf602db8ebb81c8a674ed';
+// A GATEWAY HAS NO KEY, and there is no published Gateway Grant. Kind `30438`
+// and `GATEWAY_SECRET_KEY` both went with Milestone 6 (TOON_Network #56, spec
+// §12.1, ADR 0016, ADR 0017): a tenant chooses a gateway by sealing it a
+// packet, and a gateway is named by the connector that packet was sealed to
+// and by nothing else. So there is nothing here to export for either, and a
+// smoke looking for a grant on a relay is looking for the thing this milestone
+// removed.
 
 /**
  * The route the sandbox gateway's connector terminates for a sealed Gateway
@@ -133,6 +116,42 @@ export function canonicalLabel(workloadId) {
   return out;
 }
 
+/**
+ * Run `scripts/handover.mjs` — the sandbox's own tenant command (#62) — and
+ * give back what it exited with and the JSON report it printed.
+ *
+ * THE COMMAND A DEVELOPER RUNS, not a second implementation of it. README §2's
+ * walk-through and the two gateway smokes all go through this one script,
+ * which goes through the tenant tool at provider/tools/grant, so the bytes a
+ * smoke seals are the bytes that tool's own tests prove against the wire
+ * fixtures, and a README that drifted from the smokes would fail one of them.
+ *
+ * `rootSecret` goes in the ENVIRONMENT and never on the command line, exactly
+ * as the script's own usage says: argv is readable by every process on the
+ * host. Everything else is flags — `--workload`, one `--standby` per member,
+ * `--http-port`, `--expires-in` / `--expires-at`, `--name`, or `--withdraw`
+ * with the moment the handover was derived for.
+ *
+ * Returns `{ status, report, stdout, stderr }`; `report` is null when the
+ * script printed no JSON, which is what a refusal before sealing looks like.
+ */
+export function runHandover(args, { rootSecret, env = {} } = {}) {
+  const ran = spawnSync(process.execPath, [join(ROOT, 'scripts', 'handover.mjs'), ...args], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, ...env, TOON_ROOT_SECRET: rootSecret },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  let report = null;
+  try {
+    report = JSON.parse(ran.stdout);
+  } catch {
+    report = null;
+  }
+  return { status: ran.status, report, stdout: ran.stdout ?? '', stderr: ran.stderr ?? '' };
+}
+
 /** The URLs a set of labels is served at under the sandbox gateway, plain listener first. */
 export const urlsFor = (labels, domain) =>
   labels.flatMap((label) => [
@@ -190,6 +209,43 @@ export function gatewayGet(hostname, { path = '/', tls = false, timeoutMs = 20_0
     req.on('error', reject);
     req.end();
   });
+}
+
+/**
+ * The ONE refusal reason a gateway names for an answer (spec §12.3), out of
+ * the `toon-gateway-reason` header; null for a 200.
+ */
+export const gatewayReason = (answer) => answer.headers['toon-gateway-reason'] ?? null;
+
+/**
+ * Is this answer the gateway refusing with `code`, ITS OWN way — a 503, the
+ * reason in the header, AND the same code in a body that is spec §5's error
+ * shape and nothing else (§12.3)?
+ *
+ * The header and the body have to agree, which is the whole reason this is one
+ * function rather than two checks written out wherever a refusal is read: a
+ * gateway that named a reason in one place and not the other would be a
+ * gateway a tenant's parser could not trust either half of.
+ */
+export const gatewayRefused = (answer, code) =>
+  answer.status === 503 && gatewayReason(answer) === code && errorBody(answer)?.error === code;
+
+/**
+ * What a gateway's own connector says it terminates, from its `GET /ilp`:
+ * `{ ilpAddresses, routes, priced }`, where `priced` is the routes whose price
+ * is not zero.
+ *
+ * ADR 0013 is why a smoke asks: a gateway holds no lease, buys nothing and
+ * sells nothing, so the only route its connector terminates is the free door a
+ * tenant seals a Gateway Handover or a Gateway Withdrawal to (spec §12.1,
+ * §12.7). What that ought to be is the caller's to assert; this reads it.
+ */
+export async function gatewayConnector(edge = GATEWAY_EDGE) {
+  const res = await fetch(`${edge}/ilp`);
+  if (!res.ok) throw new Error(`${edge} GET /ilp -> ${res.status}`);
+  const desc = await res.json();
+  const routes = desc.routes ?? [];
+  return { ilpAddresses: desc.ilpAddresses ?? [], routes, priced: routes.filter((r) => BigInt(r.price ?? 0) !== 0n) };
 }
 
 /**
