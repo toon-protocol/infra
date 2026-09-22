@@ -34,6 +34,23 @@ a cookbook for every surface, and a step-by-step path to putting **your own
 app** behind a TOON connector (from a five-minute route on the hub to your
 own peered connector in the production shape).
 
+## The public devnet
+
+**[`docs/devnet.md`](docs/devnet.md)** is the other network: a small fleet of
+Linodes on public testnets that anybody can reach and that the console leases
+from — the store, the relay, the gas station, the faucet, and since
+TOON_Network#86 a **compute provider** and a **Workload Gateway**. Every box is
+GitOps: its own repository holds its `deploy/` bundle and a timer on the box
+applies what merged.
+
+```bash
+cd sandbox && make devnet-status
+```
+
+Free, and needs neither `make up` nor a funded wallet: it asks each node what
+it terminates and what it settles in, asks the gateway for a hostname nobody
+handed over, and reads the Provider Directory off the relay.
+
 ## Also in this repo
 
 - [`docs/research/local-dev-infra.md`](docs/research/local-dev-infra.md) —
