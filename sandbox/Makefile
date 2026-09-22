@@ -84,7 +84,8 @@ export HOST_GID ?= $(shell id -g)
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
         smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
-        preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context
+        preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context \
+        devnet-status
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -646,3 +647,14 @@ logs:
 
 ps:
 	$(COMPOSE) ps -a
+
+## Probe the PUBLIC devnet (docs/devnet.md), not this sandbox. Every check is
+## free — it opens no channel, signs nothing and holds no key — so it needs
+## neither `make up` nor a funded wallet: it asks each node's GET /ilp what it
+## terminates and what it settles in, asks the Workload Gateway for a hostname
+## nobody handed over (503 no_grant is the healthy answer), and reads the
+## Provider Directory off the relay. Exits non-zero if a node is down or a
+## provider has stopped publishing, which is how "the console shows an empty
+## provider list" gets noticed before a person notices it.
+devnet-status:
+	@node scripts/devnet-status.mjs
