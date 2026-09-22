@@ -75,21 +75,8 @@ export async function openToonIo({ secretKey, log = () => {}, client: given }) {
   }
   const store = {
     async upload(bytes, contentType) {
-      const job = (bid) => sendJob({ client, destination: STORE_ROUTE, sealTo: STORE_EDGE, timeoutMs: 120_000 },
-        buildBlobStorageRequest({ blobData: Buffer.from(bytes), contentType, bid }, secretKey));
-      let answer = await job(STORE_BID);
-      // THE KiB BOUNDARY. The client prices a sealed packet of n bytes at
-      // floor(n/1024)+1 KiB and the connectors at ceil(n/1024), which agree
-      // everywhere except an EXACT multiple of 1024 — where the client
-      // declares one KiB more than the hub charges and the hub refuses it F03
-      // before anything is stored. Nothing was paid, so the same upload is
-      // sent once more with a bid one digit longer (the store charges the
-      // route price whatever the bid): the packet is then a byte longer and
-      // off the boundary. The mismatch itself is @toon-protocol/client's.
-      if (!answer.accepted && answer.code === 'F03' && /declares amount \d+, more than the \d+ this connector charges/.test(answer.message)) {
-        log(`a ${bytes.length}-byte upload sealed to an exact KiB multiple was refused F03 before anything was stored; sent again one byte off the boundary`);
-        answer = await job(`${STORE_BID}0`);
-      }
+      const answer = await sendJob({ client, destination: STORE_ROUTE, sealTo: STORE_EDGE, timeoutMs: 120_000 },
+        buildBlobStorageRequest({ blobData: Buffer.from(bytes), contentType, bid: STORE_BID }, secretKey));
       if (!answer.accepted) {
         throw new Error(`${STORE_ROUTE} refused a ${bytes.length}-byte upload: ${answer.code} ${answer.message}`);
       }
