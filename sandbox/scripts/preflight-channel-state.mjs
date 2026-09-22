@@ -2,8 +2,7 @@
 // The channel-state preflight (TOON_Network #74, M7-6): `make preflight-channel-state`,
 // and a prerequisite of every relay-writing smoke (sandbox/Makefile —
 // smoke-provider, smoke-provider2, smoke-directory, smoke-eviction, smoke-ci
-// and smoke-m1 through smoke-m6; a future `make smoke-m7`, M7-7, can depend on
-// it the same way).
+// and smoke-m1 through smoke-m7).
 //
 // Compares every RUNNING directory publisher's local channel store
 // (channels.json on its own volume) against relay-connector's own claim

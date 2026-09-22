@@ -83,7 +83,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
         preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context
 
 # The store image is BUILT from the store sibling checkout carrying the
@@ -355,9 +355,9 @@ clean:
 ## watermark (equal is the normal resting state between two writes) and every
 ## claim it signs from there advances value by 0. A prerequisite of every
 ## RELAY-WRITING smoke below (smoke-provider, smoke-provider2,
-## smoke-directory, smoke-eviction, smoke-ci, smoke-m1 through smoke-m6) so
+## smoke-directory, smoke-eviction, smoke-ci, smoke-m1 through smoke-m7) so
 ## the drift is caught before a lease is bought rather than several steps
-## into one; a future `make smoke-m7` (M7-7) depends on it the same way. Safe
+## into one. Safe
 ## to run on its own, against a stack that is not up (it then finds nothing
 ## to compare and exits 0) or mid-session (`make preflight-channel-state`).
 preflight-channel-state:
@@ -616,6 +616,30 @@ smoke-m5: preflight-channel-state
 ## provider's container, so nothing else should be spawning on it meanwhile.
 smoke-m6: preflight-channel-state
 	node scripts/smoke-milestone6.mjs
+
+## MILESTONE 7 ACCEPTANCE TEST (TOON_Network #69 / #76, scripts/smoke-milestone7.mjs)
+## for `make up-gateway` — the FULL stack plus the gateway, because the paged
+## image lives in the store: a tenant REVOKES a Workload Gateway's reading
+## before the grant runs out, and serves from an image too large for one Blob
+## Record. `node scripts/spawn.mjs` forms a two-member Standby Set and `node
+## scripts/handover.mjs` hands it to the gateway, which serves the canonical
+## hostname; a delegated `status` with each member's grant is answered.
+## `node scripts/rotate.mjs` rotates both members: on the wire the old grant
+## is `bad_grant` and the old token `not_tenant` at each, the new token reads,
+## and the gateway — told nothing — answers 503 `member_unreachable` naming
+## both members' `bad_grant` within a cadence or two, while the workload runs
+## on. The same handover command again seals grants of the ROTATED tokens (re-
+## derived and matched), is admitted, and the hostname serves again; the lease
+## ends with the new token. Then an image — busybox plus a 2 MiB random layer —
+## is published with the publisher's record ceiling LOWERED (`--record-max`,
+## rather than storing 70 MB) so the layer's Blob Record PAGES: read from the
+## relay and from its store copy it carries `pages` and no `parts`, every page
+## hashes and counts at the gateway's /raw/, and `blob-verify`/`image-verify`
+## read it through its pages; `availability` says would_run and a paid `smoke`
+## spawn runs it by digest. Buys `warm` with a standby, then `smoke` once;
+## three to four minutes, most of it the gateway's cadence and the uploads.
+smoke-m7: preflight-channel-state
+	node scripts/smoke-milestone7.mjs
 
 logs:
 	$(COMPOSE) logs -f --tail=100

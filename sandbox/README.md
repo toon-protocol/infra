@@ -106,7 +106,9 @@ with one command and `curl http://<label>.gw.localhost:3280/` (§2, *The
 Workload Gateway*). **Nothing on that path is published.** `make smoke-m5` is
 that path as an acceptance test, with a Takeover in the middle of it;
 `make smoke-m6` is the whole tenant path with nothing signed and nothing
-published, and it sweeps the relay to say so.
+published, and it sweeps the relay to say so; `make smoke-m7` revokes a
+gateway's reading by rotating the lease's tokens, and spawns from an image
+whose Blob Record is paged.
 
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
@@ -413,6 +415,46 @@ milestone removed is really gone rather than merely unused. Same profile as
   all four — because a sweep that finds nothing is worth only what its ability
   to find something is worth. Nothing is ever published to make that point: a
   relay keeps what it is given, and there would be no taking it back.
+
+**`make smoke-m7` — Milestone 7's acceptance test** (TOON_Network #69 / #76,
+`scripts/smoke-milestone7.mjs`): a tenant can **revoke a Workload Gateway's
+reading before its grant runs out**, and keep serving from an image too large
+for one Blob Record. Needs the **full stack plus the gateway**, `make
+up-gateway` (the default `COMPOSE_PROFILE=full`: the paged image lives in the
+store, so the payments-only gateway stack is not enough); like every
+relay-writing smoke it runs `preflight-channel-state` first. Three to four
+minutes, most of it the gateway's 30 s cadence and the store uploads. Every
+step is asserted on the wire — response bodies and the gateway's reasons,
+never a log — and each one uses the developer's own command:
+
+- **Spawn and hand over.** `node scripts/spawn.mjs --standby provider
+  --standby provider2` forms a two-member Standby Set on `warm` and writes the
+  lease file; `node scripts/handover.mjs <lease>` seals one grant per member
+  (each re-derived by the smoke from the lease's root secret and matched), the
+  gateway admits it and the canonical hostname answers with whoami's own body.
+  A delegated `status` bearing each member's grant is answered at both.
+- **Rotate.** `node scripts/rotate.mjs <lease>` rotates both members; the lease
+  file then holds a new root secret and no rotation record. At **each** member
+  the grant the gateway holds is now `bad_grant`, the old token is
+  `not_tenant`, and the new token reads the lease.
+- **The gateway notices, told nothing.** Within a cadence or two the same
+  hostname answers 503 `member_unreachable` in spec §5's error shape, its
+  message naming `bad_grant` at both members — while the primary still answers
+  `running` to the new token. Rotation ends READING; a withdrawal
+  (`smoke-m6`) ends only serving.
+- **Hand over again.** The same `handover.mjs` command seals grants of the
+  ROTATED tokens (none of them one the old root could derive); it is admitted
+  and the hostname serves again. The lease ends with the new token.
+- **A paged image.** busybox plus a 2 MiB random layer, published with the
+  publisher's record ceiling **lowered** to 2,048 bytes and four parts to a
+  page (`--record-max` / `--parts-per-page` on the CLI) — the shape a 70 MB
+  layer takes without 700 paid uploads. The layer's Blob Record, read from the
+  relay and from its store copy, carries `pages` and no `parts`; every page
+  fetched from `/raw/` hashes and counts as recorded, the parts join to the
+  layer's digest, and `publisher.mjs blob-verify` / `image-verify` read it back
+  through its pages. `availability` says `would_run`, and a paid `smoke` spawn
+  runs it by `{ digest, registry_entry }` — the provider read every page — and
+  is ended.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -2442,7 +2484,7 @@ through the proxy or not at all.
   BEFORE anything is dialled, and is a Makefile prerequisite of every
   relay-writing smoke — `smoke-provider`, `smoke-provider2`,
   `smoke-directory`, `smoke-eviction`, `smoke-ci`, and `smoke-m1` through
-  `smoke-m6` (a future `make smoke-m7`, M7-7, depends on it the same way). A
+  `smoke-m7`. A
   publisher that is not running, or holds no channel yet, is skipped — there
   is nothing to compare. On a mismatch it fails AT ONCE, naming the publisher,
   both amounts and the remedy, in this shape:
