@@ -1482,13 +1482,14 @@ services:
   # terminates the handover route FREE (#46 still defers the price) — the
   # shape is here, the price is not.
   #
-  # TWO THINGS ABOUT THIS SANDBOX, and only this sandbox, are in
-  # conf/workload-gateway.conf's GATEWAY_DIAL_REWRITE: a Profile's
-  # connector_url names a connector edge that terminates sealed packets, where
-  # the gateway sends `status` plainly — so it is dialled at the provider APP's
-  # own free route instead; and a running member's access.host is 127.0.0.1,
-  # the HOST daemon the workloads publish on, which from inside this container
-  # is dialled at host.docker.internal. That conf file says why at length.
+  # ONE THING ABOUT THIS SANDBOX, and only this sandbox, is in
+  # conf/workload-gateway.conf's GATEWAY_DIAL_REWRITE: a running member's
+  # access.host is 127.0.0.1, the HOST daemon the workloads publish on, which
+  # from inside this container is dialled at host.docker.internal. That conf
+  # file says why at length. A MEMBER is reached where its own Profile says it
+  # is, here as in a deployment: the gateway seals `status` through the
+  # member's connector (TOON_Network#114), and every connector on this network
+  # answers at exactly the name its Profile advertises.
   workload-gateway:
     profiles: ['gateway']
     build:
@@ -1496,14 +1497,12 @@ services:
       # file stays portable; only `gateway` renders it.
       context: ${GATEWAY_CONTEXT:-../../gateway}
     env_file:
+      # ONE file, and the hidden path needs no second one: a hidden member's
+      # connector is reached at the `.anyone` address its Profile advertises,
+      # through TOON_SOCKS_PROXY, which is the same rule as for any other
+      # member (TOON_Network#114). scripts/hs-provider-address.sh used to
+      # render a per-provider rewrite here and no longer does.
       - conf/workload-gateway.conf
-      # The hidden provider's `status` rewrite, rendered by
-      # scripts/hs-provider-address.sh with the address `anon-hs` generated
-      # (`make up-gateway-hs`); absent under `make up-gateway`, deliberately —
-      # a missing optional env_file is not an error, and the gateway then knows
-      # no hidden member, which is right: `make up` renders none.
-      - path: conf/.rendered/workload-gateway-hs.env
-        required: false
     volumes:
       # The self-signed wildcard certificate for *.gw.localhost and its key —
       # committed dev material, like everything under conf/ and keys/. Read

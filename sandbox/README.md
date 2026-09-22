@@ -992,21 +992,20 @@ nothing else. Regenerate it with the one command in §6.9.
 
 **Sandbox-only, said plainly.** Two things here are true in this sandbox and
 would be wrong anywhere else. One line of `conf/workload-gateway.conf`,
-`GATEWAY_DIAL_REWRITE`: the gateway dials a member where its Profile and its
-`status` answer say it is, and in this sandbox neither is where the container
-can reach it — a Profile's `connector_url` is
-`http://provider-connector:3000/ilp`, a connector edge that terminates sealed
-packets, whereas the gateway sends `status` as the plain §6.1 body (its
-README, *How `status` is sent*), which the provider **app** serves at
-`provider:8080/status`; and a running member's `access.host` is `127.0.0.1`,
-this host, where the workloads are published, which from inside the container
-is the gateway itself. So the two connector names are dialled at the two apps,
-and `127.0.0.1` at `host.docker.internal`, at the gateway's one dial seam —
-the same request, the same free route, and no URL or header rewritten. It is
-the gateway's counterpart of the publisher's `TOON_ENDPOINT_REWRITE`. And the
-tenant **pays the gateway's connector directly** at `:3260` rather than
-through the hub, the way `spawn.mjs --direct` pays a provider's edge: the hub
-does not peer with it. §6.9 has the whole of both.
+`GATEWAY_DIAL_REWRITE`, and it is now about the **workload** rather than about
+the member: a running member's `access.host` is `127.0.0.1`, this host, where
+the workloads are published, which from inside the container is the gateway
+itself — so `127.0.0.1` is dialled at `host.docker.internal`. It is the
+gateway's counterpart of the publisher's `TOON_ENDPOINT_REWRITE`. A MEMBER is
+reached where its own Profile says it is, here exactly as in a deployment: the
+gateway seals `status` through the member's connector, addressed
+`<ilp_address>.status` (TOON_Network#114), and `provider-connector:3000` is
+that connector, on this network, under the name its Profile advertises. Until
+#114 the gateway sent `status` as a plain `POST` that only the provider **app**
+serves, and two more entries dialled each connector's name at its app; both are
+gone. And the tenant **pays the gateway's connector directly** at `:3260`
+rather than through the hub, the way `spawn.mjs --direct` pays a provider's
+edge: the hub does not peer with it. §6.9 has the whole of both.
 
 #### Reaching a hidden workload by hand
 
@@ -1024,20 +1023,19 @@ the tenant's side does any more.
 
 ```bash
 make up-hs                 # the three daemons, the hidden provider (§6.8); minutes
-make up-gateway-hs         # the gateway on top, with the hidden provider's status rewrite rendered
+make up-gateway-hs         # the gateway on top; nothing is rendered for it
 ```
 
-`up-gateway-hs` re-renders `conf/.rendered/workload-gateway-hs.env` — the
-committed `GATEWAY_DIAL_REWRITE` plus one entry, `<hidden provider
-address>.anyone:80` dialled at `provider-hs:8080` — and starts the two
-services with the rendered `hs` configs passed again, so nothing already up is
-recreated. The one honest shortcut in it: the hidden provider's **`status`**
-is asked out of band on the compose network, for the same reason as the public
-providers' (its connector terminates sealed packets only) and in the same way
-`smoke-m4`'s preflight reads that connector's self-description. **The lease
-itself is not shortcut**: its `access.host` is the per-lease `.anyone`
-address, nothing rewrites it, and the gateway can only dial it through
-`socks5h://anon-client:9050` — which is the property the recipe shows.
+`up-gateway-hs` starts the two services with the rendered `hs` configs passed
+again, so nothing already up is recreated. **There is no shortcut left in it**
+(TOON_Network#114): the hidden provider's `status` goes to the `.anyone`
+address its own Profile advertises, sealed to its `connector_seal_key`,
+through `socks5h://anon-client:9050` — the same rule the lease is reached by.
+Until #114 this recipe rendered one more `GATEWAY_DIAL_REWRITE` entry, sending
+`<hidden provider address>.anyone:80` at `provider-hs:8080` on the compose
+network, because the gateway sent `status` as a plain `POST` the hidden
+connector does not serve. Both legs now go the same way, which is what §12.8
+says they should.
 
 ```bash
 # a lease on the hidden provider, over the circuit: scripts/smoke-milestone4.mjs step 3 is the
@@ -2172,26 +2170,38 @@ config file to drift. What that file sets, and where each value comes from:
 | `GATEWAY_HTTP_PORT` / `GATEWAY_HTTPS_PORT` | `8080` / `8443`, published at host **3280** / **3443** | both listeners side by side: TLS is what spec §12.2 requires, the plain one is what smokes and `curl` use |
 | `GATEWAY_TLS_CERT` / `_KEY` | `conf/workload-gateway-tls/gw.localhost.{crt,key}`, mounted read-only | a self-signed ECDSA P-256 wildcard for `*.gw.localhost` and `gw.localhost`, ten years, not a CA |
 | `TOON_SOCKS_PROXY` | `socks5h://anon-client:9050` | the `hs` profile's buyer-side proxy, on the `hs-payer` network the gateway joins. Only validated at startup; dialled the first time a handover names a hidden member (TOON_Network #52). Under `make up-gateway` alone no such container exists and nothing is dialled |
-| `GATEWAY_DIAL_REWRITE` | three entries, below | **sandbox-only** |
+| `GATEWAY_DIAL_REWRITE` | one entry, below | **sandbox-only** |
 
-**The rewrite, and why it is honest.** The gateway dials two addresses it did
-not choose — a member's `connector_url` out of its Provider Profile, and the
-`access.host` a running member answers — and each names the member as *its
-own* clients reach it. Here neither is where this container can reach it:
+**The rewrite, and why it is honest.** The gateway reaches two addresses it
+did not choose — a member's `connector_url` out of its Provider Profile, and
+the `access.host` a running member answers — and each names the member as
+*its own* clients reach it. Here the first one is where this container can
+reach it and the second is not:
 
-| the member says | the gateway dials | because |
+| the member says | the gateway reaches | because |
 |---|---|---|
-| `http://provider-connector:3000/ilp` (the Profile) | `provider:8080` | the gateway sends `status` as the plain spec §6.1 body — `{ "request": … }`, the six-key object presenting the grant as its `continuation`, `POST`ed to the `status` path — which is what the provider **app** serves at its `handler_url`; a connector's client edge terminates *sealed* ILP packets and answers nothing on a plain `POST`. The gateway's README (*How `status` is sent*) chose that carriage on purpose: the route is free, and a sealing client would put a payment library into a process whose point is that it holds none. So the sandbox dials the connector's name at the app: the same request on the same free route, one hop shorter |
-| `http://provider2-connector:3000/ilp` | `provider2:8080` | the same |
+| `http://provider-connector:3000/ilp` (the Profile) | **the same address** | the gateway seals `status` through the member's own connector — addressed `<ilp_address>.status`, sealed to `connector_seal_key` (TOON_Network#114) — and `provider-connector` is that connector, on this network, under the name its Profile advertises. Nothing to rewrite |
 | `127.0.0.1` (`access.host`, from `public_ip` in `conf/provider*.toml`) | `host.docker.internal` | the workloads run on the **host** daemon and publish there; inside the container `127.0.0.1` is the gateway. `extra_hosts` maps the name to the host gateway |
 
-It is applied in front of the gateway's one dial seam (`src/rewrite.mjs`
-wrapping `src/dial.mjs`), so the `status` leg and the forwarding leg cannot
-disagree, and it rewrites no URL and no
-header — the request is what spec §6.5 fixes; only the socket moves. It is
-the gateway's counterpart of `TOON_ENDPOINT_REWRITE` on the directory
-publishers: "a client dials what a node publishes", and in a sandbox what a
-node publishes is a compose name. In a deployment the variable is unset.
+**What the other two entries were, and why they are gone.** Until #114 this
+map also sent `provider-connector:3000` at `provider:8080` and
+`provider2-connector:3000` at `provider2:8080`, because the gateway sent
+`status` as a plain `POST` to a path beside `connector_url` — a carriage only
+the provider **app** serves, since a connector's client edge terminates
+*sealed* ILP packets and answers nothing on a plain `POST`. Every deployment
+fronts its provider with a connector, so that carriage reached no real one:
+the devnet provider answers that path `404` with an empty body, and the
+gateway read the 404 as "this member answered, and is not running it". The
+sealed carriage needs no shortcut, so the sandbox stopped pretending.
+
+The forwarding leg applies the map in front of the gateway's dial seam
+(`src/rewrite.mjs` wrapping `src/dial.mjs`) and the `status` leg applies the
+same table to the connector's URL (`src/status.mjs`), so the two cannot
+disagree; it rewrites no header, no ILP destination and no sealing key — the
+request is what spec §6.5 fixes; only the socket moves. It is the gateway's
+counterpart of `TOON_ENDPOINT_REWRITE` on the directory publishers: "a client
+dials what a node publishes", and in a sandbox what a node publishes is a
+compose name. In a deployment the variable is unset.
 
 **The connector terminates one route, free, and it is the only way in.**
 `conf/connector-workload-gateway.toml` is `conf/connector-gas.toml` with one
@@ -2270,15 +2280,17 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 ```
 
 **Under `hs`.** `make up-gateway-hs` (after `make up-hs`) is the same two
-services plus one rendered file, `conf/.rendered/workload-gateway-hs.env`,
-written by `scripts/hs-provider-address.sh` beside the three it already
-renders: the committed `GATEWAY_DIAL_REWRITE` restated with a fourth entry,
-`<hidden provider address>.anyone:80` → `provider-hs:8080`, for the hidden
-provider's `status` (an env var cannot be merged, so the whole map is
-restated). `docker-compose.yml` reads it as an optional `env_file`, so under
-`make up-gateway` it is simply absent. The per-lease address a hidden lease
-answers in `access.host` is never rendered anywhere: the gateway dials it
-through the proxy or not at all.
+services and **nothing rendered for them**. A hidden member's connector is
+reached at the `.anyone` address its own Profile advertises, sealed to its
+`connector_seal_key`, through `TOON_SOCKS_PROXY` — the same rule as the
+per-lease address a hidden lease answers in `access.host`, which was never
+rendered anywhere either. Until #114 this recipe wrote
+`conf/.rendered/workload-gateway-hs.env`, the committed `GATEWAY_DIAL_REWRITE`
+restated with a fourth entry sending `<hidden provider address>.anyone:80` at
+`provider-hs:8080`, because the plain `POST` the gateway then sent was not
+something the hidden connector serves. `scripts/hs-provider-address.sh` now
+renders three files rather than four, and `docker-compose.yml` reads one
+`env_file` rather than two.
 
 ## 7. Lifecycle and state
 
