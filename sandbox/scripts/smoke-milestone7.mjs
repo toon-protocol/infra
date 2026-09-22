@@ -43,7 +43,7 @@
 //       answers running, and the tenant ends it
 //
 // Buys the 600 s `warm` tier on the first provider with a standby on the
-// second, then the 30 s `smoke` tier once; three to four minutes, most of it
+// second, then the 30 s `smoke` tier once; two to three minutes, most of it
 // the gateway's cadence and the store uploads. Shares
 // `.toon-client/channels.json` with every other smoke, and with
 // scripts/spawn.mjs, which this runs BEFORE opening its own client on it
@@ -52,9 +52,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { getPublicKey } from 'nostr-tools/pure';
 import {
-  ROOT, HUB, HTTP_CONTAINER_PORT, K_PROFILE, K_BLOB,
+  ROOT, HUB, K_PROFILE, K_BLOB,
   providerOf,
   reporter, jstr, nowSec, waitFor,
   relayReadUntil, directoryFilter, docker, composeNotRunning, composeHealthy, findWorkload, workloadGone,
@@ -83,9 +82,10 @@ const SMOKE = PRIMARY.listing('smoke');
 const DOMAIN = gatewayDomain();
 const REQUEST_TTL_S = 120;
 // How long the gateway may take to notice a rotation: it re-asks every member
-// once per cadence (the gateway's 30 s default, conf/workload-gateway.conf),
-// and a round in flight at the moment of rotation may still have been
-// answered with the old grant. Three cadences is slack, not a deadline.
+// once per cadence (the gateway's 30 s default; conf/workload-gateway.conf
+// sets no other), and a round in flight at the moment of rotation may still
+// have been answered with the old grant. Three cadences is slack, not a
+// deadline.
 const NOTICE_S = 100;
 
 // THE PAGED IMAGE. The sandbox store takes one signed data item of at most
@@ -102,7 +102,6 @@ const PARTS_PER_PAGE = 4;
 const LAYER_BYTES = 2 * 1024 * 1024;
 // THROWAWAY publisher identity (hex secret key), committed like the M2 one.
 const PUBLISHER_SECRET = Uint8Array.from(Buffer.from('3c1d7e5a9b2f4e6d8c0a1b3d5f7e9a2c4b6d8f0e1a3c5b7d9f2e4a6c8b0d1f37', 'hex'));
-const PUBLISHER_PUBKEY = getPublicKey(PUBLISHER_SECRET);
 const IMAGE_NAME = 'toon-m7-paged';
 const RUN_NONCE = `${nowSec()}-${randomBytes(4).toString('hex')}`;
 const WORK = join(ROOT, '.toon-client', 'm7-smoke');
@@ -265,8 +264,9 @@ step(`4. with nobody telling it, the gateway stops serving ${CANONICAL}: 503 \`m
     `http://${CANONICAL}:${GATEWAY_HTTP_PORT}/ -> ${answer.status} \`${gatewayReason(answer)}\` after ${Math.round((Date.now() - t0) / 1000)}s, header and body agreeing in spec §5's error shape — the gateway can no longer READ the lease, and says so (§6.8, §12)`);
   assert(named === SET.length,
     `its message names the refusal at each of the ${SET.length} members — ${named} × \`refused \\\`status\\\` (bad_grant)\`: ${message.slice(0, 240)}${message.length > 240 ? '…' : ''}`);
-  assert(await (async () => (await statusWith(PRIMARY, NEW_ROOT)).body?.state === 'running')(),
-    `while the workload runs on, untouched: ${PRIMARY.service} still answers \`running\` to the new token — the gateway lost READING, and the tenant lost nothing`);
+  const still = await statusWith(PRIMARY, NEW_ROOT);
+  assert(still.body?.state === 'running',
+    `while the workload runs on, untouched: ${PRIMARY.service} answers ${jstr(still.body?.state)} to the new token — the gateway lost READING, and the tenant lost nothing`);
 }
 
 // ── 5. a new handover, and the end of the lease ───────────────────────────

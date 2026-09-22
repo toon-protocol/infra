@@ -637,7 +637,7 @@ smoke-m6: preflight-channel-state
 ## hashes and counts at the gateway's /raw/, and `blob-verify`/`image-verify`
 ## read it through its pages; `availability` says would_run and a paid `smoke`
 ## spawn runs it by digest. Buys `warm` with a standby, then `smoke` once;
-## three to four minutes, most of it the gateway's cadence and the uploads.
+## two to three minutes, most of it the gateway's cadence and the uploads.
 smoke-m7: preflight-channel-state
 	node scripts/smoke-milestone7.mjs
 

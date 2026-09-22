@@ -422,7 +422,7 @@ reading before its grant runs out**, and keep serving from an image too large
 for one Blob Record. Needs the **full stack plus the gateway**, `make
 up-gateway` (the default `COMPOSE_PROFILE=full`: the paged image lives in the
 store, so the payments-only gateway stack is not enough); like every
-relay-writing smoke it runs `preflight-channel-state` first. Three to four
+relay-writing smoke it runs `preflight-channel-state` first. Two to three
 minutes, most of it the gateway's 30 s cadence and the store uploads. Every
 step is asserted on the wire — response bodies and the gateway's reasons,
 never a log — and each one uses the developer's own command:
