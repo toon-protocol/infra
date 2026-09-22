@@ -84,7 +84,7 @@ export HOST_GID ?= $(shell id -g)
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
         smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-ci smoke-hs hs-address \
-        logs ps test require-store-context require-anytoon-context require-gateway-context
+        preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -347,6 +347,22 @@ clean:
 		rmdir data; \
 	fi
 
+## THE CHANNEL-STATE PREFLIGHT (TOON_Network #74, M7-6): compares every
+## RUNNING directory publisher's local channel store (channels.json on its own
+## volume) against relay-connector's own claim journal, and fails AT ONCE — by
+## name, with both amounts and the remedy — on the drift README §8 documents,
+## where a publisher's store has fallen STRICTLY BEHIND the connector's own
+## watermark (equal is the normal resting state between two writes) and every
+## claim it signs from there advances value by 0. A prerequisite of every
+## RELAY-WRITING smoke below (smoke-provider, smoke-provider2,
+## smoke-directory, smoke-eviction, smoke-ci, smoke-m1 through smoke-m6) so
+## the drift is caught before a lease is bought rather than several steps
+## into one; a future `make smoke-m7` (M7-7) depends on it the same way. Safe
+## to run on its own, against a stack that is not up (it then finds nothing
+## to compare and exits 0) or mid-session (`make preflight-channel-state`).
+preflight-channel-state:
+	node scripts/preflight-channel-state.mjs
+
 ## end-to-end proof: AR.IO flow (upload -> buy name -> serve) + TOON flow
 ## (contracts/program live -> paid write -> paid store blob via peering ->
 ## brokered ArNS buy: paid 5095 prepare + 5096 gas spawn + 5095 buy, name
@@ -387,7 +403,7 @@ smoke-credentials:
 ## of the same request is refused (and still billed). The workload is left
 ## to expire (conf/provider.toml lease_interval_s) unless the script removes
 ## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
-smoke-provider:
+smoke-provider: preflight-channel-state
 	node scripts/smoke-provider.mjs
 
 ## THE SAME SMOKE, AGAINST THE SECOND PROVIDER (TOON_Network #34): the same
@@ -398,7 +414,7 @@ smoke-provider:
 ## SSH on a port out of the second provider's own range, and the money lands
 ## in the second peering's own channel. Buys the 180 s `basic` tier, so a run
 ## left half-finished frees its slot in three minutes.
-smoke-provider2:
+smoke-provider2: preflight-channel-state
 	TOON_SMOKE_PROVIDER=provider2 node scripts/smoke-provider.mjs
 
 ## provider-directory proof for `make up-payments` (or `make up`): the
@@ -410,7 +426,7 @@ smoke-provider2:
 ## g.toon.relay packet on the directory publisher's own Solana channel —
 ## never the free g.toon.relay.ephemeral lane. It waits out one cadence
 ## (conf/provider.toml liveness_cadence_s), so it takes about a minute.
-smoke-directory:
+smoke-directory: preflight-channel-state
 	node scripts/smoke-directory.mjs
 
 ## eviction proof for `make up-payments` (or `make up`): a tenant pays for its
@@ -421,7 +437,7 @@ smoke-directory:
 ## reason is readable on the sandbox relay. The lease is always evicted
 ## before the script exits, so — unlike smoke-provider's raw `docker rm -f` —
 ## it never leaves a lease running for smoke-directory to count.
-smoke-eviction:
+smoke-eviction: preflight-channel-state
 	node scripts/smoke-eviction.mjs
 
 ## MILESTONE 1 ACCEPTANCE TEST (TOON_Network #1 / #9) for `make up-payments`
@@ -439,7 +455,7 @@ smoke-eviction:
 ## runs' answer shapes and lifecycles are compared. Buys the sandbox-only
 ## `smoke` listing (conf/provider.toml, 30 s Lease Interval); three to four
 ## minutes. TOON_M1_LISTING=basic runs it on the three-minute tier instead.
-smoke-m1:
+smoke-m1: preflight-channel-state
 	node scripts/smoke-milestone1.mjs
 
 ## Milestone 2's acceptance test (TOON_Network #10, scripts/smoke-milestone2.mjs):
@@ -452,7 +468,7 @@ smoke-m1:
 ## gateway; closes the store, relay and provider books to the unit. Needs the
 ## FULL stack (`make up`): the store and the gateway. Buys the `smoke`
 ## listing; about two minutes.
-smoke-m2:
+smoke-m2: preflight-channel-state
 	node scripts/smoke-milestone2.mjs
 
 ## MILESTONE 3 ACCEPTANCE TEST (TOON_Network #11 / #35, scripts/smoke-milestone3.mjs)
@@ -480,7 +496,7 @@ smoke-m2:
 ## TOON_M3_STANDBY_ONLY=1 runs the reservation side against provider2 alone
 ## — for a first provider that does not sell `warm` — and says in its
 ## verdict that it is not a pass.
-smoke-m3:
+smoke-m3: preflight-channel-state
 	node scripts/smoke-milestone3.mjs
 
 ## The `ci` listing (TOON_Network #14; spec §4.4 and Appendix A.1,
@@ -494,7 +510,7 @@ smoke-m3:
 ## a terminate bearing the lease's token removes the workload, the sidecar,
 ## its volumes, its network and its slice. Pre-pulls the dind image so the
 ## spawn does not pay for it. About a minute.
-smoke-ci:
+smoke-ci: preflight-channel-state
 	@docker pull -q $$(node -e "process.stdout.write(require('fs').readFileSync('scripts/smoke-ci.mjs','utf8').match(/DIND_IMAGE = '([^']+)'/)[1])") >/dev/null
 	node scripts/smoke-ci.mjs
 
@@ -536,7 +552,7 @@ smoke-hs:
 ## listing price, on the sandbox chains (the private-RPC gate is asserted in
 ## preflight). Buys the 180 s `basic` tier (a fresh descriptor is the slow
 ## part); two to three minutes. TOON_M4_LISTING overrides the tier.
-smoke-m4:
+smoke-m4: preflight-channel-state
 	node scripts/smoke-milestone4.mjs
 
 ## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
@@ -565,7 +581,7 @@ smoke-m4:
 ## six to seven minutes, four of them the takeover timeline. It stops and
 ## restarts the FIRST provider's container, so nothing else should be spawning
 ## on it meanwhile.
-smoke-m5:
+smoke-m5: preflight-channel-state
 	node scripts/smoke-milestone5.mjs
 
 ## MILESTONE 6 ACCEPTANCE TEST (TOON_Network #56 / #63, scripts/smoke-milestone6.mjs)
@@ -598,7 +614,7 @@ smoke-m5:
 ## `warm` tier twice on the first provider (one lease at a time) and once as a
 ## standby on the second; two to three minutes. It stops and restarts the FIRST
 ## provider's container, so nothing else should be spawning on it meanwhile.
-smoke-m6:
+smoke-m6: preflight-channel-state
 	node scripts/smoke-milestone6.mjs
 
 logs:

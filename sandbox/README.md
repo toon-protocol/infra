@@ -2402,10 +2402,36 @@ through the proxy or not at all.
   `directory-publisher-hs`; any publisher can reach it). Its LOCAL channel
   store has fallen behind the connector's claim journal, so every claim it
   signs is one the connector has already booked and nothing can ever advance.
-  It does not heal on its own and it is not a code fault: a smoke that reads
-  Liveness off the relay then fails on a descriptor hundreds of seconds stale,
-  before it has dialled anything (`make smoke-m4` step 1 is the one that says
-  so most loudly). Confirm it by comparing the two numbers —
+  It does not heal on its own and it is not a code fault.
+
+  This used to surface several steps into a smoke — reading a Liveness off the
+  relay and failing on a descriptor hundreds of seconds stale, before it had
+  dialled anything else (`make smoke-m4` step 1 said so most loudly). Since
+  TOON_Network #74 (M7-6) it no longer gets that far: **the channel-state
+  preflight** (`scripts/preflight-channel-state.mjs`, `make
+  preflight-channel-state`) compares every RUNNING directory publisher's local
+  `channels.json` against relay-connector's own claim journal (`GET /claims`)
+  BEFORE anything is dialled, and is a Makefile prerequisite of every
+  relay-writing smoke — `smoke-provider`, `smoke-provider2`,
+  `smoke-directory`, `smoke-eviction`, `smoke-ci`, and `smoke-m1` through
+  `smoke-m6` (a future `make smoke-m7`, M7-7, depends on it the same way). A
+  publisher that is not running, or holds no channel yet, is skipped — there
+  is nothing to compare. On a mismatch it fails AT ONCE, naming the publisher,
+  both amounts and the remedy, in this shape:
+
+  ```
+    FAIL directory-publisher-hs: local channel store cumulativeAmount 70 on solana:<account>,
+         relay-connector's claim journal already at 71.
+         Every claim directory-publisher-hs signs from here advances value by 0 and the relay refuses every write.
+         Remedy: `make clean` (it takes the claim journals AND the stores together, which is exactly why
+         `-v` is there) followed by a cold start; or, to keep the rest of the stack, stop
+         directory-publisher-hs and raise its stored cumulativeAmount past the connector's before starting
+         it again.
+  ```
+
+  The manual check is still what the message is built from, and still works
+  on its own (e.g. against a service the preflight does not know about) —
+  comparing the two numbers by hand:
 
   ```bash
   docker compose --profile hs exec -T directory-publisher-hs cat /var/lib/toon-publisher/channels.json
@@ -2413,13 +2439,18 @@ through the proxy or not at all.
       http://localhost:3200/claims | grep <that channel account>
   ```
 
-  — a publisher `cumulativeAmount` at or below the connector's
-  `cumulative_amount` for the same channel is the condition. The clean remedy
-  is `make clean` (it takes the claim journals AND the stores together, which
-  is exactly why `-v` is there) followed by a cold start; on the `hs` profile
-  that also publishes new `.anyone` addresses, so on a stack you want to keep,
-  the alternative is to stop the publisher and raise its stored
-  `cumulativeAmount` past the connector's before starting it again.
+  — a publisher `cumulativeAmount` STRICTLY BELOW the connector's
+  `cumulative_amount` for the same channel is the condition — not merely
+  equal: `@toon-protocol/client` persists a claim's advance to the store
+  BEFORE the claim is even sent, so `cumulativeAmount == cumulative_amount` is
+  the ordinary resting state between two writes, and only a store caught
+  BEHIND what the connector already booked means the next claim it signs
+  (store + this route's price of 1) cannot clear the journal's own watermark.
+  The clean remedy is `make clean` (it takes the claim journals AND the stores
+  together, which is exactly why `-v` is there) followed by a cold start; on
+  the `hs` profile that also publishes new `.anyone` addresses, so on a stack
+  you want to keep, the alternative is to stop the publisher and raise its
+  stored `cumulativeAmount` past the connector's before starting it again.
 - **`F01 … no record of that channel` after `make down` + `make up-hs`**:
   anvil keeps nothing across a restart, so a kept channel store outlives its
   chain. `smoke-hs` reads its channel's collateral back off the chain before it
