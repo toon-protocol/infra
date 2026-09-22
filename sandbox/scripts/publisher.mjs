@@ -4,20 +4,26 @@
 // stack (`make up`). Not a tenant product.
 //
 //   node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520]
+//           [--record-max <bytes>] [--parts-per-page <n>]
 //       Store <file> as parts in the TOON store and publish its Blob Record
 //       (issue #20). Prints the digest, every part's txid, and the record's
 //       relay event id and store txid. A blob already recorded on the relay
 //       is skipped and the existing record reported. --data-item-max is the
 //       store's signed data item ceiling (the sandbox's free tier by default;
-//       a production store's differs).
+//       a production store's differs). A record that would not fit it is
+//       PAGED (issue #73, spec §8.2): the part list is uploaded as pages and
+//       the record lists those. --record-max lowers the size above which a
+//       record pages, to page a small blob on purpose; --parts-per-page
+//       sets how many parts a page lists.
 //
 //   node scripts/publisher.mjs blob-verify <sha256:hex>
 //       Read a Blob Record back the way a provider would: from the relay by
-//       #x, its copy and every part from the gateway's /raw/, checking every
-//       hash. Free — nothing is paid.
+//       #x, its copy, every page of a paged record and every part from the
+//       gateway's /raw/, checking every hash. Free — nothing is paid.
 //
 //   node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex>
 //           [--upstream <spec>]... [--root <sha256:hex>] [--dry-run]
+//           [--record-max <bytes>] [--parts-per-page <n>]
 //       Publish the Image Registry entry for a locally built image (issue
 //       #21). <layout> is an OCI image layout: a directory, or the tar
 //       `docker save --platform linux/amd64 <image> -o image.tar` writes.
@@ -69,7 +75,7 @@ import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { hasTag } from './lib/provider-smoke.mjs';
-import { publishBlob, planBlob, sha256Hex, hexOf, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
+import { publishBlob, planBlob, partListOf, sha256Hex, hexOf, DEFAULT_PART_SIZE, DATA_ITEM_MAX_BYTES, K_BLOB } from './publisher/blob.mjs';
 import { publishImage, planImage, parseRef, imageAddress, K_IMAGE, TOON_LABEL } from './publisher/image.mjs';
 import { openLayout } from './publisher/oci-layout.mjs';
 import { publishTemplate, templateEvent } from './publisher/template.mjs';
@@ -109,20 +115,30 @@ function secretKeyFrom(hex) {
   return Uint8Array.from(Buffer.from(hex, 'hex'));
 }
 
+/** `--data-item-max`, `--record-max` and `--parts-per-page`, as numbers; the last two undefined when not given. */
+function recordOptions(values) {
+  const dataItemMax = Number(values['data-item-max'] ?? DATA_ITEM_MAX_BYTES);
+  return {
+    dataItemMax,
+    recordMax: values['record-max'] === undefined ? dataItemMax : Number(values['record-max']),
+    partsPerPage: values['parts-per-page'] === undefined ? undefined : Number(values['parts-per-page']),
+  };
+}
+
 async function blob(positionals, values) {
   const [file] = positionals;
   if (!file) usage();
   const secretKey = secretKeyFrom(values.key ?? process.env.PUBLISHER_KEY);
   const partSize = Number(values['part-size'] ?? DEFAULT_PART_SIZE);
-  const dataItemMax = Number(values['data-item-max'] ?? DATA_ITEM_MAX_BYTES);
+  const { dataItemMax, recordMax, partsPerPage } = recordOptions(values);
   const bytes = readFileSync(file);
   // Refuse a plan that cannot fit BEFORE a channel is opened or anything paid.
-  const plan = planBlob({ bytes, partSize, dataItemMax, createdAt: 0 });
-  log(`publisher ${getPublicKey(secretKey)}; ${file}: ${bytes.length} bytes, ${plan.pieces.length} parts of ${partSize} (${plan.digest})`);
+  const plan = planBlob({ bytes, partSize, dataItemMax, recordMax, partsPerPage, createdAt: 0 });
+  log(`publisher ${getPublicKey(secretKey)}; ${file}: ${bytes.length} bytes, ${plan.pieces.length} parts of ${partSize}${plan.pages === null ? '' : `, paged over ${plan.pages} pages`} (${plan.digest})`);
 
   const io = await openToonIo({ secretKey, log });
   try {
-    const report = await publishBlob({ bytes, secretKey, partSize, dataItemMax, io });
+    const report = await publishBlob({ bytes, secretKey, partSize, dataItemMax, recordMax, partsPerPage, io });
     if (!report.skipped) await io.remember(hexOf(report.digest), report.record.store_txid);
     const { event, ...record } = report.record;
     console.log(JSON.stringify({ ...report, record }, null, 2));
@@ -151,16 +167,26 @@ async function blobVerify(positionals) {
     log(`no store txid in the local ledger for ${hex}; skipping the copy check`);
   }
 
+  // A paged record's pages first, each checked before a part it names is
+  // trusted (spec §8.2); an inline record's `parts` as they are.
+  const listed = await partListOf(content, readRaw);
+  for (const page of listed.pages ?? []) {
+    check(page.ok, `page ${GATEWAY}/raw/${page.txid}: ${page.parts} parts, sha256 ${page.sha256.slice(0, 12)}…${page.ok ? '' : ` — ${page.why}`}`);
+  }
+  if (listed.parts === null) {
+    check(false, `no part list to trust: ${listed.problems.join('; ')}`);
+    report({ digest, record: { event_id: event.id, store_txid: storeTxid }, parts: null, pages: listed.pages?.length ?? null });
+  }
   const pieces = [];
-  for (const [i, part] of content.parts.entries()) {
+  for (const [i, part] of listed.parts.entries()) {
     const bytes = await readRaw(part.txid);
     check(bytes.length === part.size && sha256Hex(bytes) === part.sha256, `part ${i} ${GATEWAY}/raw/${part.txid}: ${bytes.length} bytes, sha256 ${part.sha256.slice(0, 12)}…`);
     pieces.push(bytes);
   }
   const whole = Buffer.concat(pieces);
-  check(whole.length === content.size && `sha256:${sha256Hex(whole)}` === digest, `${content.parts.length} parts reassemble to ${digest} (${whole.length} bytes)`);
+  check(whole.length === content.size && `sha256:${sha256Hex(whole)}` === digest, `${listed.parts.length} parts${listed.pages ? ` over ${listed.pages.length} pages` : ''} reassemble to ${digest} (${whole.length} bytes)`);
 
-  report({ digest, record: { event_id: event.id, store_txid: storeTxid }, parts: content.parts.length });
+  report({ digest, record: { event_id: event.id, store_txid: storeTxid }, parts: listed.parts.length, pages: listed.pages?.length ?? null });
 }
 
 async function image(positionals, values) {
@@ -172,7 +198,7 @@ async function image(positionals, values) {
   const opts = {
     path, name, tag, upstream, rootDigest: values.root,
     partSize: Number(values['part-size'] ?? DEFAULT_PART_SIZE),
-    dataItemMax: Number(values['data-item-max'] ?? DATA_ITEM_MAX_BYTES),
+    ...recordOptions(values),
   };
 
   // The layout is opened once and shared with `publishImage`, which makes the
@@ -245,11 +271,15 @@ async function imageVerify(positionals) {
     }
     const record = JSON.parse((await readRaw(txid)).toString('utf8'));
     const recorded = JSON.parse(record.content);
-    const parts = Array.isArray(recorded.parts) ? recorded.parts : [];
+    // A paged record's pages are read and checked here too: a page that does
+    // not hold what the record says fails the record (spec §8.2, §8.4).
+    const listed = await partListOf(recorded, readRaw);
+    const parts = listed.parts ?? [];
     check(
       record.kind === K_BLOB && verifyEvent(record) && recorded.digest === blob.digest && recorded.size === blob.size &&
         parts.length > 0 && parts.reduce((n, p) => n + p.size, 0) === blob.size,
-      `${blob.digest} (${blob.size} bytes, ${blob.media_type}): Blob Record at ${GATEWAY}/raw/${txid}, ${parts.length} parts`,
+      `${blob.digest} (${blob.size} bytes, ${blob.media_type}): Blob Record at ${GATEWAY}/raw/${txid}, ${parts.length} parts` +
+        (listed.pages ? ` over ${listed.pages.length} pages` : '') + (listed.problems.length > 0 ? ` — ${listed.problems.join('; ')}` : ''),
     );
   }
 
@@ -336,6 +366,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     key: { type: 'string' }, 'part-size': { type: 'string' }, 'data-item-max': { type: 'string' },
+    'record-max': { type: 'string' }, 'parts-per-page': { type: 'string' },
     upstream: { type: 'string', multiple: true }, root: { type: 'string' }, 'dry-run': { type: 'boolean' },
     value: { type: 'string', multiple: true },
   },

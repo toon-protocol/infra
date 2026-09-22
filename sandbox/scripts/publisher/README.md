@@ -6,9 +6,11 @@ stack (`make up`): it pays the store and the relay through the hub and reads
 back through the local gateway. Not a tenant product.
 
 ```
-node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520]
+node scripts/publisher.mjs blob <file> --key <hex> [--part-size 102400] [--data-item-max 107520] \
+    [--record-max <bytes>] [--parts-per-page <n>]
 node scripts/publisher.mjs blob-verify sha256:<hex>
-node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex> [--upstream <spec>]... [--root <digest>] [--dry-run]
+node scripts/publisher.mjs image <layout> <name>:<tag> --key <hex> [--upstream <spec>]... [--root <digest>] [--dry-run] \
+    [--record-max <bytes>] [--parts-per-page <n>]
 node scripts/publisher.mjs image-verify 30434:<pubkey>:<name>:<tag>
 node scripts/publisher.mjs template <file> <name> --key <hex> [--dry-run]
 node scripts/publisher.mjs template-verify 30436:<pubkey>:<name> [--value NAME=VALUE]...
@@ -38,12 +40,31 @@ same signed event JSON is uploaded once to the store. The command prints
 JSON: the blob digest, every part, and the record's `event_id` (relay) and
 `store_txid` (the copy an Image Registry entry cites).
 
+- **Paged, when the record would not fit one data item** (TOON_Network #73,
+  #76; spec §8.2, §11 item 2) — past 689 parts at 100 KiB, some 67 MiB. The
+  part list is then uploaded as PAGES, each one more store upload whose bytes
+  are the JSON array of a slice of it, and the record lists those instead:
+
+  ```
+  { "digest": "sha256:…", "size": n, "part_size": 102400,
+    "pages": [ { "txid": "<arweave txid>", "sha256": "<hex of the page>", "parts": n }, … ] }
+  ```
+
+  Every part, then every page, then the record. WHICH shape a record takes
+  and what each page holds is not decided in this directory: `blob.mjs`
+  imports `planBlobRecord` from the provider checkout's
+  `tools/publisher/blob.mjs` (`PROVIDER_CONTEXT`, default `../../provider`),
+  the planner the provider's own reader is tested against, and keeps only the
+  signing and the paying. `--record-max` lowers the size above which a record
+  pages — the store's ceiling stays what it is — so a small blob can be paged
+  on purpose, which is what `make smoke-m7` does; `--parts-per-page` sets how
+  many parts a page lists (default: as many as fit one upload).
 - **Refused before a channel is opened or anything uploaded:** a
   `--part-size` over `maxPartSize()` (the cap less the store's data item
-  envelope), or a blob whose record would not fit one data item (689 parts
-  at 100 KiB — some 67 MiB — after which the message names the part size
-  to raise to). `--data-item-max` moves the cap for a store whose ceiling
-  is not the sandbox's free tier.
+  envelope), a page that would not fit one upload, a record that would not
+  fit one data item even paged, or a `--record-max` above `--data-item-max`.
+  `--data-item-max` moves the cap for a store whose ceiling is not the
+  sandbox's free tier.
 - **Skipped:** a blob the relay already records (a `kind 30435` event with
   `#x = <hex>`) makes no upload; the existing record's `event_id` is
   reported, and its `store_txid` when this host uploaded it.
@@ -58,8 +79,10 @@ is reported with `store_txid: null`.
 
 Free. Finds the record on the relay by `#x`, fetches the store copy at
 `GATEWAY/raw/<store_txid>` (when the ledger knows it) and checks it is the
-same signed event, fetches every part at `GATEWAY/raw/<txid>` and checks its
-size and sha256, reassembles and checks the blob digest. Exit 0 when every
+same signed event, fetches every page of a paged record and checks its sha256
+and its part count BEFORE trusting a part it names, fetches every part at
+`GATEWAY/raw/<txid>` and checks its size and sha256, reassembles and checks
+the blob digest. Exit 0 when every
 check passes.
 
 ## `image` — an Image Registry entry from a local image (#21)
@@ -149,7 +172,8 @@ Free. Finds the entry on the relay by its address (kind 30434, author,
 `#d`), checks `d`, `x`, the label, the signature and that `blobs` contains
 the image digest, then fetches every `toon-store` blob's Blob Record at
 `GATEWAY/raw/<blob_record_txid>` and checks it is a signed kind 30435 record
-for that digest whose parts add up to the blob's size. `oci` blobs are
+for that digest whose parts — read through its pages, when it is paged — add
+up to the blob's size. `oci` blobs are
 reported and not fetched; a source type this reader does not know is a FAILED
 check rather than a skipped blob, because the entry claims to be complete for
 the digest. Exit 0 when every check passes. #26's smoke reads the entry back
@@ -285,13 +309,13 @@ const io = await openToonIo({ secretKey });          // one client, one channel
 
 const r = await publishBlob({ bytes, secretKey, partSize, io });
 // r = { skipped, digest, size, part_size, parts: [{ txid, sha256, size }],
-//       record: { event_id, store_txid, event } }
+//       pages: null | [{ txid, sha256, parts }], record: { event_id, store_txid, event } }
 if (!r.skipped) await io.remember(r.digest.slice(7), r.record.store_txid);
 
 const image = await publishImage({ path, name, tag, secretKey, upstream, io });
 // image = { address: '30434:<pubkey>:<name>:<tag>', d, digest, media_type,
 //           blobs: [{ digest, size, media_type, source }],
-//           stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
+//           stored: [{ digest, skipped, recopied, parts, pages, blob_record_txid, event_id }],
 //           entry: { event_id, event } }
 
 const t = await publishTemplate({ name: 'static-site', content, secretKey, io });
