@@ -800,6 +800,18 @@ curl http://<canonical label>.gw.localhost:3280/
 curl http://whoami.gw.localhost:3280/                         # the --name, if it was free
 curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://<canonical label>.gw.localhost:3443/
 
+# 3b. (optional) rotate: replace the lease's Continuation Token at BOTH members (spec §6.8).
+#    A fresh root secret goes into the lease file, beside the old one until every member
+#    has confirmed; each member gets one request naming only itself, paid through the hub
+#    from account index 4 (`.toon-client/rotate-channels.json`). Free at the providers.
+node scripts/rotate.mjs .toon-client/spawn-<id prefix>.json
+#    -> { "rotated": true, "members": [ { "provider": …, "rotated": true }, … ] }, exit 0.
+#    Every grant of the OLD root is now `bad_grant` at both members: within a cadence
+#    (30 s) the URL answers 503 `member_unreachable` — the gateway stopped READING, not
+#    only serving. Hand over again and the grants derive from the new root in the file:
+node scripts/handover.mjs .toon-client/spawn-<id prefix>.json --expires-in 1h
+curl -si http://<canonical label>.gw.localhost:3280/         # -> HTTP/1.1 200 again
+
 # 4. take it off the gateway: a Gateway Withdrawal over the same route, bearing the grant
 #    in force (the moment step 2 recorded). The same URL then answers the GATEWAY'S OWN
 #    503 `no_grant` instead of the workload. The lease itself runs on, untouched.
@@ -858,9 +870,19 @@ again with a later `--expires-in` and the gateway holds a grant that outlives
 the one it had — a handover that passes admission **replaces** what is held,
 with no `created_at` weighed and no restart (spec §12.1). **A withdrawal ends
 serving, not reading**: the withdrawn gateway keeps a working grant until the
-moment the handover named and could still ask a member for `status` with it,
-because there is no revocation before expiry (spec §6.5.1, §12.7) — so keep
-`--expires-in` short. A `--name` is first come, first served across every grant
+moment the handover named and could still ask a member for `status` with it
+(spec §6.5.1, §12.7). **Rotation ends reading too**: `node scripts/rotate.mjs
+<lease.json>` runs the handover tool's `rotate`, which replaces every member's
+token with one derived from a fresh root secret, so every grant of the old
+root is refused `bad_grant` at once (spec §6.8, ADR 0018). The lease file
+keeps both root secrets until every member has confirmed; a member that could
+not be reached leaves the script exiting `1` with the set partly rotated —
+each member still read with its own current token — and running it again
+finishes the job with the same new root. A lost answer is recovered by the
+tool asking `status` with the new token, never by resending. `provider-hs` is
+refused: its connector is reached over `anon`, which the tool does not dial.
+Keep `--expires-in` short anyway: rotation ends every grant of the old root
+together, not one gateway's. A `--name` is first come, first served across every grant
 in force on the gateway (spec §12.6): a name another workload's unexpired grant
 holds is logged and dropped, and the canonical hostname still works; a
 withdrawal frees the name at once, an expiry does not until another grant
@@ -2172,7 +2194,11 @@ its own channel and its own store (`.toon-client/handover-channels.json`),
 because a smoke holds the smokes' buyer (index 0, `channels.json`) open while
 it runs this script, and two processes on one channel share one nonce
 watermark. `scripts/seed-toon-solana.mjs` funds it on every profile, like the
-three publishers' wallets. It reads no relay and writes none; the tenant's
+three publishers' wallets. `scripts/rotate.mjs` pays from the same wallet but
+on a channel with the **hub** (`.toon-client/rotate-channels.json`), because a
+rotate goes to each provider's `<addr>.rotate` — free there, 100 at the hub
+like every other free row — and the members, their `ilp_address` and their
+pinned `connector_seal_key` come out of `conf/provider*.toml`. It reads no relay and writes none; the tenant's
 Nostr key is nowhere in it. `scripts/spawn.mjs`, by contrast, *is* the smokes'
 buyer — it is the smokes' spawn as one command, for the README walk-through,
 minting the root secret the way the Milestone 6 smoke does — and must not run
@@ -2234,8 +2260,10 @@ through the proxy or not at all.
   `.toon-client/spawn-<id>.json` and nowhere else**; `make clean` removes
   `.toon-client/` and with it every root secret, which is loss of control of
   every lease still running — they run on until their intervals end. The
-  handover script's channel store, `.toon-client/handover-channels.json`, goes
-  the same way.
+  handover script's channel store, `.toon-client/handover-channels.json`, and
+  the rotate script's, `.toon-client/rotate-channels.json`, go the same way.
+  While a rotation is only partly done the file carries a `rotation` record
+  beside `root_secret`; `make clean` in that window loses both.
 
 ## 8. Troubleshooting
 
