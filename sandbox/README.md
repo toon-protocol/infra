@@ -921,9 +921,17 @@ keeps both root secrets until every member has confirmed; a member that could
 not be reached leaves the script exiting `1` with the set partly rotated —
 each member still read with its own current token — and running it again
 finishes the job with the same new root. A lost answer is recovered by the
-tool asking `status` with the new token, never by resending. `provider-hs` is
-refused: its connector is reached over `anon`, which the tool does not dial.
-Keep `--expires-in` short anyway: rotation ends every grant of the old root
+tool asking `status` with the new token, never by resending. **`provider-hs`
+rotates too** (spec §10, §12.8; TOON_Network #81): reached DIRECTLY over anon
+through the buyer's own `anon-client` SOCKS proxy, not through the hub — the
+same `.anyone` connector `smoke-hs.mjs` and `smoke-milestone4.mjs` already dial
+for a spawn and a `status` — on account index 7 of the committed test phrase
+(distinct from `smoke-hs`'s 5 and `smoke-milestone4`'s 6), a chain of its own
+(`evm`, the sandbox chain `provider-hs` settles on). `<addr>.rotate` and
+`<addr>.status` are free routes, so nothing is paid for and no channel opens
+there — the account index is for identity only. A lost answer over the hidden
+path is recovered exactly the same way, through `status` with the new token,
+over the same connector. Keep `--expires-in` short anyway: rotation ends every grant of the old root
 together, not one gateway's. A `--name` is first come, first served across every grant
 in force on the gateway (spec §12.6): a name another workload's unexpired grant
 holds is logged and dropped, and the canonical hostname still works; a
@@ -2240,7 +2248,12 @@ three publishers' wallets. `scripts/rotate.mjs` pays from the same wallet but
 on a channel with the **hub** (`.toon-client/rotate-channels.json`), because a
 rotate goes to each provider's `<addr>.rotate` — free there, 100 at the hub
 like every other free row — and the members, their `ilp_address` and their
-pinned `connector_seal_key` come out of `conf/provider*.toml`. It reads no relay and writes none; the tenant's
+pinned `connector_seal_key` come out of `conf/provider*.toml`. **`provider-hs`
+is a fifth wallet again** (spec §10, §12.8; TOON_Network #81): account index 7,
+no channel store worth the name — `<addr>.rotate` is free there too, direct,
+so `openHiddenClient` never opens one — reached through the buyer's own
+`anon-client` SOCKS proxy rather than the hub, because the hub does not peer
+with a Hidden Provider. It reads no relay and writes none; the tenant's
 Nostr key is nowhere in it. `scripts/spawn.mjs`, by contrast, *is* the smokes'
 buyer — it is the smokes' spawn as one command, for the README walk-through,
 minting the root secret the way the Milestone 6 smoke does — and must not run

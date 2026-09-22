@@ -35,17 +35,28 @@
 //                    out of conf/: each provider's pubkey (nostr_private_key),
 //                    the `ilp_address` its routes hang off, and the
 //                    `connector_seal_key` its Profile PINS (ADR 0011) — the
-//                    tool seals to that and fetches nothing. `provider-hs` is
-//                    refused: its connector is reached over `anon`, which
-//                    this tool does not dial (spec §10 hides a provider, not
-//                    a tenant)
+//                    tool seals to that and fetches nothing.
+//   `provider-hs`    reached DIRECTLY over anon (spec §10, §12.8;
+//                    TOON_Network #81), not through the hub: its own
+//                    connector — the `.anyone` address `make up-hs` rendered
+//                    (conf/.rendered/provider-hs.toml), read here the same way
+//                    smoke-hs.mjs and smoke-milestone4.mjs do — is passed to
+//                    the tool as the member's fourth field, and the tool dials
+//                    it through the buyer's own anon-client SOCKS proxy
+//                    (TOON_SOCKS_PROXY, below). `<addr>.rotate` and
+//                    `<addr>.status` are free routes (spec §5, §6.8), so
+//                    nothing is paid for there and no channel opens — the
+//                    account index and chain below are for IDENTITY only
 //   the payer        anvil's public test phrase at ACCOUNT INDEX 4, the
 //                    handover script's wallet, paying THROUGH THE HUB at
 //                    :3200 (100 per free route, the hub's fee) on its own
 //                    channel store .toon-client/rotate-channels.json — not the
 //                    smokes' channels.json, which a smoke holds open while it
 //                    runs this, and not handover-channels.json, whose channel
-//                    is with the gateway's connector
+//                    is with the gateway's connector. A hidden member's is a
+//                    SEPARATE identity, account index 7 — free (below), left
+//                    beside smoke-hs's (5) and smoke-milestone4's (6) rather
+//                    than reusing either
 // Every TOON_* variable the tool reads may still be set in the environment and
 // wins over these defaults (the tool's README lists them).
 import { existsSync, readFileSync } from 'node:fs';
@@ -59,6 +70,26 @@ const TOOL_DIR = join(PROVIDER_CONTEXT, 'tools', 'grant');
 // Account index 4 of the committed test phrase: see scripts/seed-toon-solana.mjs.
 const ROTATE_PAYER_ACCOUNT_INDEX = '4';
 const CHANNEL_STORE = join(ROOT, '.toon-client', 'rotate-channels.json');
+// The hidden path: `provider-hs`'s own connector, reached over the buyer's
+// anon-client SOCKS proxy, on the sandbox's second chain (`evm`, the private
+// anvil provider-hs settles on — conf/provider-hs.toml's `[anon]` table).
+// Account index 7 of the SAME test phrase: free, and distinct from every
+// other account this sandbox already names (README §2).
+const ANON_SOCKS_PORT = process.env.ANON_SOCKS_PORT ?? '19050';
+const HIDDEN_SOCKS_PROXY = process.env.TOON_SOCKS_PROXY ?? `socks5h://127.0.0.1:${ANON_SOCKS_PORT}`;
+const HIDDEN_ACCOUNT_INDEX = '7';
+const HIDDEN_CHANNEL_STORE = join(ROOT, '.toon-client', 'rotate-hs-channels.json');
+const RENDERED_HS_PROVIDER = join(ROOT, 'conf', '.rendered', 'provider-hs.toml');
+
+/** The `.anyone` address `make up-hs` rendered for `provider-hs`, or throw — the same read smoke-hs.mjs and smoke-milestone4.mjs make. */
+function hiddenConnector() {
+  if (!existsSync(RENDERED_HS_PROVIDER)) {
+    throw new Error(`${RENDERED_HS_PROVIDER} does not exist: \`make up-hs\` renders provider-hs's .anyone address`);
+  }
+  const address = (readFileSync(RENDERED_HS_PROVIDER, 'utf8').match(/[a-z2-7]{56}\.anyone/) ?? [])[0];
+  if (!address) throw new Error(`${RENDERED_HS_PROVIDER} names no <56-base32>.anyone address — re-run \`make up-hs\``);
+  return `http://${address}`;
+}
 
 const log = (m) => console.error(`[rotate] ${m}`);
 const usage = (problem) => usageFromHeader(import.meta.url, 'rotate', problem);
@@ -86,14 +117,16 @@ if (!Array.isArray(lease.standby_set) || lease.standby_set.length === 0) {
   usage(`${leaseFile} names no standby_set: the members to rotate, primary first`);
 }
 
-/** `--member` for the tool: the pubkey, the ILP address and the pinned sealing key. */
+/**
+ * `--member` for the tool: the pubkey, the ILP address and the pinned sealing
+ * key — plus, for `provider-hs`, a fourth field naming its own `.anyone`
+ * connector, which the tool dials directly, over anon (spec §10, §12.8).
+ */
 function memberArg(name) {
-  if (name === 'provider-hs') {
-    throw new Error('provider-hs is reached over anon, which the tool does not dial: rotate a hidden provider\'s lease by hand through anon-client');
-  }
   const P = PROVIDERS[name];
   if (!P) throw new Error(`${leaseFile} names ${name}, which is not a sandbox provider (${Object.keys(PROVIDERS).join(', ')})`);
-  return `${P.pubkey},${P.ilpAddress},${P.confValue('connector_seal_key')}`;
+  const base = `${P.pubkey},${P.ilpAddress},${P.confValue('connector_seal_key')}`;
+  return name === 'provider-hs' ? `${base},${hiddenConnector()}` : base;
 }
 
 let members;
@@ -113,6 +146,7 @@ if (!existsSync(join(TOOL_DIR, 'node_modules'))) {
   process.exit(2);
 }
 
+const hasHidden = lease.standby_set.includes('provider-hs');
 const args = [join(TOOL_DIR, 'seal.mjs'), 'rotate', '--lease', leaseFile, ...members.flatMap((m) => ['--member', m])];
 const env = {
   TOON_CONNECTOR_URL: HUB,
@@ -121,12 +155,21 @@ const env = {
   TOON_MNEMONIC: MNEMONIC,
   TOON_ACCOUNT_INDEX: ROTATE_PAYER_ACCOUNT_INDEX,
   TOON_CHANNEL_STORE: CHANNEL_STORE,
+  // provider-hs's own path (spec §10, §12.8): unused, and nothing dialled,
+  // unless `standby_set` names it.
+  TOON_SOCKS_PROXY: HIDDEN_SOCKS_PROXY,
+  TOON_HIDDEN_CHAIN: 'evm',
+  TOON_HIDDEN_ACCOUNT_INDEX: HIDDEN_ACCOUNT_INDEX,
+  TOON_HIDDEN_CHANNEL_STORE: HIDDEN_CHANNEL_STORE,
   // Anything set in the environment wins: the tool's README names them all.
   ...process.env,
 };
 
 log(`rotate workload ${String(lease.workload_id).slice(0, 12)}… at ${lease.standby_set.join(' + ')}, one request each, through the hub ${HUB}`);
 log(`paying from account index ${env.TOON_ACCOUNT_INDEX}, channel store ${env.TOON_CHANNEL_STORE}; the new root secret goes into ${leaseFile} and nowhere else`);
+if (hasHidden) {
+  log(`provider-hs dialled directly over anon (${env.TOON_SOCKS_PROXY}), account index ${env.TOON_HIDDEN_ACCOUNT_INDEX} — free there, so nothing is paid`);
+}
 const ran = spawnSync(process.execPath, args, { cwd: ROOT, env, stdio: ['ignore', 'inherit', 'inherit'] });
 if (ran.error) {
   log(`could not run the handover tool: ${ran.error.message}`);
