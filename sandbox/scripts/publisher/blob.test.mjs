@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import {
-  publishBlob, signedRecordBytes, K_BLOB, TOON_LABEL, DATA_ITEM_MAX_BYTES, DATA_ITEM_ENVELOPE_BYTES, maxPartSize,
+  publishBlob, partListOf, signedRecordBytes, K_BLOB, TOON_LABEL, DATA_ITEM_MAX_BYTES, DATA_ITEM_ENVELOPE_BYTES, maxPartSize,
 } from './blob.mjs';
 
 const KiB = 1024;
@@ -106,16 +106,63 @@ test('the largest allowed part still fits the store data item with its envelope'
   assert.ok(maxPartSize() >= 102_400, 'the sandbox default of 100 KiB is allowed');
 });
 
-test('a blob whose Blob Record would not fit one data item is refused, naming the part size to raise', async () => {
+test('a blob whose inline record would not fit one data item is PAGED: every part, then every page, then the record (spec §8.2)', async () => {
+  const data = bytes(1024 * KiB, 3);
   const io = fakeIo();
-  // 1 KiB parts of a 1 MiB blob = 1024 parts: ~145 bytes each in the record, well over 107,520.
-  await assert.rejects(
-    publishBlob({ bytes: bytes(1024 * KiB, 3), secretKey: generateSecretKey(), partSize: KiB, io }),
-    // 1024 parts at 1 KiB; the fix it names is the smallest part size whose record fits: 2 KiB.
-    (e) => /part size/i.test(e.message) && e.message.includes('Raise the part size to 2048'),
-  );
-  assert.equal(io.uploads.length, 0, 'refused before the first part went anywhere');
-  assert.equal(io.published.length, 0);
+  // 1 KiB parts of a 1 MiB blob = 1024 parts: ~145 bytes each inline, well over 107,520.
+  const report = await publishBlob({ bytes: data, secretKey: generateSecretKey(), partSize: KiB, io });
+
+  const parts = io.uploads.slice(0, 1024);
+  assert.ok(parts.every((u) => u.contentType === 'application/octet-stream' && u.bytes.length === KiB));
+  const pages = io.uploads.slice(1024, -1);
+  assert.ok(pages.length >= 2, `${pages.length} pages`);
+  assert.ok(pages.every((u) => u.contentType === 'application/json' && u.bytes.length <= maxPartSize()), 'every page fits one upload');
+
+  const content = JSON.parse(io.published[0].content);
+  assert.equal('parts' in content, false, 'a paged record lists no parts inline');
+  assert.deepEqual(content.pages, pages.map((u) => ({ txid: u.txid, sha256: sha256(u.bytes), parts: JSON.parse(u.bytes).length })));
+  assert.deepEqual(pages.flatMap((u) => JSON.parse(u.bytes)), parts.map((u) => ({ txid: u.txid, sha256: sha256(u.bytes), size: KiB })),
+    "the pages, joined in order, are exactly the part list `parts` would have been");
+  assert.deepEqual(report.pages, content.pages);
+  assert.equal(report.parts.length, 1024, 'the report still carries the whole part list');
+  assert.equal(io.uploads.at(-1).bytes.toString('utf8'), JSON.stringify(io.published[0]), 'and the store copy is the signed record');
+});
+
+test('a LOWERED record ceiling pages a small blob on purpose, parts_per_page parts to a page', async () => {
+  const io = fakeIo();
+  const report = await publishBlob({ bytes: bytes(10 * KiB, 5), secretKey: generateSecretKey(), partSize: KiB, recordMax: 1024, partsPerPage: 4, io });
+  assert.deepEqual(report.pages.map((p) => p.parts), [4, 4, 2]);
+  const inline = await publishBlob({ bytes: bytes(10 * KiB, 5), secretKey: generateSecretKey(), partSize: KiB, io: fakeIo() });
+  assert.equal(inline.pages, null, 'the same blob at the store\'s own ceiling stays inline');
+});
+
+test('a record ceiling above the data item is refused before any upload', async () => {
+  const io = fakeIo();
+  await assert.rejects(publishBlob({ bytes: bytes(10), secretKey: generateSecretKey(), recordMax: DATA_ITEM_MAX_BYTES + 1, io }), /would not fit one store data item/);
+  assert.equal(io.uploads.length, 0);
+});
+
+test('partListOf reads a paged record as a reader must: each page checked before a part from it is trusted', async () => {
+  const io = fakeIo();
+  await publishBlob({ bytes: bytes(10 * KiB, 5), secretKey: generateSecretKey(), partSize: KiB, recordMax: 1024, partsPerPage: 4, io });
+  const byTxid = new Map(io.uploads.map((u) => [u.txid, u.bytes]));
+  const readRaw = async (txid) => byTxid.get(txid) ?? Promise.reject(new Error('404'));
+  const content = JSON.parse(io.published[0].content);
+
+  const read = await partListOf(content, readRaw);
+  assert.deepEqual(read.problems, []);
+  assert.equal(read.parts.length, 10);
+  assert.ok(read.pages.every((p) => p.ok));
+  assert.deepEqual(Buffer.concat(read.parts.map((p) => byTxid.get(p.txid))), bytes(10 * KiB, 5));
+
+  const tampered = { ...content, pages: content.pages.map((p, i) => (i === 1 ? { ...p, parts: 3 } : p)) };
+  const bad = await partListOf(tampered, readRaw);
+  assert.equal(bad.parts, null);
+  assert.match(bad.problems[0], /page 1 .*lists 4 part objects, not 3/);
+
+  const both = await partListOf({ ...content, parts: [] }, readRaw);
+  assert.match(both.problems[0], /carries both/);
+  assert.deepEqual((await partListOf({ parts: [{ txid: 'x', sha256: 'y', size: 1 }] }, readRaw)).parts.length, 1);
 });
 
 test('a blob already recorded on the relay is skipped: no upload, the existing identifiers reported', async () => {
@@ -134,7 +181,7 @@ test('a blob already recorded on the relay is skipped: no upload, the existing i
   assert.equal(report.record.store_txid, found.store_txid);
 });
 
-test('at the sandbox part size the record holds 689 parts (a 67 MiB blob) and refuses the 690th', async () => {
+test('at the sandbox part size an inline record holds 689 parts (a 67 MiB blob) and the 690th pages', async () => {
   const io = fakeIo();
   const at = (n) => signedRecordBytes({ digestHex: 'a'.repeat(64), size: n * 102_400, partSize: 102_400, partSizes: Array(n).fill(102_400), createdAt: 1_789_565_195 });
   assert.ok(at(689) <= DATA_ITEM_MAX_BYTES, `689 parts: ${at(689)} bytes`);

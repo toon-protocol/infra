@@ -28,7 +28,7 @@ btp_endpoint = "ws://127.0.0.1:3240/ilp/btp"
 # checkout) — and pasted verbatim: one spawn and one extend row per listing
 # version at the LISTING PRICE in uUSDC per Lease Interval (TOON_Network ADR
 # 0003: one route, one price, no refunds — a refusal on a paid route is still
-# billed), plus the three free provider-wide rows. Every path is literal and
+# billed), plus the four free provider-wide rows. Every path is literal and
 # the app serves exactly these. A listing change is a new version with new
 # rows here and a restart (ADR 0009); re-run the command rather than editing.
 #
@@ -103,6 +103,11 @@ price = 0
 [[routes]]
 prefix = "g.toon.provider.terminate"
 handler_url = "http://provider:8080/terminate"
+price = 0
+
+[[routes]]
+prefix = "g.toon.provider.rotate"
+handler_url = "http://provider:8080/rotate"
 price = 0
 # ── The peering (accepting half) ─────────────────────────────────────────────
 # No endpoint: the hub dials us. The id is a purely local label.

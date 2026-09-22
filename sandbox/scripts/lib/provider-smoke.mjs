@@ -486,15 +486,95 @@ export async function composeHealthy(service, seconds = 90) {
 }
 /**
  * The hub client-book channel key (`solana:<account>`) a directory publisher
- * pays its relay writes on, read from the channel store on its own volume.
- * Two publishers hold two channels (docker-compose.yml says why), so the one
- * relay write a smoke is looking for has to be counted on the right one.
+ * pays its relay writes on, AND its local store's own cumulativeAmount for it
+ * — read from the channel store on its own volume (`channels.json`, the same
+ * file `@toon-protocol/client`'s `JsonFileChannelStore` writes: one entry per
+ * channel id, `{ nonce, cumulativeAmount, ... }`). Three publishers hold three
+ * channels (docker-compose.yml says why; `directory-publisher-hs` needs the
+ * `hs` profile to be reached), so the one relay write a smoke is looking for
+ * has to be counted on the right one — and so does the preflight below.
  */
-export function publisherChannel(service) {
-  const store = JSON.parse(docker('compose', '--profile', 'full', 'exec', '-T', service, 'cat', '/var/lib/toon-publisher/channels.json'));
+export function publisherChannelState(service, profiles = ['full']) {
+  const profileArgs = profiles.flatMap((p) => ['--profile', p]);
+  const store = JSON.parse(docker('compose', ...profileArgs, 'exec', '-T', service, 'cat', '/var/lib/toon-publisher/channels.json'));
   const ids = Object.keys(store);
   if (ids.length !== 1) throw new Error(`${service} holds ${ids.length} channels, expected exactly one`);
-  return `solana:${ids[0]}`;
+  return { channelKey: `solana:${ids[0]}`, cumulativeAmount: BigInt(store[ids[0]].cumulativeAmount ?? 0) };
+}
+/** Just the channel key `publisherChannelState` reads — what every smoke before #74 asked for. */
+export function publisherChannel(service, profiles) {
+  return publisherChannelState(service, profiles).channelKey;
+}
+
+// ── channel-state preflight (TOON_Network #74, M7-6) ───────────────────────
+// A directory publisher's LOCAL channel store can fall behind relay-connector's
+// own claim journal — a store carried over from an older snapshot, or a
+// `make down` that lands between a signed claim and the connector's ack. Once
+// that happens every claim the publisher signs advances value by ZERO (F03:
+// "advances value by 0, less than this route's price of N") and the relay
+// refuses every write from it — its Profile, Listings and Liveness all go
+// stale, and a smoke that reads them off the relay used to fail refused,
+// hundreds of seconds and one purchase later, on a symptom that named nothing
+// (seen on `directory-publisher-hs` at the end of Milestone 6; README §8 has
+// the whole diagnosis). This compares both sides before a smoke buys anything.
+export const DIRECTORY_PUBLISHERS = [
+  { service: 'directory-publisher', profiles: ['full'] },
+  { service: 'directory-publisher2', profiles: ['full'] },
+  { service: 'directory-publisher-hs', profiles: ['full', 'hs'] },
+];
+const ALL_COMPOSE_PROFILES = ['full', 'payments', 'credentials', 'hs', 'gateway'];
+/** `docker compose ps` across every profile this sandbox knows, so a publisher already running under ANY of them is seen. */
+const composePsAllProfiles = () =>
+  docker('compose', ...ALL_COMPOSE_PROFILES.flatMap((p) => ['--profile', p]), 'ps', '--format', '{{.Service}} {{.State}}');
+/**
+ * Every directory publisher that is RUNNING right now, each with its channel
+ * key, its local store's cumulativeAmount, and the SAME channel's watermark on
+ * relay-connector's own claim journal. A publisher that is not running, or
+ * holds no channel yet (nothing opened on a fresh `make up`/`make up-hs`), is
+ * left out entirely — there is nothing to compare.
+ */
+export async function channelStateReport() {
+  const running = composePsAllProfiles();
+  const live = DIRECTORY_PUBLISHERS.filter((pub) => new RegExp(`^${pub.service} running`, 'm').test(running));
+  if (live.length === 0) return []; // nothing running to compare — do not even ask relay-connector for its journal
+  const rows = await claims('relay-connector');
+  const report = [];
+  for (const pub of live) {
+    let state;
+    try {
+      state = publisherChannelState(pub.service, pub.profiles);
+    } catch {
+      continue; // running, but no channel opened on it yet — nothing to compare
+    }
+    const journal = clientBookOnChannel(rows, state.channelKey);
+    report.push({ service: pub.service, channelKey: state.channelKey, store: state.cumulativeAmount, journal });
+  }
+  return report;
+}
+/** README §8's remedy for one publisher's channel-state drift, verbatim in shape. */
+export const channelStateRemedy = (service) =>
+  '`make clean` (it takes the claim journals AND the stores together, which is exactly why `-v` is there) '
+  + `followed by a cold start; or, to keep the rest of the stack, stop ${service} and raise its stored `
+  + 'cumulativeAmount past the connector\'s before starting it again.';
+/**
+ * The first RUNNING publisher whose local store has fallen STRICTLY BEHIND
+ * relay-connector's own watermark on its channel — the channel-state drift
+ * condition README §8 names — or null when every one running is level with or
+ * ahead of its journal.
+ *
+ * STRICTLY behind, not "at or below": `@toon-protocol/client`'s
+ * `signBalanceProof` persists a claim's advance to the store BEFORE the claim
+ * is even sent (ChannelManager.js — "the advance is persisted before the
+ * signature is returned"), so the resting state right after any successful
+ * write is `store === journal`, not `store > journal`. Only a store that
+ * dropped BELOW what the connector already booked — the M6 incident was 70
+ * against 71 — means the next claim it signs (store + the route's price, and
+ * g.toon.relay prices every directory write at 1) cannot get past the
+ * journal's own watermark: advance 0, F03. Flagging equality too would fail
+ * this preflight on every healthy publisher caught between two writes.
+ */
+export async function channelStateMismatch() {
+  return (await channelStateReport()).find((r) => r.store < r.journal) ?? null;
 }
 /** True once no container of that exact name exists on the daemon (running or not) — the workload is gone — polled for up to `seconds`. */
 export async function workloadGone(name, seconds = 10) {

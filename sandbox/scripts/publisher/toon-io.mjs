@@ -75,8 +75,8 @@ export async function openToonIo({ secretKey, log = () => {}, client: given }) {
   }
   const store = {
     async upload(bytes, contentType) {
-      const request = buildBlobStorageRequest({ blobData: Buffer.from(bytes), contentType, bid: STORE_BID }, secretKey);
-      const answer = await sendJob({ client, destination: STORE_ROUTE, sealTo: STORE_EDGE, timeoutMs: 120_000 }, request);
+      const answer = await sendJob({ client, destination: STORE_ROUTE, sealTo: STORE_EDGE, timeoutMs: 120_000 },
+        buildBlobStorageRequest({ blobData: Buffer.from(bytes), contentType, bid: STORE_BID }, secretKey));
       if (!answer.accepted) {
         throw new Error(`${STORE_ROUTE} refused a ${bytes.length}-byte upload: ${answer.code} ${answer.message}`);
       }

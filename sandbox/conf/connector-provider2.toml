@@ -95,6 +95,11 @@ price = 0
 prefix = "g.toon.provider2.terminate"
 handler_url = "http://provider2:8080/terminate"
 price = 0
+
+[[routes]]
+prefix = "g.toon.provider2.rotate"
+handler_url = "http://provider2:8080/rotate"
+price = 0
 # ── The peering (accepting half) ─────────────────────────────────────────────
 # No endpoint: the hub dials us. The id is a purely local label, and it is
 # `relay-provider2` rather than `relay-provider` because the hub's side names

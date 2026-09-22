@@ -204,13 +204,16 @@ export function imageEntryTemplate({ plan, createdAt }) {
  * `layout`): store every blob that is not upstream through #20's part upload,
  * then publish the entry. Resolves to
  *   { address, d, digest, media_type, blobs,
- *     stored: [{ digest, skipped, recopied, parts, blob_record_txid, event_id }],
+ *     stored: [{ digest, skipped, recopied, parts, pages, blob_record_txid, event_id }],
  *     entry: { event_id, event } }
+ * `pages` is how many pages a blob's fresh record was paged over (null inline,
+ * and for a record the relay already had); `recordMax` and `partsPerPage` are
+ * `publishBlob`'s, passed to every blob.
  * Nothing is uploaded or published if the blob list would be incomplete.
  */
 export async function publishImage({
   path, layout: given, plan: planned, name, tag, secretKey, upstream = [], rootDigest, io,
-  partSize = DEFAULT_PART_SIZE, dataItemMax = DATA_ITEM_MAX_BYTES,
+  partSize = DEFAULT_PART_SIZE, dataItemMax = DATA_ITEM_MAX_BYTES, recordMax = dataItemMax, partsPerPage,
   now = () => Math.floor(Date.now() / 1000), log = () => {},
 }) {
   const layout = given ?? openLayout(path);
@@ -223,7 +226,7 @@ export async function publishImage({
     const stored = [];
     for (const blob of toStore) {
       const hex = hexOf(blob.digest);
-      const report = await publishBlob({ bytes: layout.read(blob.digest), secretKey, partSize, dataItemMax, io, now });
+      const report = await publishBlob({ bytes: layout.read(blob.digest), secretKey, partSize, dataItemMax, recordMax, partsPerPage, io, now });
       if (report.digest !== blob.digest) throw new Error(`the layout served ${report.digest} for ${blob.digest}`);
 
       // A record is signed before its store copy exists, so which upload
@@ -246,10 +249,10 @@ export async function publishImage({
       await io.remember?.(hex, storeTxid);
       blob.source.blob_record_txid = storeTxid;
       stored.push({
-        digest: blob.digest, skipped: report.skipped, recopied, parts: report.parts?.length ?? null,
+        digest: blob.digest, skipped: report.skipped, recopied, parts: report.parts?.length ?? null, pages: report.pages?.length ?? null,
         blob_record_txid: storeTxid, event_id: report.record.event_id,
       });
-      log(`${report.skipped ? (recopied ? 'copied' : 'kept  ') : 'stored'} ${blob.digest} (${blob.size} bytes) -> ${storeTxid}`);
+      log(`${report.skipped ? (recopied ? 'copied' : 'kept  ') : 'stored'} ${blob.digest} (${blob.size} bytes${report.pages ? `, paged over ${report.pages.length} pages` : ''}) -> ${storeTxid}`);
     }
 
     const event = finalizeEvent(imageEntryTemplate({ plan, createdAt: now() }), secretKey);

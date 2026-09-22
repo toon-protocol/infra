@@ -106,7 +106,9 @@ with one command and `curl http://<label>.gw.localhost:3280/` (§2, *The
 Workload Gateway*). **Nothing on that path is published.** `make smoke-m5` is
 that path as an acceptance test, with a Takeover in the middle of it;
 `make smoke-m6` is the whole tenant path with nothing signed and nothing
-published, and it sweeps the relay to say so.
+published, and it sweeps the relay to say so; `make smoke-m7` revokes a
+gateway's reading by rotating the lease's tokens, and spawns from an image
+whose Blob Record is paged.
 
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
@@ -413,6 +415,46 @@ milestone removed is really gone rather than merely unused. Same profile as
   all four — because a sweep that finds nothing is worth only what its ability
   to find something is worth. Nothing is ever published to make that point: a
   relay keeps what it is given, and there would be no taking it back.
+
+**`make smoke-m7` — Milestone 7's acceptance test** (TOON_Network #69 / #76,
+`scripts/smoke-milestone7.mjs`): a tenant can **revoke a Workload Gateway's
+reading before its grant runs out**, and keep serving from an image too large
+for one Blob Record. Needs the **full stack plus the gateway**, `make
+up-gateway` (the default `COMPOSE_PROFILE=full`: the paged image lives in the
+store, so the payments-only gateway stack is not enough); like every
+relay-writing smoke it runs `preflight-channel-state` first. Two to three
+minutes, most of it the gateway's 30 s cadence and the store uploads. Every
+step is asserted on the wire — response bodies and the gateway's reasons,
+never a log — and each one uses the developer's own command:
+
+- **Spawn and hand over.** `node scripts/spawn.mjs --standby provider
+  --standby provider2` forms a two-member Standby Set on `warm` and writes the
+  lease file; `node scripts/handover.mjs <lease>` seals one grant per member
+  (each re-derived by the smoke from the lease's root secret and matched), the
+  gateway admits it and the canonical hostname answers with whoami's own body.
+  A delegated `status` bearing each member's grant is answered at both.
+- **Rotate.** `node scripts/rotate.mjs <lease>` rotates both members; the lease
+  file then holds a new root secret and no rotation record. At **each** member
+  the grant the gateway holds is now `bad_grant`, the old token is
+  `not_tenant`, and the new token reads the lease.
+- **The gateway notices, told nothing.** Within a cadence or two the same
+  hostname answers 503 `member_unreachable` in spec §5's error shape, its
+  message naming `bad_grant` at both members — while the primary still answers
+  `running` to the new token. Rotation ends READING; a withdrawal
+  (`smoke-m6`) ends only serving.
+- **Hand over again.** The same `handover.mjs` command seals grants of the
+  ROTATED tokens (none of them one the old root could derive); it is admitted
+  and the hostname serves again. The lease ends with the new token.
+- **A paged image.** busybox plus a 2 MiB random layer, published with the
+  publisher's record ceiling **lowered** to 2,048 bytes and four parts to a
+  page (`--record-max` / `--parts-per-page` on the CLI) — the shape a 70 MB
+  layer takes without 700 paid uploads. The layer's Blob Record, read from the
+  relay and from its store copy, carries `pages` and no `parts`; every page
+  fetched from `/raw/` hashes and counts as recorded, the parts join to the
+  layer's digest, and `publisher.mjs blob-verify` / `image-verify` read it back
+  through its pages. `availability` says `would_run`, and a paid `smoke` spawn
+  runs it by `{ digest, registry_entry }` — the provider read every page — and
+  is ended.
 
 **The publisher** (TOON_Network Milestone 2, `scripts/publisher.mjs`) is
 the development tool that puts images on the TOON Network — it needs the
@@ -800,6 +842,18 @@ curl http://<canonical label>.gw.localhost:3280/
 curl http://whoami.gw.localhost:3280/                         # the --name, if it was free
 curl --cacert conf/workload-gateway-tls/gw.localhost.crt https://<canonical label>.gw.localhost:3443/
 
+# 3b. (optional) rotate: replace the lease's Continuation Token at BOTH members (spec §6.8).
+#    A fresh root secret goes into the lease file, beside the old one until every member
+#    has confirmed; each member gets one request naming only itself, paid through the hub
+#    from account index 4 (`.toon-client/rotate-channels.json`). Free at the providers.
+node scripts/rotate.mjs .toon-client/spawn-<id prefix>.json
+#    -> { "rotated": true, "members": [ { "provider": …, "rotated": true }, … ] }, exit 0.
+#    Every grant of the OLD root is now `bad_grant` at both members: within a cadence
+#    (30 s) the URL answers 503 `member_unreachable` — the gateway stopped READING, not
+#    only serving. Hand over again and the grants derive from the new root in the file:
+node scripts/handover.mjs .toon-client/spawn-<id prefix>.json --expires-in 1h
+curl -si http://<canonical label>.gw.localhost:3280/         # -> HTTP/1.1 200 again
+
 # 4. take it off the gateway: a Gateway Withdrawal over the same route, bearing the grant
 #    in force (the moment step 2 recorded). The same URL then answers the GATEWAY'S OWN
 #    503 `no_grant` instead of the workload. The lease itself runs on, untouched.
@@ -858,9 +912,27 @@ again with a later `--expires-in` and the gateway holds a grant that outlives
 the one it had — a handover that passes admission **replaces** what is held,
 with no `created_at` weighed and no restart (spec §12.1). **A withdrawal ends
 serving, not reading**: the withdrawn gateway keeps a working grant until the
-moment the handover named and could still ask a member for `status` with it,
-because there is no revocation before expiry (spec §6.5.1, §12.7) — so keep
-`--expires-in` short. A `--name` is first come, first served across every grant
+moment the handover named and could still ask a member for `status` with it
+(spec §6.5.1, §12.7). **Rotation ends reading too**: `node scripts/rotate.mjs
+<lease.json>` runs the handover tool's `rotate`, which replaces every member's
+token with one derived from a fresh root secret, so every grant of the old
+root is refused `bad_grant` at once (spec §6.8, ADR 0018). The lease file
+keeps both root secrets until every member has confirmed; a member that could
+not be reached leaves the script exiting `1` with the set partly rotated —
+each member still read with its own current token — and running it again
+finishes the job with the same new root. A lost answer is recovered by the
+tool asking `status` with the new token, never by resending. **`provider-hs`
+rotates too** (spec §10, §12.8; TOON_Network #81): reached DIRECTLY over anon
+through the buyer's own `anon-client` SOCKS proxy, not through the hub — the
+same `.anyone` connector `smoke-hs.mjs` and `smoke-milestone4.mjs` already dial
+for a spawn and a `status` — on account index 7 of the committed test phrase
+(distinct from `smoke-hs`'s 5 and `smoke-milestone4`'s 6), a chain of its own
+(`evm`, the sandbox chain `provider-hs` settles on). `<addr>.rotate` and
+`<addr>.status` are free routes, so nothing is paid for and no channel opens
+there — the account index is for identity only. A lost answer over the hidden
+path is recovered exactly the same way, through `status` with the new token,
+over the same connector. Keep `--expires-in` short anyway: rotation ends every grant of the old root
+together, not one gateway's. A `--name` is first come, first served across every grant
 in force on the gateway (spec §12.6): a name another workload's unexpired grant
 holds is logged and dropped, and the canonical hostname still works; a
 withdrawal frees the name at once, an expiry does not until another grant
@@ -2172,7 +2244,16 @@ its own channel and its own store (`.toon-client/handover-channels.json`),
 because a smoke holds the smokes' buyer (index 0, `channels.json`) open while
 it runs this script, and two processes on one channel share one nonce
 watermark. `scripts/seed-toon-solana.mjs` funds it on every profile, like the
-three publishers' wallets. It reads no relay and writes none; the tenant's
+three publishers' wallets. `scripts/rotate.mjs` pays from the same wallet but
+on a channel with the **hub** (`.toon-client/rotate-channels.json`), because a
+rotate goes to each provider's `<addr>.rotate` — free there, 100 at the hub
+like every other free row — and the members, their `ilp_address` and their
+pinned `connector_seal_key` come out of `conf/provider*.toml`. **`provider-hs`
+is a fifth wallet again** (spec §10, §12.8; TOON_Network #81): account index 7,
+no channel store worth the name — `<addr>.rotate` is free there too, direct,
+so `openHiddenClient` never opens one — reached through the buyer's own
+`anon-client` SOCKS proxy rather than the hub, because the hub does not peer
+with a Hidden Provider. It reads no relay and writes none; the tenant's
 Nostr key is nowhere in it. `scripts/spawn.mjs`, by contrast, *is* the smokes'
 buyer — it is the smokes' spawn as one command, for the README walk-through,
 minting the root secret the way the Milestone 6 smoke does — and must not run
@@ -2234,8 +2315,10 @@ through the proxy or not at all.
   `.toon-client/spawn-<id>.json` and nowhere else**; `make clean` removes
   `.toon-client/` and with it every root secret, which is loss of control of
   every lease still running — they run on until their intervals end. The
-  handover script's channel store, `.toon-client/handover-channels.json`, goes
-  the same way.
+  handover script's channel store, `.toon-client/handover-channels.json`, and
+  the rotate script's, `.toon-client/rotate-channels.json`, go the same way.
+  While a rotation is only partly done the file carries a `rotation` record
+  beside `root_secret`; `make clean` in that window loses both.
 
 ## 8. Troubleshooting
 
@@ -2402,10 +2485,36 @@ through the proxy or not at all.
   `directory-publisher-hs`; any publisher can reach it). Its LOCAL channel
   store has fallen behind the connector's claim journal, so every claim it
   signs is one the connector has already booked and nothing can ever advance.
-  It does not heal on its own and it is not a code fault: a smoke that reads
-  Liveness off the relay then fails on a descriptor hundreds of seconds stale,
-  before it has dialled anything (`make smoke-m4` step 1 is the one that says
-  so most loudly). Confirm it by comparing the two numbers —
+  It does not heal on its own and it is not a code fault.
+
+  This used to surface several steps into a smoke — reading a Liveness off the
+  relay and failing on a descriptor hundreds of seconds stale, before it had
+  dialled anything else (`make smoke-m4` step 1 said so most loudly). Since
+  TOON_Network #74 (M7-6) it no longer gets that far: **the channel-state
+  preflight** (`scripts/preflight-channel-state.mjs`, `make
+  preflight-channel-state`) compares every RUNNING directory publisher's local
+  `channels.json` against relay-connector's own claim journal (`GET /claims`)
+  BEFORE anything is dialled, and is a Makefile prerequisite of every
+  relay-writing smoke — `smoke-provider`, `smoke-provider2`,
+  `smoke-directory`, `smoke-eviction`, `smoke-ci`, and `smoke-m1` through
+  `smoke-m7`. A
+  publisher that is not running, or holds no channel yet, is skipped — there
+  is nothing to compare. On a mismatch it fails AT ONCE, naming the publisher,
+  both amounts and the remedy, in this shape:
+
+  ```
+    FAIL directory-publisher-hs: local channel store cumulativeAmount 70 on solana:<account>,
+         relay-connector's claim journal already at 71.
+         Every claim directory-publisher-hs signs from here advances value by 0 and the relay refuses every write.
+         Remedy: `make clean` (it takes the claim journals AND the stores together, which is exactly why
+         `-v` is there) followed by a cold start; or, to keep the rest of the stack, stop
+         directory-publisher-hs and raise its stored cumulativeAmount past the connector's before starting
+         it again.
+  ```
+
+  The manual check is still what the message is built from, and still works
+  on its own (e.g. against a service the preflight does not know about) —
+  comparing the two numbers by hand:
 
   ```bash
   docker compose --profile hs exec -T directory-publisher-hs cat /var/lib/toon-publisher/channels.json
@@ -2413,13 +2522,18 @@ through the proxy or not at all.
       http://localhost:3200/claims | grep <that channel account>
   ```
 
-  — a publisher `cumulativeAmount` at or below the connector's
-  `cumulative_amount` for the same channel is the condition. The clean remedy
-  is `make clean` (it takes the claim journals AND the stores together, which
-  is exactly why `-v` is there) followed by a cold start; on the `hs` profile
-  that also publishes new `.anyone` addresses, so on a stack you want to keep,
-  the alternative is to stop the publisher and raise its stored
-  `cumulativeAmount` past the connector's before starting it again.
+  — a publisher `cumulativeAmount` STRICTLY BELOW the connector's
+  `cumulative_amount` for the same channel is the condition — not merely
+  equal: `@toon-protocol/client` persists a claim's advance to the store
+  BEFORE the claim is even sent, so `cumulativeAmount == cumulative_amount` is
+  the ordinary resting state between two writes, and only a store caught
+  BEHIND what the connector already booked means the next claim it signs
+  (store + this route's price of 1) cannot clear the journal's own watermark.
+  The clean remedy is `make clean` (it takes the claim journals AND the stores
+  together, which is exactly why `-v` is there) followed by a cold start; on
+  the `hs` profile that also publishes new `.anyone` addresses, so on a stack
+  you want to keep, the alternative is to stop the publisher and raise its
+  stored `cumulativeAmount` past the connector's before starting it again.
 - **`F01 … no record of that channel` after `make down` + `make up-hs`**:
   anvil keeps nothing across a restart, so a kept channel store outlives its
   chain. `smoke-hs` reads its channel's collateral back off the chain before it
