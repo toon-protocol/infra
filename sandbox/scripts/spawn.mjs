@@ -32,7 +32,15 @@
 //                pull and a container start; on a slow daemon that is T01 at
 //                the hub while the provider went on and started the lease
 //   --terminate  end the lease described by a JSON file this printed, with the
-//                root secret inside it, on every member. Free
+//                root secret inside it, on every member. Free. Each member is
+//                asked with ITS OWN current token: the new root if the file
+//                records a rotation that member has confirmed, the old root
+//                otherwise (spec §6.8; TOON_Network #80) — read off the
+//                provider grant tool's shared `currentRootFor`
+//                (../../provider/tools/grant/handover.mjs, PROVIDER_CONTEXT
+//                overrides), the same one scripts/handover.mjs reads
+//                mid-rotation. A warning, no secret in it, says when the file
+//                records an unfinished rotation
 //
 // Prints one JSON report on stdout — the lease's ROOT SECRET (the one thing a
 // tenant holds: every Continuation Token and every Gateway Grant of the lease
@@ -53,8 +61,9 @@
 // provider2-direct.json for --direct), exactly as the smokes do. Do not run it
 // while a smoke is running: two processes on one channel share one nonce
 // watermark, and the loser has every later claim refused.
-import { writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, ROOT,
@@ -67,6 +76,15 @@ import {
 const DEFAULT_IMAGE = `${HTTP_IMAGE.reference}@${HTTP_IMAGE.digest}`;
 // The provider refuses a Lease Request valid for longer than this (spec §6.1).
 const REQUEST_TTL_S = 300;
+
+// The grant tool's PURE derivations (../../provider/tools/grant/handover.mjs
+// by default; PROVIDER_CONTEXT overrides, exactly as scripts/handover.mjs and
+// scripts/rotate.mjs resolve it) — `currentRootFor` and `rotationWarning`,
+// the one seam every tenant tool picks a member's CURRENT root through while
+// a rotation is unfinished (spec §6.8; TOON_Network #80). The file imports
+// cleanly with no `npm install`: it reads only `node:crypto`.
+const PROVIDER_CONTEXT = process.env.PROVIDER_CONTEXT ?? join(ROOT, '..', '..', 'provider');
+const GRANT_TOOL = join(PROVIDER_CONTEXT, 'tools', 'grant', 'handover.mjs');
 
 const log = (m) => console.error(`[spawn] ${m}`);
 const usage = (problem) => usageFromHeader(import.meta.url, 'spawn', problem);
@@ -99,13 +117,28 @@ if (values.terminate) {
   if (!/^[0-9a-f]{64}$/.test(lease.root_secret ?? '')) {
     usage(`${values.terminate} holds no root_secret: a lease file from before Milestone 6 (tenant_key) cannot end a lease on a Milestone 6 provider`);
   }
+  if (!existsSync(GRANT_TOOL)) {
+    log(`the grant tool is not at ${GRANT_TOOL} — the provider checkout (toon-protocol/provider, branch with tools/grant/handover.mjs) is`);
+    log('expected at ../../provider; PROVIDER_CONTEXT=/path/to/provider says where else.');
+    process.exit(2);
+  }
+  const { currentRootFor, rotationProblem, rotationWarning } = await import(pathToFileURL(GRANT_TOOL).href);
+  const damaged = rotationProblem(lease.rotation);
+  if (damaged !== null) usage(`${values.terminate}'s ${damaged}`);
+  const warning = rotationWarning(lease.rotation);
+  if (warning !== null) log(`warning: ${warning}`);
+
   const members = lease.standby_set.map((name) => providerOf(name));
   const { client } = await openChannel(lease.paid_at === 'hub' ? HUB : members[0].edge, lease.channel_store);
   const out = {};
   for (const P of members) {
     // Each member is asked with the token derived for ITS key: the primary's
-    // token ends nothing at a standby (spec §7).
-    const request = tokenRequest(lease.root_secret, 'terminate', { workload_id: lease.workload_id }, 120, P);
+    // token ends nothing at a standby (spec §7). And with ITS OWN current
+    // root: the new one if this member has confirmed an unfinished rotation,
+    // the old one otherwise (spec §6.8) — so terminate ends the lease at
+    // EVERY member, whichever root each one currently reads with.
+    const root = currentRootFor(lease.root_secret, lease.rotation, P.pubkey);
+    const request = tokenRequest(root, 'terminate', { workload_id: lease.workload_id }, 120, P);
     const sent = await client.send(P.terminateRoute, { body: { request } }, { sealTo: P.edge, timeoutMs: 120_000 });
     out[P.service] = answer(sent);
     log(`${P.service}: ${jstr(out[P.service])}`);

@@ -13,9 +13,14 @@
 //   <lease.json>  the file scripts/spawn.mjs wrote (.toon-client/spawn-<id>.json):
 //                 the workload id, the Standby Set, the container ports and THE
 //                 ROOT SECRET are read from it, so the secret never crosses a
-//                 command line. A handover records what it sealed back into it
-//                 (`handover`: the moment, the name, the URLs), which is what a
-//                 later --withdraw bears
+//                 command line. Passed to the tool as `--lease`, so a lease
+//                 kept mid-rotation (`rotation` in the file, scripts/rotate.mjs;
+//                 spec §6.8) is read correctly: each member's grant derives
+//                 from ITS OWN current root, and a warning — no secret in it —
+//                 says the rotation is unfinished and how to finish it. A
+//                 handover records what it sealed back into it (`handover`:
+//                 the moment, the name, the URLs), which is what a later
+//                 --withdraw bears
 //   --expires-in  how long the grant admits the gateway (default 1h); or
 //   --expires-at  the same as a moment. Keep it short and run this again to
 //                 renew: the same command IS the renewal (rotation is
@@ -92,7 +97,7 @@
 // exactly the bytes the tool's own tests prove against the wire fixtures.
 // `make setup` installs its dependencies.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { MNEMONIC, PROVIDERS, ROOT, RPC_URL, usageFromHeader } from './lib/provider-smoke.mjs';
@@ -143,7 +148,9 @@ if (positionals.length > 1) usage(`one lease at a time, not ${positionals.join('
 const withdrawing = values.withdraw;
 
 // ── the lease: a file scripts/spawn.mjs wrote, or flags and the environment ──
-const leaseFile = positionals[0];
+// Absolute, because the tool runs with sandbox/ as its working directory
+// (scripts/rotate.mjs resolves the same way, for the same reason).
+const leaseFile = positionals[0] === undefined ? undefined : resolve(positionals[0]);
 let lease;
 if (leaseFile !== undefined) {
   if (!existsSync(leaseFile)) usage(`${leaseFile} does not exist`);
@@ -208,11 +215,20 @@ try {
 }
 
 // The tool's own arguments, with the sandbox's values filled in.
+//
+// A LEASE FILE IS PASSED AS `--lease`, not `--workload` + `TOON_ROOT_SECRET`,
+// so the tool reads each member's CURRENT token off it (spec §6.8;
+// TOON_Network #80): the new root where `rotation.confirmed` names a member,
+// the old one otherwise. A handover sealed mid-rotation is then one every
+// member admits, whichever root it currently holds. --standby stays a flag:
+// the file's `standby_set` is sandbox compose names, not the pubkeys the
+// tool takes, and resolving those is this script's job (`memberPubkey`
+// above), not the tool's.
 const expiresAt = withdrawing ? values['expires-at'] ?? String(lease.handover.expires_at) : values['expires-at'];
 const args = [
   join(TOOL_DIR, 'seal.mjs'),
   withdrawing ? 'withdrawal' : 'handover',
-  '--workload', lease.workload_id,
+  ...(leaseFile !== undefined ? ['--lease', leaseFile] : ['--workload', lease.workload_id]),
   ...members.flatMap((m) => ['--standby', m]),
   '--gateway-route', route,
   '--gateway-seal-key', sealKey,
@@ -234,9 +250,9 @@ const env = {
   TOON_CHANNEL_STORE: CHANNEL_STORE,
   // Anything set in the environment wins: the tool's README names them all…
   ...process.env,
-  // …but the root secret of a named lease file is that lease's, whatever the
-  // shell happens to hold.
-  TOON_ROOT_SECRET: lease.root_secret,
+  // …but a named lease file's root secret is `--lease`'s job above, and a
+  // by-hand lease (no file) still takes it here, whatever the shell holds.
+  ...(leaseFile !== undefined ? {} : { TOON_ROOT_SECRET: lease.root_secret }),
 };
 
 log(`${withdrawing ? 'withdrawal' : 'handover'} of workload ${lease.workload_id.slice(0, 12)}… to ${route} (the sandbox gateway's connector, sealing key ${sealKey.slice(0, 12)}…), Standby Set ${members.map((m) => m.slice(0, 12) + '…').join(', ')}`);
