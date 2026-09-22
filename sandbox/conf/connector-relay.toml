@@ -142,7 +142,7 @@ price = 110
 # price = the provider's price + the peering's fee (100). The provider's own
 # rows are GENERATED (`toon-provider routes`, pasted into
 # conf/connector-provider.toml): spawn and extend at the listing price, and
-# three FREE provider-wide rows at 0. A listing change is a new version and
+# four FREE provider-wide rows at 0. A listing change is a new version and
 # new rows on both nodes (TOON_Network ADR 0009).
 #
 # THE FREE ROWS ARE PRICED 100 HERE, NOT 0, for the reason the
@@ -225,6 +225,11 @@ prefix = "g.toon.provider.terminate"
 peer_id = "relay-provider"
 price = 100
 
+[[routes]]
+prefix = "g.toon.provider.rotate"
+peer_id = "relay-provider"
+price = 100
+
 # ── Forwarded: the SECOND provider, over the relay-provider2 peering ─────────
 # The same arithmetic and the same generated-rows discipline as the block
 # above, against conf/provider2.toml and conf/connector-provider2.toml. It is
@@ -285,6 +290,11 @@ price = 100
 
 [[routes]]
 prefix = "g.toon.provider2.terminate"
+peer_id = "relay-provider2"
+price = 100
+
+[[routes]]
+prefix = "g.toon.provider2.rotate"
 peer_id = "relay-provider2"
 price = 100
 

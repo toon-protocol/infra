@@ -48,7 +48,7 @@ btp_endpoint = "ws://unrenderedplaceholderaddressaaaaaaaaaaaaaaaaaaaaaaaaaaaa.an
 #
 # One spawn and one extend row per listing version at the LISTING PRICE in
 # uUSDC per Lease Interval (ADR 0003: one route, one price, no refunds — a
-# refusal on a paid route is still billed), plus the three free provider-wide
+# refusal on a paid route is still billed), plus the four free provider-wide
 # rows. A listing change is a new version with new rows here and a restart
 # (ADR 0009); re-run the command rather than editing.
 [[routes]]
@@ -84,6 +84,11 @@ price = 0
 [[routes]]
 prefix = "g.toon.provider-hs.terminate"
 handler_url = "http://provider-hs:8080/terminate"
+price = 0
+
+[[routes]]
+prefix = "g.toon.provider-hs.rotate"
+handler_url = "http://provider-hs:8080/rotate"
 price = 0
 
 # ── Settlement ───────────────────────────────────────────────────────────────
