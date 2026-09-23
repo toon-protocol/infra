@@ -612,6 +612,10 @@ export function newTenant(keyName) {
 }
 export const newWorkloadId = () => randomBytes(32).toString('hex');
 
+// The lease-body shape guard lives on its own so it can be tested with no
+// client, no connector and no config (scripts/lib/lease-body.test.mjs).
+export { extendBody, checkLeaseBody, LeaseBodyError } from './lease-body.mjs';
+
 // ── the tenant, since Milestone 6 (TOON_Network #56): a secret, not a key ──
 // A tenant signs nothing. It mints one ROOT SECRET per lease, holds it, and
 // derives from it a CONTINUATION TOKEN per provider (spec §6.1.1) that every

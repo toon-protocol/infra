@@ -97,7 +97,7 @@ import {
   ROOT, MNEMONIC, K_PROFILE, K_LISTING, K_LIVENESS, TOON_LABEL, IMAGE, SSH_USER, SWEEP_S,
   providerOf, reporter, sleep, jstr, nowSec, waitFor,
   relayRead, relayReadUntil, directoryFilter, tagValues, hasTag, clientBookOnChannel,
-  docker, containerState, newTenant, newRootSecret, tokenRequest, newWorkloadId,
+  docker, containerState, newTenant, newRootSecret, tokenRequest, checkLeaseBody, newWorkloadId,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done, failures } = reporter('MILESTONE 4 SMOKE');
@@ -557,7 +557,7 @@ try {
   ok(`channel ${channelId} against the hidden connector, collateral ${await collateralOf()} read back off the chain — ${((Date.now() - t1) / 1000).toFixed(1)}s, every call through ${SOCKS_PROXY}`);
   const bookBefore = hiddenClientBook(channelId);
   let paidCalls = 0;
-  const send = (route, body) => client.send(route, { body }, { timeoutMs: 180_000 });
+  const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { timeoutMs: 180_000 });
   const assertFree = (sent, what) => assert(sent.claim === undefined, `${what} spent no claim — free at the provider's own edge`);
   const assertPaid = (sent, what) => { paidCalls += 1; assert(BigInt(sent.claim?.amount ?? 0) === L.price, `the tenant paid exactly ${sent.claim?.amount} for ${what} (${L.price})`); };
 

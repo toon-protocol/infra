@@ -72,6 +72,7 @@ import { verifyEvent } from 'nostr-tools/pure';
 import {
   HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, BUYER_SOL, K_TAKEOVER,
   providerOf, WATCHDOG_S,
+  checkLeaseBody,
   reporter, jstr, nowSec, sleep, waitFor,
   claims, clientBookOnChannel, peerBookTotal,
   relayRead, relayReadUntil, takeoverFilter, hasTag,
@@ -197,7 +198,7 @@ ok(`channel ${opened.channelId} against the hub (status ${opened.status ?? 'open
 const channelKey = `solana:${opened.channelId}`;
 // Every packet is sealed to the member it is for: two providers, two edges,
 // two sealing keys (ADR 0011).
-const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
+const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 120_000 });
 const paid = { hub: 0n, [PRIMARY.service]: 0n, [STANDBY.service]: 0n };
 const took = (P, sent, what, expectedCost) => {
   const cost = BigInt(sent.claim?.amount ?? 0);

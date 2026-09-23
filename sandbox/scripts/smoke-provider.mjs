@@ -52,6 +52,7 @@ import {
   HUB, HUB_SOL, BUYER_SOL, USDC_MINT,
   PAYMENT_CHANNEL_PROGRAM, HUB_CHANNEL_DEPOSIT, HUB_FEE,
   IMAGE, SSH_USER, providerOf,
+  checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
   claims, clientBookTotal, peerBookTotal, readSolanaChannel,
   docker, findWorkload, workloadGone,
@@ -131,7 +132,7 @@ const providerBefore = peerBookTotal(await claims(P.connectorNode), P.channel);
 console.log(`  books before: hub client=${hubBefore}, provider peer=${providerBefore}`);
 // SEALED TO THIS PROVIDER'S OWN EDGE: the sealing key a tenant seals to is the
 // one its Profile publishes (ADR 0011), and the two providers publish two.
-const send = (route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
+const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 120_000 });
 
 // ── 2. the tenant, its secret, its Lease Request ─────────────────────────
 step('2. a tenant mints a root secret and builds a Lease Request bearing the token derived for this provider');

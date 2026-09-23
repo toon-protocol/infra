@@ -161,6 +161,43 @@ not appear in the Provider Directory at all — which is the failure
 3. **The hostname.** `curl https://<label>.gw.devnet.toonprotocol.dev/` should
    reach the workload, with `X-Forwarded-Proto: https`.
 
+### An extension's body is bare, and a wrong shape costs an interval
+
+Driving the routes by hand is where this bites, so it is written down here
+rather than left to spec §5. **`.extend` and `.standby.extend` take their
+content bare:**
+
+```json
+{ "workload_id": "…" }
+```
+
+Every other lease route — `.spawn`, `.standby`, `.status`, `.terminate`,
+`.rotate` — takes the spec §6.1 Lease Request envelope instead:
+
+```json
+{ "request": { "request_id": "…", "op": "…", "provider": "…", "expiration": 0, "continuation": "…", "content": { … } } }
+```
+
+That is deliberate (ADR 0025): an extension presents no Continuation Token,
+because paying the route is its whole authority and any payer may extend any
+lease (ADR 0005). The envelope is the token's carriage, and there is nothing
+here to carry.
+
+**Getting it wrong is not free.** A connector collects a paid route's price
+before the provider app sees the body (ADR 0003), so an extension wrapped in
+`request` is answered
+
+```json
+{ "error": "invalid_request", "message": "body is not { \"workload_id\": \"…\" }: unknown field `request`, expected `workload_id`" }
+```
+
+**and is still billed a full Lease Interval** — 1000 µUSDC on devnet's `basic`
+— with no refund. That is how TOON_Network#115 was found: a lease that should
+have cost 2000 cost 3000. Build the body with the sandbox's `extendBody()` and
+let `checkLeaseBody()` see every lease packet
+(`sandbox/scripts/lib/lease-body.mjs`); `make smoke-extend-shape` measures both
+outcomes on the connector's own book.
+
 ## DNS
 
 `toonprotocol.dev` is on Porkbun. The devnet's records:

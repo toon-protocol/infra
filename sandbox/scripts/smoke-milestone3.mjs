@@ -81,7 +81,7 @@ import {
   claims, clientBookOnChannel, peerBookTotal, publisherChannel,
   relayRead, relayReadUntil, directoryFilter, takeoverFilter, tagValues, hasTag,
   docker, composeNotRunning, composeService, composeHealthy, findWorkload, containerState, runningWorkloads, workloadGone,
-  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, extendBody, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
 const STANDBY_ONLY = /^(1|true|yes)$/i.test(process.env.TOON_M3_STANDBY_ONLY ?? '');
@@ -205,7 +205,9 @@ const RELAY_PAYER = publisherChannel('directory-publisher2');
 // Every packet is SEALED TO THE MEMBER IT IS FOR: two providers, two edges,
 // two sealing keys (ADR 0011), and a packet sealed to the wrong one is money
 // paid to the wrong connector.
-const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
+// Guarded, as every lease packet in this sandbox is: a body of the wrong shape
+// for its route never reaches a claim (TOON_Network#115).
+const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 120_000 });
 // The counts the books are closed against: what the tenant paid the hub,
 // packet by packet, and what reached each provider's connector.
 const paid = { hub: 0n, [PRIMARY.service]: 0n, [STANDBY.service]: 0n };
@@ -325,7 +327,7 @@ const statusOf = async (P, what) => {
 // ── 3. the reservation's price ───────────────────────────────────────────
 step(`3. the reservation is paid on .standby.extend at ${L.standby_price}; .extend on it is refused not_running (and billed)`);
 {
-  const extended = await sendTo(STANDBY, STANDBY.standbyExtendRoute(L.name, L.version), { workload_id: workloadId });
+  const extended = await sendTo(STANDBY, STANDBY.standbyExtendRoute(L.name, L.version), extendBody(workloadId));
   if (!extended.fulfilled) {
     bad(`.standby.extend was refused short of the app: ${extended.code} (${extended.refusedBy})`);
   } else {
@@ -335,7 +337,7 @@ step(`3. the reservation is paid on .standby.extend at ${L.standby_price}; .exte
     took(STANDBY, extended, 'the standby extension', HUB_STANDBY_PRICE);
     if (body?.expires_at) expiresAt = body.expires_at;
   }
-  const refused = await sendTo(STANDBY, STANDBY.extendRoute(L.name, L.version), { workload_id: workloadId });
+  const refused = await sendTo(STANDBY, STANDBY.extendRoute(L.name, L.version), extendBody(workloadId));
   if (!refused.fulfilled) {
     bad(`.extend was refused short of the app: ${refused.code} (${refused.refusedBy})`);
   } else {
@@ -403,7 +405,7 @@ if (!STANDBY_ONLY) {
 
   step(`6. the winner is paid on .extend at ${L.price}; .standby.extend on it is refused not_standby (and billed)`);
   {
-    const extended = await sendTo(STANDBY, STANDBY.extendRoute(L.name, L.version), { workload_id: workloadId });
+    const extended = await sendTo(STANDBY, STANDBY.extendRoute(L.name, L.version), extendBody(workloadId));
     if (!extended.fulfilled) {
       bad(`.extend was refused short of the app: ${extended.code} (${extended.refusedBy})`);
     } else {
@@ -413,7 +415,7 @@ if (!STANDBY_ONLY) {
       took(STANDBY, extended, 'the post-Takeover extension', HUB_PRICE);
       if (body?.expires_at) expiresAt = body.expires_at;
     }
-    const refused = await sendTo(STANDBY, STANDBY.standbyExtendRoute(L.name, L.version), { workload_id: workloadId });
+    const refused = await sendTo(STANDBY, STANDBY.standbyExtendRoute(L.name, L.version), extendBody(workloadId));
     if (!refused.fulfilled) {
       bad(`.standby.extend was refused short of the app: ${refused.code} (${refused.refusedBy})`);
     } else {

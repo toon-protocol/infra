@@ -41,7 +41,7 @@ import {
   listing, PROVIDER_PUBKEY, reporter,
   relayReadUntil, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel,
+  newTenant, newRootSecret, tokenRequest, checkLeaseBody, newWorkloadId, spawnContent, openChannel,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('EVICTION SMOKE');
@@ -73,7 +73,7 @@ ok('provider, provider-connector, relay and relay-connector are up');
 step('1. a mock-USDC payment channel ON SOLANA against the hub (shared with smoke-provider.mjs)');
 const { client, opened } = await openChannel(HUB);
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
-const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_EDGE, timeoutMs: 120_000 });
+const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: PROVIDER_EDGE, timeoutMs: 120_000 });
 
 // ── 2. spawn a lease of our OWN, so evicting it disturbs nobody else's ────
 step('2. a tenant pays for its own lease, so this smoke evicts only what it spawned');

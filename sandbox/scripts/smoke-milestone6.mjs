@@ -77,6 +77,7 @@ import {
   HTTP_CONTAINER_PORT, HUB, BUYER_SOL,
   K_PROFILE, K_IMAGE, K_BLOB, K_TEMPLATE, TOON_LABEL,
   providerOf,
+  checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
   relayRead,
   composeNotRunning, composeService, composeHealthy, containerState, findWorkload, workloadGone,
@@ -220,7 +221,7 @@ step('1. a tenant channel against the hub. The tenant mints a ROOT SECRET; its N
 const { client, opened } = await openChannel(HUB, 'channels.json');
 assert(client.identity?.solanaPublicKey === BUYER_SOL, `the tenant pays as ${client.identity?.solanaPublicKey} — the address seed-toon-solana funded`);
 ok(`channel ${opened.channelId} against the hub (status ${opened.status ?? 'open'})`);
-const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 300_000 });
+const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 300_000 });
 /** How a refusal came back: `{ code, message }` from the app's own error body, or nulls. */
 const refusal = (sent) => {
   if (!sent.fulfilled) return { code: null, message: `refused short of the app: ${sent.code} (${sent.refusedBy})` };

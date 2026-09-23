@@ -55,6 +55,7 @@ import { randomBytes } from 'node:crypto';
 import {
   ROOT, HUB, K_PROFILE, K_BLOB,
   providerOf,
+  checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
   relayReadUntil, directoryFilter, docker, composeNotRunning, composeHealthy, findWorkload, workloadGone,
   continuationFor, gatewaySubFor, newRootSecret, newTenant, newWorkloadId, openChannel, tokenRequest,
@@ -168,7 +169,7 @@ ok(`${container} is running on the host daemon`);
 // The tenant's own client, opened only now: spawn.mjs above paid on the same
 // channel store and has exited, so the two never hold one nonce watermark.
 const { client } = await openChannel(HUB, 'channels.json');
-const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 120_000 });
+const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 120_000 });
 /** `{ status, body }` of the app's answer, or `{ code }` for a packet refused short of it. */
 const answerOf = (sent) => {
   if (!sent.fulfilled) return { status: null, code: `${sent.code} (${sent.refusedBy})`, body: null };

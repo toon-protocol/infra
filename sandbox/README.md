@@ -1226,6 +1226,26 @@ the same mechanism — `scripts/smoke-toon.mjs` shows `sendJob` /
 `buildJobEvent` usage for every kind, including the full brokered ArNS
 ceremony (`buyArnsNameWithNewAnt`).
 
+**A lease route's body: two shapes, and the wrong one is billed** — the five
+routes that act on a lease under the tenant's authority take the spec §6.1
+Lease Request envelope, and the two extension routes take their content BARE:
+
+```js
+import { extendBody, checkLeaseBody, tokenRequest } from './lib/lease-body.mjs'; // and provider-smoke.mjs
+await send(statusRoute, { request: tokenRequest(rootSecret, 'status', { workload_id }) });
+await send(extendRoute, extendBody(workload_id));   // { "workload_id": "…" }, and nothing else
+```
+
+An extension presents no Continuation Token — paying the route is its whole
+authority, and any payer may extend any lease (spec §6.3, ADR 0005, ADR 0025)
+— so there is no envelope to fill in. **Wrapping one is `invalid_request` at
+the route's full price**: a connector collects before the provider app reads a
+byte (ADR 0003) and nothing is refunded, which on `basic` is 1000 µUSDC for an
+answer that bought nothing (TOON_Network#115). Every script here sends through
+`checkLeaseBody(route, body)`, which refuses a mismatched shape before there is
+a packet; `make smoke-extend-shape` measures both outcomes on the connector's
+own book, and `scripts/lib/lease-body.mjs` is the whole of the rule.
+
 **Ask a node what it serves** — `curl http://localhost:3400/describe` (gas
 station) lists its kinds, phases, chains, and per-phase params; `/health`
 answers liveness. This self-describing pattern is worth copying in your own
