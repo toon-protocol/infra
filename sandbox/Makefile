@@ -271,12 +271,12 @@ up-gateway: require-gateway-context
 	@if [ "$(COMPOSE_PROFILE)" = full ]; then $(MAKE) --no-print-directory require-store-context require-anytoon-context; fi
 	$(COMPOSE_GW) up -d --build
 
-## The gateway ON TOP OF `make up-hs` (run that first): the same two services
-## plus the hidden provider's `status` rewrite, rendered at the address
-## `anon-hs` generated (conf/.rendered/workload-gateway-hs.env, written by
-## scripts/hs-provider-address.sh). Nothing else is touched — the rendered
-## configs `up-hs` mounted are passed again so compose has no reason to
-## recreate the anytoon or hidden-provider containers and lose their circuits.
+## The gateway ON TOP OF `make up-hs` (run that first): the same two services,
+## and nothing rendered for them — a hidden member's connector is reached at
+## the `.anyone` address its own Profile advertises, through TOON_SOCKS_PROXY
+## (TOON_Network#114). Nothing else is touched — the rendered configs `up-hs`
+## mounted are passed again so compose has no reason to recreate the anytoon
+## or hidden-provider containers and lose their circuits.
 ## The recipe that uses it is README §2, "Reaching a hidden workload by hand".
 up-gateway-hs: require-gateway-context
 	@if [ ! -f "$(HS_PROVIDER_CONF)" ]; then \
