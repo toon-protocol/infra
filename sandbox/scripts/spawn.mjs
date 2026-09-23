@@ -67,7 +67,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   HTTP_CONTAINER_PORT, HTTP_IMAGE, HUB, HUB_FEE, ROOT,
-  jstr, listing, newRootSecret, newTenant, newWorkloadId, openChannel, providerOf, tokenRequest, usageFromHeader,
+  checkLeaseBody, jstr, listing, newRootSecret, newTenant, newWorkloadId, openChannel, providerOf, tokenRequest, usageFromHeader,
 } from './lib/provider-smoke.mjs';
 
 // scripts/lib/provider-smoke.mjs's HTTP workload image, by reference@digest —
@@ -139,7 +139,7 @@ if (values.terminate) {
     // EVERY member, whichever root each one currently reads with.
     const root = currentRootFor(lease.root_secret, lease.rotation, P.pubkey);
     const request = tokenRequest(root, 'terminate', { workload_id: lease.workload_id }, 120, P);
-    const sent = await client.send(P.terminateRoute, { body: { request } }, { sealTo: P.edge, timeoutMs: 120_000 });
+    const sent = await client.send(P.terminateRoute, { body: checkLeaseBody(P.terminateRoute, { request }) }, { sealTo: P.edge, timeoutMs: 120_000 });
     out[P.service] = answer(sent);
     log(`${P.service}: ${jstr(out[P.service])}`);
   }
@@ -166,7 +166,9 @@ if (STANDBYS.length > 0 && L.standby_price === null) usage(`conf/${PRIMARY.confF
 
 const channelStore = values.direct ? `${PRIMARY.service}-direct.json` : 'channels.json';
 const { client } = await openChannel(values.direct ? PRIMARY.edge : HUB, channelStore);
-const sendTo = (P, route, body) => client.send(route, { body }, { sealTo: P.edge, timeoutMs: 300_000 });
+// Guarded: §5 has two body shapes and sending one where the other belongs is
+// `invalid_request` at the route's full price (TOON_Network#115).
+const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 300_000 });
 
 // The tenant: a root secret, minted here and held in the lease file below,
 // and an SSH key for the workload. `newTenant` still mints a Nostr key with

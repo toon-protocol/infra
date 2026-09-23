@@ -83,7 +83,7 @@ export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
-        smoke-directory smoke-eviction smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
+        smoke-directory smoke-eviction smoke-extend-shape smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
         preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context \
         devnet-status
 
@@ -440,6 +440,24 @@ smoke-directory: preflight-channel-state
 ## it never leaves a lease running for smoke-directory to count.
 smoke-eviction: preflight-channel-state
 	node scripts/smoke-eviction.mjs
+
+## WHAT A MALFORMED EXTENSION COSTS (TOON_Network#115), for `make up-payments`
+## (or `make up`): `.extend` takes its content BARE — `{ "workload_id": "…" }`
+## — where `.spawn`, `.status`, `.terminate` and `.rotate` take the spec §6.1
+## Lease Request envelope, because an extension presents no Continuation Token
+## (ADR 0005, ADR 0025). Sending the sibling shape is `invalid_request` AT FULL
+## PRICE: the connector collects at the route before the provider app reads a
+## byte (ADR 0003), and there are no refunds. This measures both halves on the
+## connector's own book, paying the provider directly so the book moves by the
+## listing price and nothing else — the guarded send is refused before a packet
+## exists and the book does not move a unit, the same body sent past the guard
+## is refused and billed 1000 uUSDC, and a well-formed extension for the same
+## unknown workload is billed exactly the same, which is what says the flat
+## book was the guard rather than a meter that never moves. Buys nothing and
+## leaves nothing running: every refusal is about the SHAPE or about a workload
+## id no lease ever had. Spends two intervals of mock USDC on purpose; seconds.
+smoke-extend-shape: preflight-channel-state
+	node scripts/smoke-extend-shape.mjs
 
 ## MILESTONE 1 ACCEPTANCE TEST (TOON_Network #1 / #9) for `make up-payments`
 ## (or `make up`): the whole lease lifecycle, twice. Per run: Profile,

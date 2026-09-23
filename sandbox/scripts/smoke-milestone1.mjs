@@ -73,7 +73,7 @@ import {
   claims, clientBookOnChannel, peerBookTotal,
   relayRead, relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
+  newTenant, newRootSecret, tokenRequest, extendBody, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('MILESTONE 1 SMOKE');
@@ -189,7 +189,9 @@ async function runVariant(v) {
   let freeCalls = 0;
   let paidCalls = 0;
   const sendOpts = { ...(v.sealTo ? { sealTo: v.sealTo } : {}), timeoutMs: 120_000 };
-  const send = (route, body) => client.send(route, { body }, sendOpts);
+  // Guarded: a body of the wrong shape for its route is refused HERE, before
+  // the packet, because a paid route bills for a refusal too (TOON_Network#115).
+  const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, sendOpts);
   // The tenant channel is shared by every run. A packet an earlier, aborted run
   // sent that the hub gave up on (T01) can still be fulfilled and booked later,
   // and the connector applies such a claim on the channel's NEXT packet. One
@@ -259,7 +261,7 @@ async function runVariant(v) {
 
   // 4. extend, ssh, status, liveness
   step(`${tag} 4. a PAID ${EXTEND_ROUTE} adds exactly one Lease Interval; SSH opens; status agrees; Liveness counts it`);
-  const extended = await send(EXTEND_ROUTE, { workload_id: workloadId });
+  const extended = await send(EXTEND_ROUTE, extendBody(workloadId));
   let expiresAt = spawnBody.expires_at;
   if (!extended.fulfilled) {
     bad(`the extension was refused short of the app: ${extended.code} (${extended.refusedBy}) ${extended.message ?? ''}`);

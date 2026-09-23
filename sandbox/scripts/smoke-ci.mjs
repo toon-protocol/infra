@@ -42,7 +42,7 @@ import {
   claims, clientBookTotal, peerBookTotal,
   relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
-  newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshRun,
+  newTenant, newRootSecret, tokenRequest, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshRun,
 } from './lib/provider-smoke.mjs';
 
 const { step, ok, bad, assert, fatal, done } = reporter('CI LISTING SMOKE');
@@ -110,7 +110,7 @@ assert(client.identity?.solanaPublicKey === BUYER_SOL, `the payer is ${client.id
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 const hubBefore = clientBookTotal(await claims('relay-connector'));
 const providerBefore = peerBookTotal(await claims('provider-connector'), PROVIDER_CHANNEL);
-const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_EDGE, timeoutMs: 180_000 });
+const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: PROVIDER_EDGE, timeoutMs: 180_000 });
 
 // ── 3. the paid spawn ────────────────────────────────────────────────────
 step(`3. a tenant PAYS ${SPAWN_ROUTE} through the hub`);

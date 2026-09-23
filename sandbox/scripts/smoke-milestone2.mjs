@@ -61,6 +61,7 @@ import {
   K_PROFILE, K_IMAGE, K_BLOB, K_TEMPLATE, TOON_LABEL,
   AVAILABILITY_ROUTE, STATUS_ROUTE, TERMINATE_ROUTE, spawnRoute, IMAGE, SSH_USER,
   listing,
+  checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
   claims, clientBookOnChannel, peerBookTotal,
   relayReadUntil, directoryFilter, hasTag,
@@ -193,7 +194,7 @@ client.send = async (route, request, opts) => {
   if (answer.claim?.amount !== undefined) charged.set(route, [...(charged.get(route) ?? []), BigInt(answer.claim.amount)]);
   return answer;
 };
-const send = (route, body) => client.send(route, { body }, { sealTo: PROVIDER_EDGE, timeoutMs: 120_000 });
+const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: PROVIDER_EDGE, timeoutMs: 120_000 });
 const sum = (route) => (charged.get(route) ?? []).reduce((s, a) => s + a, 0n);
 const count = (route) => (charged.get(route) ?? []).length;
 // One warm-up packet first, so a claim an aborted run left pending on the
