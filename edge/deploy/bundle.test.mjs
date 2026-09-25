@@ -293,10 +293,13 @@ describe('certificates', () => {
   });
 });
 
+/** Escape every RegExp metacharacter, so a literal can sit inside a pattern. */
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
 describe('the image', () => {
   it('is pinned by digest, because the Porkbun key passes through it', () => {
     const compose = read('docker-compose.yml');
-    assert.match(compose, new RegExp(`^\\s+image: ${IMAGE.replace(/[./]/g, '\\$&')}@sha256:[0-9a-f]{64}$`, 'm'));
+    assert.match(compose, new RegExp(`^\\s+image: ${escapeRegExp(IMAGE)}@sha256:[0-9a-f]{64}$`, 'm'));
     assert.doesNotMatch(compose, /^\s+build:/m);
   });
 
