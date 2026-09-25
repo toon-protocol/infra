@@ -1,0 +1,33 @@
+# The devnet edge (infra#24, ADR 0001): one Caddy terminating TLS for every
+# public hostname the host's nodes serve. The sites are in ./sites.caddy; this
+# file is only how certificates are obtained.
+#
+# ── DNS-01 for every name, through Porkbun ───────────────────────────────────
+# The wildcard *.gw.devnet needs DNS-01. The other names could use HTTP-01, but
+# DNS-01 for all of them means a certificate is issued BEFORE that name's DNS
+# record is flipped to this host: moving a node (infra#25) has no window in
+# which its name points here and has no certificate, and no failed HTTP-01
+# attempts pile up against Let's Encrypt's rate limit while a name still points
+# at its old Linode.
+#
+# The keys are `{env.…}` placeholders, read when the config is provisioned, so
+# they never appear in the adapted JSON config that Caddy's admin API serves.
+# Porkbun's API must be enabled for toonprotocol.dev (domain settings, "API
+# Access"), or every issuance fails with a 4xx from Porkbun.
+{
+	email {$ACME_EMAIL}
+
+	acme_dns porkbun {
+		api_key {env.PORKBUN_API_KEY}
+		api_secret_key {env.PORKBUN_SECRET_KEY}
+	}
+
+	servers {
+		# nginx served h1 and h2. HTTP/3 would need 443/udp published and open
+		# in the host firewall; without it, Caddy would advertise an h3 that
+		# every client then fails to reach before falling back.
+		protocols h1 h2
+	}
+}
+
+import sites.caddy

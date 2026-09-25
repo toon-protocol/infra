@@ -1,0 +1,14 @@
+# The local smoke test's Caddyfile (./smoke.sh). The production one
+# (../caddy/Caddyfile) with ACME swapped for Caddy's internal CA, so the test
+# needs no DNS, no Porkbun key and no Let's Encrypt. The sites are the SAME
+# file production serves, mounted from ../caddy.
+{
+	local_certs
+	skip_install_trust
+
+	servers {
+		protocols h1 h2
+	}
+}
+
+import /etc/caddy/sites.caddy

@@ -1,0 +1,98 @@
+name: Edge image
+
+# Builds the devnet edge's Caddy (edge/Dockerfile: stock Caddy + caddy-dns/
+# porkbun + caddy-ratelimit) and pushes it to GHCR, infra#24.
+#
+# The deploy pins it by DIGEST (edge/deploy/docker-compose.yml), so no tag this
+# publishes is ever followed by a host: the host moves when a reviewed commit
+# changes that digest, and auto-apply.sh fast-forwards to it. The step summary
+# prints the digest to commit.
+#
+# Pull requests build and test but push nothing.
+
+on:
+  push:
+    branches: [main]
+    paths: ['edge/**', '.github/workflows/edge-image.yml']
+  pull_request:
+    paths: ['edge/**', '.github/workflows/edge-image.yml']
+  workflow_dispatch:
+
+concurrency: edge-image-${{ github.ref }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Bundle test
+        run: node --test edge/deploy/bundle.test.mjs
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/toon-protocol/edge-caddy
+          # An immutable sha tag as a human-readable handle; the deploy pins the
+          # digest regardless.
+          tags: |
+            type=sha,format=long
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: edge
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate the shipped config against the built binary
+        # The same check `caddy reload` makes on the host, made here first.
+        # Pull requests only: that is where the image was loaded locally.
+        if: github.event_name == 'pull_request'
+        env:
+          # Through the environment, never interpolated into the script.
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
+        run: |
+          docker run --rm \
+            -e ACME_EMAIL=ci@example.com -e PORKBUN_API_KEY=x -e PORKBUN_SECRET_KEY=x \
+            -v "$PWD/edge/deploy/caddy:/etc/caddy:ro" \
+            "$IMAGE_ID" \
+            caddy validate --config /etc/caddy/Caddyfile
+
+      - name: The digest to pin
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ghcr.io/toon-protocol/edge-caddy"
+            echo
+            echo "Pin this in \`edge/deploy/docker-compose.yml\`:"
+            echo
+            echo '```'
+            echo "image: ghcr.io/toon-protocol/edge-caddy@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
