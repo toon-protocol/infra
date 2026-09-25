@@ -382,6 +382,15 @@ describe('GitOps', () => {
     assert.match(read('auto-apply.sh'), /\/var\/lock\/toon-edge-auto-apply\.lock/);
   });
 
+  it('retries an apply that failed after the fast-forward, instead of reporting green from then on', () => {
+    // "Nothing new upstream" is not "applied": the script records the commit
+    // it last applied successfully and compares HEAD against that too.
+    const script = read('auto-apply.sh');
+    assert.match(script, /APPLIED_MARKER=/);
+    assert.match(script, /\[ "\$LOCAL" = "\$REMOTE" \] && \[ "\$APPLIED" = "\$REMOTE" \]/);
+    assert.ok(read('.gitignore').split('\n').some((row) => row.trim() === '.applied'));
+  });
+
   it('reloads Caddy rather than restarting it, and refuses the placeholder digest', () => {
     const script = read('auto-apply.sh');
     assert.match(script, /caddy reload --config \/etc\/caddy\/Caddyfile/);

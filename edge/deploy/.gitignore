@@ -2,3 +2,5 @@
 .env
 .env.*
 !.env.example
+# auto-apply.sh's record of the last commit it applied successfully.
+.applied

@@ -2,7 +2,7 @@
 #
 # Apply what was merged. Run by systemd on a timer; see README.md.
 #
-# The box half of GitOps (connector ADR 0068), in the same shape as every
+# The host half of GitOps (connector ADR 0068), in the same shape as every
 # node's deploy/auto-apply.sh: the repository is the deploy surface, and this
 # script's whole job is to notice that the tracked branch moved and apply it.
 # PULL-based on purpose: nothing outside this host can make it deploy.
@@ -10,6 +10,11 @@
 # It refuses rather than guesses:
 #   * a dirty working tree means a human is mid-operation here -- stop, loudly;
 #   * only a fast-forward is applied, never a merge or a reset;
+#   * "nothing new upstream" is not "applied": the last commit applied
+#     SUCCESSFULLY is recorded in ./.applied, so a run that failed after the
+#     fast-forward (a bad pull, an unhealthy Caddy, a rejected config, the
+#     placeholder) is retried and fails loudly every five minutes, instead of
+#     the next run seeing HEAD == origin and exiting green;
 #   * the placeholder image digest is refused by name, not pulled and failed;
 #   * Caddy must come back healthy, and must accept the new config, or this
 #     exits non-zero so `systemctl status` and the journal show it.
@@ -57,12 +62,19 @@ if ! git fetch -q origin "$TRACK_BRANCH"; then
 fi
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse FETCH_HEAD)
-if [ "$LOCAL" = "$REMOTE" ]; then
-  exit 0   # nothing merged since last time; the quiet, common case
+APPLIED_MARKER=$DEPLOY_DIR/.applied
+APPLIED=$(cat "$APPLIED_MARKER" 2>/dev/null || true)
+if [ "$LOCAL" = "$REMOTE" ] && [ "$APPLIED" = "$REMOTE" ]; then
+  exit 0   # nothing merged since the last successful apply; the quiet, common case
 fi
 
-echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7} (origin/$TRACK_BRANCH)"
-git merge --ff-only FETCH_HEAD
+if [ "$LOCAL" != "$REMOTE" ]; then
+  echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7} (origin/$TRACK_BRANCH)"
+  git merge --ff-only FETCH_HEAD
+else
+  LAST=${APPLIED:-never}
+  echo "re-applying ${REMOTE:0:7}: the last successful apply was ${LAST:0:7}"
+fi
 
 cd "$DEPLOY_DIR"
 COMPOSE=(-f docker-compose.yml)
@@ -82,6 +94,10 @@ docker compose "${COMPOSE[@]}" up -d
 # Docker resets Health.Status to `starting` on a recreate, so this cannot read
 # a stale `healthy` from the container it replaced.
 CADDY=$(docker compose "${COMPOSE[@]}" ps -q caddy)
+if [ -z "$CADDY" ]; then
+  echo "FAILED: no caddy container after \`up -d\` at ${REMOTE:0:7}."
+  exit 1
+fi
 for _ in $(seq 1 40); do
   STATUS=$(docker inspect "$CADDY" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
   [ "$STATUS" = healthy ] && break
@@ -102,4 +118,5 @@ if ! docker compose "${COMPOSE[@]}" exec -T caddy caddy reload --config /etc/cad
   exit 1
 fi
 
+echo "$REMOTE" > "$APPLIED_MARKER"
 echo "applied ${REMOTE:0:7}; caddy healthy, config loaded."

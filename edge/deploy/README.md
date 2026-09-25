@@ -48,9 +48,9 @@ plain proxying are carried over, each with its source cited in
   rewrite it to `gateway-gw` for an HTTPS upstream, and the gateway keys
   every grant off Host.
 
-On every other hop, `Host`, `X-Forwarded-For`, `X-Forwarded-Proto: https` and
-WebSocket upgrades are Caddy's defaults. Caddy re-resolves an alias on every dial, so a recreated
-node container needs no edge reload.
+On every other hop, `Host`, `X-Forwarded-For`, `X-Forwarded-Proto: https`
+and WebSocket upgrades are Caddy's defaults. Caddy re-resolves an alias on
+every dial, so a recreated node container needs no edge reload.
 
 ## Certificates
 
@@ -58,7 +58,7 @@ Every name is issued over **DNS-01 through Porkbun** (`caddy/Caddyfile`). The
 wildcard `*.gw.devnet` can only be issued that way. For the other names it
 means a certificate exists **before** their DNS is flipped to this host, so
 moving a node (infra#25) has no TLS gap. Porkbun API access must be enabled
-for `toonprotocol.dev`. The keys are the same pair the workload-gateway box
+for `toonprotocol.dev`. The keys are the same pair the workload gateway node
 already uses.
 
 ## The image
@@ -112,7 +112,9 @@ it runs `compose pull` and `up -d`, waits for Caddy to be healthy, and runs
 `caddy reload`. A reload is graceful and keeps open WebSockets for up to 5
 minutes (`stream_close_delay`). An **invalid config is rejected and the old
 one keeps serving**, and the run fails loudly. A dirty working tree stops the
-timer.
+timer. The last commit applied successfully is recorded in `.applied`, so a
+failed apply is retried, and keeps failing loudly, every five minutes rather
+than going quiet once `HEAD` matches `origin`.
 
 ## Testing it
 

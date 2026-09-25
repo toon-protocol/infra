@@ -72,15 +72,20 @@ jobs:
         # The same check `caddy reload` makes on the host, made here first.
         # Pull requests only: that is where the image was loaded locally.
         if: github.event_name == 'pull_request'
+        env:
+          # Through the environment, never interpolated into the script.
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
         run: |
           docker run --rm \
             -e ACME_EMAIL=ci@example.com -e PORKBUN_API_KEY=x -e PORKBUN_SECRET_KEY=x \
             -v "$PWD/edge/deploy/caddy:/etc/caddy:ro" \
-            "$(echo '${{ steps.meta.outputs.tags }}' | head -n 1)" \
+            "$IMAGE_ID" \
             caddy validate --config /etc/caddy/Caddyfile
 
       - name: The digest to pin
         if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
             echo "### ghcr.io/toon-protocol/edge-caddy"
@@ -88,6 +93,6 @@ jobs:
             echo "Pin this in \`edge/deploy/docker-compose.yml\`:"
             echo
             echo '```'
-            echo "image: ghcr.io/toon-protocol/edge-caddy@${{ steps.build.outputs.digest }}"
+            echo "image: ghcr.io/toon-protocol/edge-caddy@${DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

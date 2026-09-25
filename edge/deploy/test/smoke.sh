@@ -62,12 +62,6 @@ echo "── starting the edge, then two stub nodes on its network"
 
 "${EDGE[@]}" exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$WORK/root.crt"
 
-# Ready once the internal CA has issued and a stub answers through the edge.
-for _ in $(seq 1 60); do
-  get "proxy.ario.$ZONE" /ilp -o /dev/null -f 2>/dev/null && break
-  sleep 2
-done
-
 FAILED=0
 pass() { echo "  ok    $1"; }
 fail() { echo "  FAIL  $1"; FAILED=1; }
@@ -83,6 +77,15 @@ get() {
 expect() { # description, haystack, needle
   if grep -qiF -- "$3" <<<"$2"; then pass "$1"; else fail "$1 (wanted '$3')"; printf '%s\n' "$2" | sed 's/^/        /'; fi
 }
+
+# Ready once the internal CA has issued and a stub answers through the edge.
+ready=0
+for _ in $(seq 1 60); do
+  get "proxy.ario.$ZONE" /ilp -o /dev/null -f 2>/dev/null && { ready=1; break; }
+  sleep 2
+done
+
+[ "$ready" = 1 ] || { echo "FAILED: the edge never answered for proxy.ario through the stub"; exit 1; }
 
 echo "── a plain node: proxy.ario -> store-proxy:4000"
 out=$(get "proxy.ario.$ZONE" /ilp -i)

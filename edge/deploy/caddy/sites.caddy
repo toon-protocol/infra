@@ -8,7 +8,7 @@
 # Each node's own repository ships a shared-edge overlay that joins its
 # containers to the external Docker network `edge` under the aliases below.
 # The ports are each container's own listening port, read off the front that
-# node used to ship. deploy/bundle.test.mjs holds this table still.
+# node used to ship. ../bundle.test.mjs holds this table still.
 #
 #   hostname (.toonprotocol.dev)   upstream                  node
 #   proxy.relay.devnet             relay-proxy:3000          relay (connector)
