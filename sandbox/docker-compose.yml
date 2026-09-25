@@ -211,6 +211,15 @@ services:
       - --bpf-program
       - HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR # payment_channel (TOON connector)
       - /data/payment_channel.so
+      # ── x402 batch-settlement's Solana program (toon-protocol/infra#23) ──
+      # solana-foundation payment-channels at its canonical id, dumped from
+      # MAINNET-BETA (scripts/fetch-artifacts.sh) so the sandbox runs the
+      # binary production runs. A client-edge channel on it is opened with the
+      # receiving connector's operator as sponsor (connector ADR 0074), so
+      # Solana needs no facilitator — only the program.
+      - --bpf-program
+      - CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX # payment-channels (x402 batch-settlement)
+      - /data/payment_channels.so
     volumes:
       - ./artifacts:/data:ro
     ports:
@@ -308,11 +317,16 @@ services:
         # init job because the hub and the anytoon node BOTH refuse to start
         # unless ANYONE resolves a TokenNetwork, and the hub's rate poller has
         # nothing to read until the pools exist.
+        # Last, THE x402 LAYER (scripts/seed-x402.sh, toon-protocol/infra#23):
+        # x402's batch-settlement contracts, Permit2 and Multicall3 at their
+        # production addresses, and Circle's FiatToken as an ERC-3009 USDC —
+        # what the x402-facilitator service relays deposits into.
         if forge script script/DeployLocal.s.sol:DeployLocalScript \
              --rpc-url http://localhost:8545 --broadcast --skip-simulation \
            && forge script /sandbox-extras/DeploySandboxExtras.s.sol:DeploySandboxExtrasScript \
              --rpc-url http://localhost:8545 --broadcast --skip-simulation \
-           && RPC_URL=http://localhost:8545 sh /sandbox-scripts/seed-toon-evm-amm.sh; then
+           && RPC_URL=http://localhost:8545 sh /sandbox-scripts/seed-toon-evm-amm.sh \
+           && RPC_URL=http://localhost:8545 sh /sandbox-scripts/seed-x402.sh; then
           echo "Anvil ready with contracts deployed!"
         else
           echo "============================================================"
@@ -342,7 +356,7 @@ services:
     logging: *chain-logging
     # Healthy means THE FULL DEPLOY LANDED, not merely that the RPC answers:
     # everything downstream (connectors, seed-toon-evm, gas-station) would
-    # otherwise race the deploy. Three gates, in the order they are produced:
+    # otherwise race the deploy. Four gates, in the order they are produced:
     # the registry (DeployLocal), the ERC-2771 probe (DeploySandboxExtras), and
     # — last and strongest — a live `observe()` over the ANYONE/WETH pool's
     # 300-second TWAP window. That last one is the whole asset layer in one
@@ -350,17 +364,51 @@ services:
     # deployed, the pool was created and initialised, its observation
     # cardinality was grown and 900 seconds of history were primed. Without it
     # the hub would boot against a pool that reverts OLD, price NOTHING, and
-    # refuse every credentials purchase F02 with a green stack.
+    # refuse every credentials purchase F02 with a green stack. The fourth
+    # gate is the x402 layer, produced last: the FiatToken USDC answering
+    # `version()`, which it can only do once its proxy is deployed AND
+    # initialised — and the settlement stack is placed before it.
     # cast code returns 0x until a deploy lands and empty output on RPC
     # failure, hence the -n checks.
     healthcheck:
       test:
         - CMD-SHELL
-        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' && cast call 0x8983f1366e1c0d20647c9a1b0cb46ce4c46e13c7 'observe(uint32[])(int56[],uint160[])' '[300,0]' --rpc-url http://localhost:8545 >/dev/null 2>&1 || exit 1"
+        - "r=\"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\"; p=\"$$(cast code 0xA15BB66138824a1c7167f5E85b957d04Dd34E468 --rpc-url http://localhost:8545 2>/dev/null)\"; test -n \"$$r\" && test \"$$r\" != '0x' && test -n \"$$p\" && test \"$$p\" != '0x' && cast call 0x8983f1366e1c0d20647c9a1b0cb46ce4c46e13c7 'observe(uint32[])(int56[],uint160[])' '[300,0]' --rpc-url http://localhost:8545 >/dev/null 2>&1 && cast call 0x0A867CA0442383c2A89951244B955AA19b615b58 'version()(string)' --rpc-url http://localhost:8545 >/dev/null 2>&1 || exit 1"
       interval: 5s
       timeout: 10s
       retries: 60
       start_period: 20s
+
+  # The sandbox's x402 FACILITATOR (toon-protocol/infra#23, connector ADR
+  # 0074): what production calls a facilitator, run locally so a client-edge
+  # batch-settlement channel can be opened here the way it is on Base — a
+  # wallet holding USDC and no ETH signs one ERC-3009 authorization, and this
+  # service relays the deposit and pays the gas. It is the published
+  # `@x402/core` + `@x402/evm` packages, stock, offering `batch-settlement` on
+  # `eip155:31337` and nothing else (x402-facilitator/index.mjs), and it
+  # offers NO receiverAuthorizer, like x402.org's hosted one. It works
+  # unmodified only because the anvil seed placed the contracts at the
+  # addresses `@x402/evm` hardcodes. Solana has no counterpart: there the
+  # receiving connector sponsors the channel itself.
+  x402-facilitator:
+    profiles: ['payments', 'credentials', 'full']
+    build: ./x402-facilitator
+    environment:
+      EVM_RPC_URL: http://anvil:8545
+    depends_on:
+      anvil:
+        condition: service_healthy
+    ports:
+      - '4022:4022'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:4022/health >/dev/null || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   # Fake Arweave node. Frozen upstream (repo archived) but still what the
   # ecosystem uses locally. Serves as the gateway's "trusted node" (envoy

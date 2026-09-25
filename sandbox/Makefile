@@ -82,7 +82,7 @@ export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
-        smoke-toon smoke-payments smoke-credentials smoke-provider smoke-provider2 \
+        smoke-toon smoke-payments smoke-x402 smoke-credentials smoke-provider smoke-provider2 \
         smoke-directory smoke-eviction smoke-extend-shape smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
         preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context \
         devnet-status
@@ -184,7 +184,8 @@ up: require-store-context require-anytoon-context
 
 ## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
 ## the relay + the hub + the Solana channel-open job + BOTH compute providers,
-## each with its own connector and its own directory publisher (13 services).
+## each with its own connector and its own directory publisher + the x402
+## facilitator (14 services).
 ## No gateway, no bundler, no store, no gas station — and no store sibling
 ## checkout.
 up-payments: COMPOSE_PROFILE = payments
@@ -194,7 +195,7 @@ up-payments:
 ## start the CREDENTIALS slice: the payment layer PLUS the paid side of the
 ## denomination boundary — the issuer path (issuer + minter + datastores + key
 ## job), the anytoon connector, and the swap driver that keeps the ANYONE TWAP
-## fresh (without it the crossing refuses T00 within minutes). 15 services.
+## fresh (without it the crossing refuses T00 within minutes). 16 services.
 ## Needs the anytoon sibling checkout (claim-minter builds from it) but NOT
 ## the store checkout — the whole point of the profile.
 up-credentials: COMPOSE_PROFILE = credentials
@@ -369,7 +370,7 @@ preflight-channel-state:
 ## brokered ArNS buy: paid 5095 prepare + 5096 gas spawn + 5095 buy, name
 ## resolves -> paid gas jobs via peering: Solana quote + EVM ERC-2771
 ## meta-tx relay, with claim journals asserted per settlement leg)
-smoke: smoke-ario smoke-toon
+smoke: smoke-ario smoke-toon smoke-x402
 
 smoke-ario:
 	node scripts/smoke-test.mjs
@@ -384,6 +385,17 @@ smoke-toon:
 ## advanced on that channel. No store, gateway or bundler assertions.
 smoke-payments:
 	TOON_SMOKE_PAYMENTS_ONLY=1 node scripts/smoke-toon.mjs
+	$(MAKE) smoke-x402
+
+## x402 batch-settlement proof (toon-protocol/infra#23, connector ADR 0074): a
+## wallet with USDC and NO ETH deposits into a channel whose receiver is the
+## hub, through the sandbox's own facilitator, which pays the gas — then the
+## channel is read back off anvil. Also runs ADR 0074's zero-voucher question
+## and checks payment-channels is loaded on the validator. Runs in every
+## profile that starts anvil (payments, credentials, full).
+smoke-x402:
+	npm --prefix x402-facilitator ci --no-audit --no-fund --silent
+	node x402-facilitator/smoke.mjs
 
 ## credentials proof for `make up-credentials`: the payments assertions PLUS
 ## the denomination boundary end to end — the price triple asserted, the

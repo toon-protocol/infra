@@ -1077,11 +1077,12 @@ The admission round itself does not cross the circuit — the hidden provider's
 
 | service | what | host port |
 |---|---|---|
-| `solana-validator` | agave test validator with AR.IO's five Anchor programs + Metaplex Core + the TOON `payment_channel` program preloaded at genesis, 2MB NameRegistry account preloaded | 8899 (RPC), 8900 (WS) |
-| `anvil` | local EVM chain (chain-id 31337): the connector's settlement contracts (MockERC20 USDC, TokenNetworkRegistry, TokenNetwork), the sandbox's ERC-2771 extras, and **the ANYONE asset layer** — real mainnet ANYONE + WETH9 bytecode, real Uniswap v3, two seeded pools with primed oracles (§6.7) | 8545 |
+| `solana-validator` | agave test validator with AR.IO's five Anchor programs + Metaplex Core + the TOON `payment_channel` program + solana-foundation's **payment-channels** (`CHNLx…`, x402 batch-settlement, §6.10) preloaded at genesis, 2MB NameRegistry account preloaded | 8899 (RPC), 8900 (WS) |
+| `anvil` | local EVM chain (chain-id 31337): the connector's settlement contracts (MockERC20 USDC, TokenNetworkRegistry, TokenNetwork), the sandbox's ERC-2771 extras, and **the ANYONE asset layer** — real mainnet ANYONE + WETH9 bytecode, real Uniswap v3, two seeded pools with primed oracles (§6.7) — and **the x402 layer**: x402's batch-settlement contracts, Permit2 and Multicall3 at their production addresses, and Circle's FiatToken as an ERC-3009 USDC (§6.10) | 8545 |
 | `arlocal` | fake Arweave node (the gateway's "trusted node") | 1984 |
 | `envoy` + `core` + `redis` | AR.IO gateway (ar-io-node r83; service definitions vendored, images pinned to r83's SHAs — no ar-io-node checkout needed) | 3000 (gateway), 3004 (core direct) |
 | `upload-service` + `fulfillment-service` + `upload-service-pg` + `localstack` | Turbo bundler stack | 5100 (upload), 4566 (localstack) |
+| `x402-facilitator` | a stock x402 facilitator (the published `@x402/core` + `@x402/evm`): `batch-settlement` on `eip155:31337`, relays a client's gasless deposit and pays the gas; offers no `receiverAuthorizer` (§6.10). `make smoke-x402` | 4022 (`/supported`, `/verify`, `/settle`, `/health`) |
 | `relay-connector` | TOON ILP connector — the HUB (`g.toon.relay`, forwards `g.toon.store` / `g.toon.gastation` over peerings) | 3200 (client edge) |
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
@@ -1617,7 +1618,7 @@ the sandbox works from a fresh clone:
 the EVM bytecode blobs under `artifacts/evm/`) is committed for convenience
 but fully regenerable:
 `./scripts/fetch-artifacts.sh` re-dumps the five AR.IO programs from devnet
-and mpl_core from mainnet-beta using the pinned validator image (no Solana
+and mpl_core and payment-channels (`payment_channels.so`, §6.10) from mainnet-beta using the pinned validator image (no Solana
 toolchain needed), and `node scripts/gen-genesis.mjs` rebuilds the genesis
 account (and keys, if missing — regenerating keys requires updating the
 admin pubkey in `docker-compose.yml`). The program ids are the
@@ -1627,10 +1628,11 @@ together with an `@ar.io/sdk` / `@ar.io/solana-contracts` upgrade.
 
 `artifacts/evm/` holds the three blobs the EVM asset layer places on anvil —
 ANYONE's and WETH9's mainnet RUNTIME bytecode, and the official Uniswap v3
-factory's CREATION bytecode. Those are the only artifacts here that come from
+factory's CREATION bytecode — and the x402 layer's eight, copied from Base
+Sepolia (§6.10). Those are the only artifacts here that come from
 a chain this sandbox does not run, which is exactly why they are committed:
 `make up` must never need an internet connection. `./scripts/fetch-artifacts.sh`
-re-dumps them (`MAINNET_RPC` overrides the endpoint) and
+re-dumps them (`MAINNET_RPC` and `BASE_SEPOLIA_RPC` override the endpoints) and
 `artifacts/evm/README.md` explains the provenance, the runtime-vs-creation
 split, and how to check the factory blob against mainnet's deployed one.
 
@@ -2315,6 +2317,63 @@ restated with a fourth entry sending `<hidden provider address>.anyone:80` at
 something the hidden connector serves. `scripts/hs-provider-address.sh` now
 renders three files rather than four, and `docker-compose.yml` reads one
 `env_file` rather than two.
+
+### 6.10 The x402 layer: batch-settlement, a facilitator, and production's addresses
+
+A client can pay a connector over an **x402 `batch-settlement` channel** at the client edge
+(connector ADR 0074, toon-protocol/infra#23): on Base it is x402's own audited
+`x402BatchSettlement`, whose deposits a facilitator relays and pays the gas for; on Solana it is
+solana-foundation's `payment-channels`, sponsored by the receiving connector. Production has a
+facilitator, so the sandbox runs one — otherwise the one step a gasless client cannot do for
+itself is the one step nothing here could rehearse.
+
+**Everything sits where production has it.** The published `@x402/evm` package hardcodes the
+batch-settlement addresses (`0x4020…0003` settlement, `…0004` ERC-3009 collector, `…0005`
+Permit2 collector), so a stock facilitator only works on a chain where the contracts are exactly
+there — and x402's own deploy script uses plain CREATE on 31337, which puts them elsewhere.
+`scripts/seed-x402.sh` therefore copies the **runtime** bytecode from Base Sepolia and places it
+with `anvil_setCode`, the same way §6.7 places ANYONE and WETH9:
+
+| what | address | why it is there |
+|---|---|---|
+| `x402BatchSettlement` | `0x4020074e…0003` | the channel contract; ownerless, EIP-712 domain rebuilt for 31337 |
+| `ERC3009DepositCollector` | `0x40208060…0004` | pulls a deposit by `receiveWithAuthorization` — the gasless path |
+| `Permit2DepositCollector` | `0x4020425F…0005` | the Permit2 path, for a token without ERC-3009 |
+| Permit2 | `0x00000000…8BA3` | Uniswap's canonical deployment; the Permit2 collector's immutable |
+| Multicall3 | `0xcA11bde0…CA11` | the facilitator batches its channel reads through it; plain anvil has none |
+| Circle `SignatureChecker` | `0xbA3b60c2…7DA6` | the external library FiatToken v2.2 links at this address |
+| USDC (FiatToken v2.2) | `0x0A867CA0…5b58` | Circle's real proxy + implementation, deployed from Base Sepolia's own creation transactions; EIP-712 name `USDC`, version `2`, as on Base Sepolia |
+
+The USDC is the one address that is local rather than production's: a FiatToken's initialisers
+write a dozen storage words, so it is deployed and initialised rather than placed. That is fine,
+because a token address travels as the greeting's `asset` — configuration, not code. The
+sandbox's older `MockERC20` stays as it was; it has neither ERC-3009 nor permit, which is exactly
+why x402 needs a different token. Mint it from anvil-mnemonic index 21, the token's minter:
+
+```sh
+cast send 0x0A867CA0442383c2A89951244B955AA19b615b58 'mint(address,uint256)' <you> 5000000 \
+  --private-key 0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b --rpc-url http://localhost:8545
+```
+
+**The facilitator** (`x402-facilitator/`) is x402's own e2e facilitator reduced to one scheme and
+one network. Its gas payer is anvil-mnemonic index 22, funded by the seed. It offers **no
+`receiverAuthorizer`**, deliberately and like x402.org's hosted facilitator on Base Sepolia: a
+`receiverAuthorizer` can refund a connector's earned-but-unclaimed value to the payer, so a
+connector always names its own (ADR 0074 decision 5).
+
+**`make smoke-x402`** is the whole path, and runs inside `make smoke` and `make smoke-payments`:
+a fresh wallet holding USDC and **no ETH** signs one ERC-3009 authorization, built by the published
+`@x402/evm` client; the facilitator verifies it, relays the deposit and pays the gas; and the
+channel — receiver and `receiverAuthorizer` both the hub connector's settlement address — is read
+back off anvil holding the deposit, with the payer still at zero ETH. It also runs the one
+question ADR 0074 could only answer by reading: a deposit whose voucher is **zero** is refused on a
+fresh channel (`invalid_batch_settlement_evm_cumulative_below_claimed`). x402's reference
+facilitators disagree on that — Go accepts it — so the smoke pins this one's answer and fails if a
+package bump changes it. Last, it checks `payment-channels` is loaded and executable.
+
+**What is not here yet.** No connector in the sandbox accepts a batch-settlement voucher: that is
+the connector work ADR 0074's follow-up tickets describe. This layer is the chain and the
+facilitator it will be tested against.
 
 ## 7. Lifecycle and state
 
