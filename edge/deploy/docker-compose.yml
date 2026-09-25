@@ -25,11 +25,9 @@ services:
     # never a tag: the Porkbun API key, which can rewrite every record in
     # toonprotocol.dev, is handed to whatever binary this resolves to.
     #
-    # PLACEHOLDER: no image has been published yet. This all-zero digest is not
-    # a real image, `docker compose pull` fails on it, and auto-apply.sh
-    # refuses it by name. Replace it with the digest the first run of
-    # edge-image.yml prints (README § "Bumping the image").
-    image: ghcr.io/toon-protocol/edge-caddy@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # Built from a824ab1 (sha-a824ab12962fb63d52ffe27377fad84153dfbb82), the
+    # first edge-image.yml run on main. README § "Bumping the image".
+    image: ghcr.io/toon-protocol/edge-caddy@sha256:e0a74f22615527fdd2d66744c532f04076631b52c0211106d09250c9c3056ac5
     environment:
       # Where Let's Encrypt sends expiry notices.
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
