@@ -11,10 +11,12 @@
 //
 // What it holds still, and why:
 //   * THE CONTRACT: every hostname a node on this host serves maps to exactly
-//     the alias and port that node's shared-edge overlay joins `edge` under,
+//     the alias and port that node's shared-edge overlay joins its own
+//     `edge-<node>` network under,
 //     and no hostname is served that is not in the contract. Four other repos
 //     implement the far side of this table; a typo here is an outage there.
-//   * the `edge` network is created HERE, under that literal name;
+//   * the five per-node networks are created HERE, under their literal
+//     names, Caddy joins all five, and no flat network joins the nodes;
 //   * the Caddy image is pinned by digest, because the Porkbun key lives in it;
 //   * the wildcard is issued over DNS-01 through Porkbun, keys from the env;
 //   * the per-node rules the old nginx/Caddy fronts applied beyond plain
@@ -316,15 +318,47 @@ describe('the image', () => {
   });
 });
 
+// One network per node (contract v2): only the edge reaches a node, so no node
+// can reach another's connector /admin or the gateway's handover door. A node's
+// overlay joins its own network, `external`, and nothing else of the edge's.
+const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet'];
+
+// Every file in the bundle, for the checks that must hold across all of them.
+const BUNDLE_FILES = [
+  'docker-compose.yml', 'caddy/Caddyfile', 'caddy/sites.caddy', 'README.md', '.env.example',
+  'auto-apply.sh', 'toon-auto-apply-edge.service', 'toon-auto-apply-edge.timer',
+  'test/smoke.sh', 'test/docker-compose.edge.yml', 'test/docker-compose.stub-store.yml', 'test/docker-compose.stub-gateway.yml', 'test/Caddyfile',
+];
+
 describe('the compose project', () => {
   // Code only: comment-only lines explain, and must not satisfy or trip these.
   const compose = () => read('docker-compose.yml').replace(/^\s*#.*\n/gm, '');
 
-  it('creates the `edge` network every node joins, under that literal name', () => {
-    assert.match(compose(), /^networks:\n\s+edge:\n\s+name: edge$/m);
-    // Created HERE. A node's overlay declares it external; this one must not,
-    // or nothing on the host creates it.
-    assert.doesNotMatch(compose().slice(compose().indexOf('\nnetworks:')), /external/);
+  it('creates one network per node, each under its literal name', () => {
+    const top = compose().slice(compose().indexOf('\nnetworks:'));
+    for (const net of NODE_NETWORKS) {
+      assert.match(top, new RegExp(`^  ${net}:\\n    name: ${net}$`, 'm'), `${net} is not created with a fixed name`);
+    }
+    // Created HERE. A node's overlay declares its network external; this one
+    // must not, or nothing on the host creates them.
+    assert.doesNotMatch(top, /external/);
+    assert.deepEqual([...top.matchAll(/^    name: (\S+)$/gm)].map((m) => m[1]).sort(), [...NODE_NETWORKS].sort());
+  });
+
+  it('joins Caddy to all five, and to nothing else', () => {
+    const caddy = compose().slice(compose().indexOf('  caddy:'), compose().indexOf('\nnetworks:'));
+    const joined = [...caddy.slice(caddy.indexOf('    networks:')).matchAll(/^      - (\S+)$/gm)].map((m) => m[1]);
+    assert.deepEqual(joined.sort(), [...NODE_NETWORKS].sort());
+  });
+
+  it('names no flat `edge` network anywhere in the bundle any more', () => {
+    for (const name of BUNDLE_FILES) {
+      const text = read(name);
+      // Indented: a network's `name:`. (Column 0 is the compose PROJECT name,
+      // which is `edge` and is not a network.)
+      assert.doesNotMatch(text, /^[ \t]+name: edge[ \t]*$/m, `${name} names a network \`edge\``);
+      assert.doesNotMatch(text, /network[s]? `edge`|`edge` network|network inspect edge\b/, `${name} mentions the flat \`edge\` network`);
+    }
   });
 
   it('publishes 80 and 443 and nothing else', () => {
@@ -372,14 +406,27 @@ describe('nothing secret is committable', () => {
 });
 
 describe('GitOps', () => {
-  it('runs under its own unit names, because every node on this host ships a toon-auto-apply', () => {
-    const service = read('toon-edge-auto-apply.service');
+  it('runs as toon-auto-apply-edge, the per-node unit name every bundle on the host uses', () => {
+    const service = read('toon-auto-apply-edge.service');
     assert.match(service, /^ExecStart=\/root\/infra\/edge\/deploy\/auto-apply\.sh$/m);
-    assert.match(read('toon-edge-auto-apply.timer'), /^Unit=toon-edge-auto-apply\.service$/m);
+    assert.match(read('toon-auto-apply-edge.timer'), /^Unit=toon-auto-apply-edge\.service$/m);
+    assert.match(read('README.md'), /toon-auto-apply-edge\.service toon-auto-apply-edge\.timer/);
+    for (const name of BUNDLE_FILES) {
+      assert.doesNotMatch(read(name), /toon-edge-auto-apply/, `${name} still names the old units`);
+    }
   });
 
   it('takes its own lock, so it neither blocks nor is blocked by a node applying', () => {
-    assert.match(read('auto-apply.sh'), /\/var\/lock\/toon-edge-auto-apply\.lock/);
+    assert.match(read('auto-apply.sh'), /^exec 9>\/var\/lock\/toon-auto-apply-edge\.lock$/m);
+  });
+
+  it('lets docker compose read COMPOSE_FILE from .env, passing no -f when it is set', () => {
+    // Contract v2 §3: never parse COMPOSE_FILE; an explicit -f would override
+    // it and silently drop an overlay.
+    const script = read('auto-apply.sh');
+    assert.match(script, /grep -q '\^\[\[:space:\]\]\*COMPOSE_FILE=' \.env/);
+    assert.match(script, /COMPOSE=\(\)/);
+    assert.match(script, /COMPOSE=\(-f docker-compose\.yml\)/);
   });
 
   it('retries an apply that failed after the fast-forward, instead of reporting green from then on', () => {

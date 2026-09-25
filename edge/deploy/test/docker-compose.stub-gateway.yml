@@ -1,0 +1,24 @@
+# A stub workload gateway node, joined the way the gateway's shared-edge
+# overlay joins it: its own project, its own `default`, and ONLY `edge-gateway`,
+# external, under the contract's alias.
+#
+#   gateway-gw    TLS on :8443 with a self-signed certificate made the way
+#                 gateway/deploy/bootstrap.sh makes its own; answers one
+#                 granted label and 503 `no_grant` for every other name
+name: edge-smoke-stub-gateway
+
+services:
+  gateway:
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    volumes:
+      - ./stub/gateway.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${STUB_TLS_DIR:?smoke.sh sets STUB_TLS_DIR}:/tls:ro
+    networks:
+      default: {}
+      edge-gateway:
+        aliases: [gateway-gw]
+
+networks:
+  edge-gateway:
+    external: true
+    name: edge-gateway

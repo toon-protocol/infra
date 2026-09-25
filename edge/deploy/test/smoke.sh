@@ -6,20 +6,25 @@
 #   KEEP=1 edge/deploy/test/smoke.sh     # leave it running afterwards
 #
 # It brings up the edge project (production's compose and sites, the internal
-# CA instead of ACME: ./docker-compose.edge.yml), then two stub nodes in a
-# SEPARATE project that joins the `edge` network the way a node's overlay does
-# (./docker-compose.stubs.yml), and asks real HTTPS questions of it with the
-# real hostnames, verifying every certificate against the edge's own root.
+# CA instead of ACME: ./docker-compose.edge.yml), then two stub nodes, each in
+# its OWN project joined to its OWN per-node network the way a node's overlay
+# is (./docker-compose.stub-store.yml on edge-store,
+# ./docker-compose.stub-gateway.yml on edge-gateway). It asks real HTTPS
+# questions with the real hostnames, verifying every certificate against the
+# edge's own root, and checks that one stub node cannot reach the other.
 #
-# It needs Docker, curl and openssl, and the Docker network name `edge` to be
-# free: it creates and removes that network, so it refuses to run on a host
-# that already has one (a real devnet host, say).
+# It needs Docker, curl and openssl, and the five network names edge-relay,
+# edge-store, edge-gas, edge-gateway and edge-faucet to be free: it creates and
+# removes them, so it refuses to run on a host that already has any of them (a
+# real devnet host, say).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEPLOY=$(cd "$HERE/.." && pwd)
 EDGE=(docker compose -p edge-smoke --project-directory "$DEPLOY" -f "$DEPLOY/docker-compose.yml" -f "$HERE/docker-compose.edge.yml")
-STUBS=(docker compose -f "$HERE/docker-compose.stubs.yml")
+STUB_STORE=(docker compose -f "$HERE/docker-compose.stub-store.yml")
+STUB_GATEWAY=(docker compose -f "$HERE/docker-compose.stub-gateway.yml")
+NETWORKS=(edge-relay edge-store edge-gas edge-gateway edge-faucet)
 ZONE=devnet.toonprotocol.dev
 WORK=$(mktemp -d)
 
@@ -27,17 +32,20 @@ WORK=$(mktemp -d)
 export ACME_EMAIL=smoke@example.com PORKBUN_API_KEY=unused PORKBUN_SECRET_KEY=unused
 export STUB_TLS_DIR=$WORK/tls
 
-if docker network inspect edge >/dev/null 2>&1; then
-  echo "REFUSING: a Docker network named 'edge' already exists here. This test creates and removes its own."
-  exit 1
-fi
+for net in "${NETWORKS[@]}"; do
+  if docker network inspect "$net" >/dev/null 2>&1; then
+    echo "REFUSING: a Docker network named '$net' already exists here. This test creates and removes its own."
+    exit 1
+  fi
+done
 
 cleanup() {
   if [ "${KEEP:-0}" = 1 ]; then
     echo "KEEP=1: left running. Tear down with:"
-    echo "  ${STUBS[*]} down; ${EDGE[*]} down -v"
+    echo "  ${STUB_STORE[*]} down; ${STUB_GATEWAY[*]} down; ${EDGE[*]} down -v"
   else
-    "${STUBS[@]}" down --remove-orphans >/dev/null 2>&1 || true
+    "${STUB_STORE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+    "${STUB_GATEWAY[@]}" down --remove-orphans >/dev/null 2>&1 || true
     "${EDGE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
@@ -56,9 +64,10 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
   -addext "subjectAltName=DNS:*.gw.$ZONE,DNS:gw.$ZONE,DNS:gateway" >/dev/null 2>&1
 chmod 644 "$STUB_TLS_DIR"/*
 
-echo "── starting the edge, then two stub nodes on its network"
+echo "── starting the edge, then two stub nodes, each on its own network"
 "${EDGE[@]}" up -d --wait
-"${STUBS[@]}" up -d --wait
+"${STUB_STORE[@]}" up -d --wait
+"${STUB_GATEWAY[@]}" up -d --wait
 
 "${EDGE[@]}" exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$WORK/root.crt"
 
@@ -133,11 +142,41 @@ codes=$(seq 1 600 | xargs -P 60 -I{} curl -s -o /dev/null -w '%{http_code}\n' --
   --cacert "$WORK/root.crt" --resolve "proxy.ario.$ZONE:18443:127.0.0.1" "https://proxy.ario.$ZONE:18443/ilp" | sort | uniq -c)
 expect "a burst past 400 per 2s is rate-limited" "$codes" " 429"
 
+echo "── one network per node: only the edge reaches a node"
+# The routing checks above already prove the edge reaches both stubs. Now
+# the other direction: from inside the store stub, the gateway stub must be
+# unreachable, by its alias AND by its address on edge-gateway (a name that
+# fails to resolve alone would prove nothing about the route).
+store_cid=$("${STUB_STORE[@]}" ps -q store)
+gw_cid=$("${STUB_GATEWAY[@]}" ps -q gateway)
+gw_ip=$(docker inspect "$gw_cid" --format '{{(index .NetworkSettings.Networks "edge-gateway").IPAddress}}')
+if docker exec "$store_cid" wget -q -T 3 --no-check-certificate -O /dev/null https://gateway-gw:8443/ 2>/dev/null; then
+  fail "a store node cannot reach gateway-gw by name"
+else
+  pass "a store node cannot reach gateway-gw by name"
+fi
+if [ -n "$gw_ip" ] && ! docker exec "$store_cid" nc -z -w 3 "$gw_ip" 8443 2>/dev/null; then
+  pass "a store node cannot reach the gateway at its edge-gateway address ($gw_ip)"
+else
+  fail "a store node cannot reach the gateway at its edge-gateway address (${gw_ip:-no address})"
+fi
+# The control, so the two passes above are not a broken probe: the same tools
+# from the same container DO reach the store's own alias.
+if docker exec "$store_cid" nc -z -w 3 store-proxy 4000 2>/dev/null; then
+  pass "... while the same probe reaches its own node (control)"
+else
+  fail "... while the same probe reaches its own node (control)"
+fi
+
 echo "── the host contract"
 cid=$("${EDGE[@]}" ps -q caddy)
 out=$(docker inspect "$cid" --format '{{.HostConfig.Memory}}')
 expect "caddy runs under its mem_limit (256m)" "$out" "268435456"
-out=$(docker network inspect edge --format '{{index .Labels "com.docker.compose.project"}}')
-expect "the edge project created the 'edge' network" "$out" "edge-smoke"
+out=$(docker inspect "$cid" --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}')
+for net in "${NETWORKS[@]}"; do
+  expect "caddy is on $net" "$out" "$net "
+  owner=$(docker network inspect "$net" --format '{{index .Labels "com.docker.compose.project"}}')
+  expect "the edge project created $net" "$owner" "edge-smoke"
+done
 
 if [ "$FAILED" = 0 ]; then echo "── all checks passed"; else echo "── FAILED"; exit 1; fi

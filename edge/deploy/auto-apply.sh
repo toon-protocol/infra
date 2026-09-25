@@ -22,11 +22,11 @@
 # ── How it differs from a node's copy ────────────────────────────────────────
 # 1. The bundle is edge/deploy in toon-protocol/infra, not deploy/ in an app
 #    repository, so the checkout root is two levels up.
-# 2. Its own lock and its own unit names (toon-edge-auto-apply.*): every node
-#    on this host ships a `toon-auto-apply` of its own, and they all take
-#    /var/lock/toon-auto-apply.lock. Sharing it would make the edge skip every
-#    run that overlaps a node's, and a node skip every run that overlaps the
-#    edge's.
+# 2. Per-node unit names and lock, as every bundle on a shared host has them
+#    (contract v2): toon-auto-apply-edge.{service,timer} and
+#    /var/lock/toon-auto-apply-edge.lock. One shared lock would make the edge
+#    skip every run that overlaps a node's, and a node skip every run that
+#    overlaps the edge's.
 # 3. A config change is applied by `caddy reload`, never by a restart. A
 #    reload is graceful (open WebSockets are kept; see sites.caddy's
 #    stream_close_delay), it is a no-op when nothing changed, and an invalid
@@ -47,7 +47,7 @@ if [ -f "$DEPLOY_DIR/.env" ]; then
 fi
 
 # One apply at a time, and never one racing a human.
-exec 9>/var/lock/toon-edge-auto-apply.lock
+exec 9>/var/lock/toon-auto-apply-edge.lock
 flock -n 9 || { echo "another edge apply is already running; leaving it alone"; exit 0; }
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -77,7 +77,16 @@ else
 fi
 
 cd "$DEPLOY_DIR"
-COMPOSE=(-f docker-compose.yml)
+# Which compose files this host runs is .env's COMPOSE_FILE, when it sets one,
+# read by `docker compose` itself: an explicit `-f` here would override it and
+# silently drop whatever overlay it names. So this only asks whether .env HAS
+# such a line, never what it says (and never sources .env, which holds the
+# Porkbun keys). No COMPOSE_FILE: the base file alone.
+if [ -f .env ] && grep -q '^[[:space:]]*COMPOSE_FILE=' .env; then
+  COMPOSE=()
+else
+  COMPOSE=(-f docker-compose.yml)
+fi
 
 # The bundle ships a PLACEHOLDER digest until edge-image.yml has published an
 # image (README § "Bumping the image"). Say so, rather than letting a pull fail

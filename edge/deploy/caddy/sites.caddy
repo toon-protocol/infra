@@ -6,20 +6,22 @@
 #
 # ── The contract (infra#24) ──────────────────────────────────────────────────
 # Each node's own repository ships a shared-edge overlay that joins its
-# containers to the external Docker network `edge` under the aliases below.
-# The ports are each container's own listening port, read off the front that
-# node used to ship. ../bundle.test.mjs holds this table still.
+# containers to that node's OWN external Docker network, `edge-<node>`, under
+# the aliases below. Caddy is on all five networks; no node is on another's
+# (../docker-compose.yml says why). The ports are each container's own
+# listening port, read off the front that node used to ship.
+# ../bundle.test.mjs holds this table still.
 #
-#   hostname (.toonprotocol.dev)   upstream                  node
-#   proxy.relay.devnet             relay-proxy:3000          relay (connector)
-#   relay-ws.devnet                relay-ws:7100             relay (Nostr WS)
-#   proxy.ario.devnet              store-proxy:4000          store (connector)
-#   dvm.devnet                     store-dvm:3400            store (health)
-#   proxy.gas.devnet               gas-proxy:4000            gas   (connector)
-#   gas.devnet                     gas-web:3400              gas   (health)
-#   proxy.gateway.devnet           gateway-proxy:4000        gateway (connector)
-#   gw.devnet, *.gw.devnet         https://gateway-gw:8443   gateway (workloads)
-#   faucet.devnet                  faucet:3500               faucet
+#   hostname (.toonprotocol.dev)   upstream                  network
+#   proxy.relay.devnet             relay-proxy:3000          edge-relay   (connector)
+#   relay-ws.devnet                relay-ws:7100             edge-relay   (Nostr WS)
+#   proxy.ario.devnet              store-proxy:4000          edge-store   (connector)
+#   dvm.devnet                     store-dvm:3400            edge-store   (health)
+#   proxy.gas.devnet               gas-proxy:4000            edge-gas     (connector)
+#   gas.devnet                     gas-web:3400              edge-gas     (health)
+#   proxy.gateway.devnet           gateway-proxy:4000        edge-gateway (connector)
+#   gw.devnet, *.gw.devnet         https://gateway-gw:8443   edge-gateway (workloads)
+#   faucet.devnet                  faucet:3500               edge-faucet
 #
 # ── What Caddy already does that the nginx fronts spelled out ────────────────
 # * `proxy_set_header Host $host`: reverse_proxy passes Host through untouched

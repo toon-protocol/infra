@@ -1,0 +1,22 @@
+# A stub store node, joined to the edge exactly the way the store's shared-edge
+# overlay joins it: its OWN compose project, its own `default` network kept,
+# and ONLY its own edge network, `edge-store`, declared external, under the
+# contract's alias. ./smoke.sh brings it up after the edge.
+#
+#   store-proxy   plain HTTP on :4000, echoes what it was sent
+name: edge-smoke-stub-store
+
+services:
+  store:
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    volumes:
+      - ./stub/store.Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default: {}
+      edge-store:
+        aliases: [store-proxy]
+
+networks:
+  edge-store:
+    external: true
+    name: edge-store

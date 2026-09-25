@@ -5,7 +5,7 @@ Description=Check every 5 minutes for a merged TOON devnet edge bundle change
 OnBootSec=2min
 OnUnitActiveSec=5min
 AccuracySec=30s
-Unit=toon-edge-auto-apply.service
+Unit=toon-auto-apply-edge.service
 
 [Install]
 WantedBy=timers.target

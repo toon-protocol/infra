@@ -1,14 +1,14 @@
 # =============================================================================
 # The devnet edge — one Caddy in front of every node on the host (infra#24)
 # =============================================================================
-#   visitor ──▶ caddy :443 ──(network `edge`)──▶ <node alias>:<port>
+#   visitor ──▶ caddy :443 ──(network edge-<node>)──▶ <node alias>:<port>
 #
 # The one thing on the host bound to 80 and 443 (ADR 0001: "ports 80 and 443
 # belong to the edge, and an old bundle that still starts a proxy fights it for
 # them"). Every hostname and upstream is in ./caddy/sites.caddy.
 #
 # Bring it up FIRST, before any node's shared-edge overlay: this project
-# creates the `edge` network those overlays declare external.
+# creates the five per-node networks those overlays declare external.
 #
 #   cp .env.example .env    # then fill it in
 #   docker compose up -d
@@ -57,8 +57,13 @@ services:
       # re-issues nothing and walks into no rate limit.
       - caddy_data:/data
       - caddy_config:/config
+    # Caddy is the ONE container on every node's network; see `networks:`.
     networks:
-      - edge
+      - edge-relay
+      - edge-store
+      - edge-gas
+      - edge-gateway
+      - edge-faucet
     healthcheck:
       # The admin API answers once the config is loaded. 127.0.0.1, never
       # localhost: "localhost" in a container can resolve to ::1.
@@ -69,13 +74,29 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+# ── One network per node ─────────────────────────────────────────────────────
+# Each node's shared-edge overlay joins ONLY its own network, `external`, under
+# the aliases in ./caddy/sites.caddy, and keeps its compose `default` network
+# for its own services. There is deliberately no flat network joining the
+# nodes: on one, every node could reach every other node's connector (its
+# /admin included) and the gateway's handover door, none of which is ever
+# public. Here only Caddy sits on more than one node's network, so a node
+# reaches no other node except through a hop it pays for.
+#
+# Fixed names (`name:`), so no project prefix is added, and created by THIS
+# project. Consequence: `docker compose down` here cannot remove a network
+# while its node is still attached and says so; the containers still stop.
 networks:
-  # The network every node's shared-edge overlay joins, under this literal
-  # name. Created by THIS project (a node's overlay declares it `external`).
-  # Consequence: `docker compose down` here cannot remove it while a node is
-  # still attached and says so; the containers still stop.
-  edge:
-    name: edge
+  edge-relay:
+    name: edge-relay
+  edge-store:
+    name: edge-store
+  edge-gas:
+    name: edge-gas
+  edge-gateway:
+    name: edge-gateway
+  edge-faucet:
+    name: edge-faucet
 
 volumes:
   caddy_data:
