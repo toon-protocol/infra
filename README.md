@@ -53,6 +53,9 @@ handed over, and reads the Provider Directory off the relay.
 
 ## Also in this repo
 
+- [`edge/deploy/`](edge/deploy/README.md): the devnet host's **edge**
+  (infra#24, ADR 0001). One Caddy terminates TLS for every node on the
+  host, and it owns the `edge` network each node joins.
 - [`docs/research/local-dev-infra.md`](docs/research/local-dev-infra.md) —
   the primary-source research the sandbox was built from.
 - Branch `prototype/local-ar-io-stack` — the three throwaway prototypes

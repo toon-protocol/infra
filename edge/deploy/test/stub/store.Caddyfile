@@ -1,0 +1,18 @@
+# A stub store connector: echoes what the edge forwarded.
+{
+	admin off
+	auto_https off
+}
+
+http://:4000 {
+	# An upstream Vary, so the test can see the edge APPEND Origin to it.
+	header Vary Accept-Encoding
+
+	# Reads the whole body, as a real connector does: only a READ trips the
+	# edge's request_body cap.
+	handle /upload {
+		respond "read {http.request.body}" 200
+	}
+
+	respond "upstream=store-proxy host={host} xfp={header.X-Forwarded-Proto} path={path}" 200
+}

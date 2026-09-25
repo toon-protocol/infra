@@ -1,0 +1,82 @@
+# =============================================================================
+# The devnet edge — one Caddy in front of every node on the host (infra#24)
+# =============================================================================
+#   visitor ──▶ caddy :443 ──(network `edge`)──▶ <node alias>:<port>
+#
+# The one thing on the host bound to 80 and 443 (ADR 0001: "ports 80 and 443
+# belong to the edge, and an old bundle that still starts a proxy fights it for
+# them"). Every hostname and upstream is in ./caddy/sites.caddy.
+#
+# Bring it up FIRST, before any node's shared-edge overlay: this project
+# creates the `edge` network those overlays declare external.
+#
+#   cp .env.example .env    # then fill it in
+#   docker compose up -d
+#
+# See ./README.md.
+# =============================================================================
+
+name: edge
+
+services:
+  caddy:
+    # Built by .github/workflows/edge-image.yml from edge/Dockerfile: stock
+    # Caddy plus caddy-dns/porkbun and caddy-ratelimit. Pinned by DIGEST,
+    # never a tag: the Porkbun API key, which can rewrite every record in
+    # toonprotocol.dev, is handed to whatever binary this resolves to.
+    #
+    # PLACEHOLDER: no image has been published yet. This all-zero digest is not
+    # a real image, `docker compose pull` fails on it, and auto-apply.sh
+    # refuses it by name. Replace it with the digest the first run of
+    # edge-image.yml prints (README § "Bumping the image").
+    image: ghcr.io/toon-protocol/edge-caddy@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    environment:
+      # Where Let's Encrypt sends expiry notices.
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      # DNS-01 through Porkbun (./caddy/Caddyfile). Read at runtime from the
+      # environment; nothing else on the host uses them.
+      PORKBUN_API_KEY: ${PORKBUN_API_KEY:?set PORKBUN_API_KEY in .env}
+      PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:?set PORKBUN_SECRET_KEY in .env}
+      # Tell the Go runtime about the container's limit, so the GC works
+      # harder near it instead of being OOM-killed at it. ~80% of mem_limit.
+      GOMEMLIMIT: 200MiB
+    # Every service on the shared host carries a limit (ADR 0001): one leak
+    # must not take down the other nodes. Caddy with ten names and a few
+    # hundred open WebSockets sits well under 100 MiB; this leaves headroom
+    # for a burst of TLS handshakes and 64 MiB workload uploads in flight.
+    mem_limit: 256m
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # The DIRECTORY, not the file: a single-file bind mount pins the inode,
+      # and `git merge` replaces a changed file with a new one, so the
+      # container would go on reading the old Caddyfile forever.
+      - ./caddy:/etc/caddy:ro
+      # Certificates and the ACME account. Named, so recreating the container
+      # re-issues nothing and walks into no rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    healthcheck:
+      # The admin API answers once the config is loaded. 127.0.0.1, never
+      # localhost: "localhost" in a container can resolve to ::1.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  # The network every node's shared-edge overlay joins, under this literal
+  # name. Created by THIS project (a node's overlay declares it `external`).
+  # Consequence: `docker compose down` here cannot remove it while a node is
+  # still attached and says so; the containers still stop.
+  edge:
+    name: edge
+
+volumes:
+  caddy_data:
+  caddy_config:

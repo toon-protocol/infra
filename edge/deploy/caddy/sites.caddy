@@ -1,0 +1,246 @@
+# Every public hostname on the devnet host, and the node behind it.
+#
+# Imported by ./Caddyfile (production: ACME over DNS-01 through Porkbun) and
+# by ../test/Caddyfile (a local smoke test: Caddy's internal CA). Site blocks
+# only; nothing about certificates lives in this file.
+#
+# ── The contract (infra#24) ──────────────────────────────────────────────────
+# Each node's own repository ships a shared-edge overlay that joins its
+# containers to the external Docker network `edge` under the aliases below.
+# The ports are each container's own listening port, read off the front that
+# node used to ship. deploy/bundle.test.mjs holds this table still.
+#
+#   hostname (.toonprotocol.dev)   upstream                  node
+#   proxy.relay.devnet             relay-proxy:3000          relay (connector)
+#   relay-ws.devnet                relay-ws:7100             relay (Nostr WS)
+#   proxy.ario.devnet              store-proxy:4000          store (connector)
+#   dvm.devnet                     store-dvm:3400            store (health)
+#   proxy.gas.devnet               gas-proxy:4000            gas   (connector)
+#   gas.devnet                     gas-web:3400              gas   (health)
+#   proxy.gateway.devnet           gateway-proxy:4000        gateway (connector)
+#   gw.devnet, *.gw.devnet         https://gateway-gw:8443   gateway (workloads)
+#   faucet.devnet                  faucet:3500               faucet
+#
+# ── What Caddy already does that the nginx fronts spelled out ────────────────
+# * `proxy_set_header Host $host`: reverse_proxy passes Host through untouched
+#   to a plain-HTTP upstream. (Not to an HTTPS one: see the gateway below.)
+# * `X-Forwarded-Proto https` and `X-Forwarded-For`: reverse_proxy sets both
+#   from the connection it terminated. (It ignores a client-sent
+#   X-Forwarded-For, where nginx's $proxy_add_x_forwarded_for appended to it:
+#   stricter, and no upstream here trusts that header for anything.)
+# * `Upgrade`/`Connection` for WebSockets: reverse_proxy handles the upgrade.
+# * `resolver 127.0.0.11 valid=10s`: Caddy resolves an upstream name per dial,
+#   so a recreated node container heals without reloading the edge.
+# * `proxy_read_timeout 1h` / `proxy_send_timeout 1h`: reverse_proxy sets no
+#   upstream read or write timeout by default, so the ceiling is lifted rather
+#   than lowered. Nothing on the host relied on being cut off at 1h.
+# * `return 301 https://…` on :80: Caddy's automatic HTTP->HTTPS redirect.
+# * `/.well-known/acme-challenge/`: Caddy's own ACME; see ./Caddyfile.
+#
+# ── What is carried over explicitly, below ───────────────────────────────────
+# * `location ^~ /admin { return 404; }`  -> `respond /admin* 404`
+# * `client_max_body_size`                 -> `request_body { max_size }`
+# * `limit_req`                            -> `import rate_limited…`
+# * the store's and gas's `location = /ilp/identity` CORS rule
+# * the gateway's TLS upstream hop (`proxy_ssl_*`)
+# Anything the old fronts did NOT do (the relay had no /admin rule, no body
+# limit and no rate limit) is not added here: this edge moves nodes, it does
+# not re-police them.
+
+# ── Snippets ─────────────────────────────────────────────────────────────────
+
+# nginx `limit_req zone=X rate=R burst=B nodelay`, as a sliding window of B
+# events per client address over 2s: the same burst, the same average rate
+# (B = 2R on every front here). Differences worth knowing: nginx answered an
+# excess request 503, caddy-ratelimit answers 429 with Retry-After; and nginx
+# shared one zone across a node's two names, while caddy-ratelimit requires a
+# globally unique zone name, so each hostname gets its own.
+#   args: zone name, events per 2s
+(rate_limited) {
+	rate_limit {
+		zone {args[0]} {
+			key {remote_host}
+			events {args[1]}
+			window 2s
+		}
+	}
+}
+
+# The same, exempting one path.
+#   args: zone name, events per 2s, the exempt path
+(rate_limited_except) {
+	rate_limit {
+		zone {args[0]} {
+			match {
+				not path {args[2]}
+			}
+			key {remote_host}
+			events {args[1]}
+			window 2s
+		}
+	}
+}
+
+# store/deploy/nginx/node.conf.template and gas-station/deploy/nginx/
+# node.conf.template: `location = /ilp/identity` always reaches the node's
+# connector, on EITHER of its names, and carries
+#   add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
+#   add_header Vary "Origin" always;
+# with DOMAIN=devnet.toonprotocol.dev. `defer` applies the headers after the
+# upstream's own are copied, so Vary is appended to rather than replaced.
+# Each site then routes the path itself: `reverse_proxy /ilp/identity …`.
+(ilp_identity_cors) {
+	header /ilp/identity {
+		defer
+		Access-Control-Allow-Origin "https://proxy.devnet.toonprotocol.dev"
+		+Vary Origin
+	}
+}
+
+# ── relay ────────────────────────────────────────────────────────────────────
+# relay/deploy/Caddyfile: plain `reverse_proxy` to both, nothing else. The
+# relay's write port (3100) is deliberately absent, as it was there: it is the
+# payment-oblivious surface, and a public path to it is a free door.
+#
+# `stream_close_delay` on every upstream: a Caddy reload otherwise closes every
+# open WebSocket at once, where nginx's reload let old workers drain. A reload
+# is what auto-apply.sh does on every merged change to this directory.
+
+proxy.relay.devnet.toonprotocol.dev {
+	reverse_proxy relay-proxy:3000 {
+		stream_close_delay 5m
+	}
+}
+
+relay-ws.devnet.toonprotocol.dev {
+	reverse_proxy relay-ws:7100 {
+		stream_close_delay 5m
+	}
+}
+
+# ── store ────────────────────────────────────────────────────────────────────
+# store/deploy/nginx/node.conf.template: one server block for both names, so
+# every rule applies to both, including /ilp/identity reaching the connector
+# from dvm.devnet too. client_max_body_size 4m; limit_req 200r/s burst=400.
+
+proxy.ario.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited store_proxy 400
+	request_body {
+		max_size 4MiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity store-proxy:4000
+	reverse_proxy store-proxy:4000 {
+		stream_close_delay 5m
+	}
+}
+
+dvm.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited store_dvm 400
+	request_body {
+		max_size 4MiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity store-proxy:4000
+	reverse_proxy store-dvm:3400 {
+		stream_close_delay 5m
+	}
+}
+
+# ── gas ──────────────────────────────────────────────────────────────────────
+# gas-station/deploy/nginx/node.conf.template: the store's shape, with
+# client_max_body_size 512k ("a wire transaction or a forward request is
+# kilobytes"). The gas station's POST /gas has no public path, as there: only
+# the connector reaches it, as the termination of a paid route.
+
+proxy.gas.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited gas_proxy 400
+	request_body {
+		max_size 512KiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity gas-proxy:4000
+	reverse_proxy gas-proxy:4000 {
+		stream_close_delay 5m
+	}
+}
+
+gas.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited gas_web 400
+	request_body {
+		max_size 512KiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity gas-proxy:4000
+	reverse_proxy gas-web:3400 {
+		stream_close_delay 5m
+	}
+}
+
+# ── gateway ──────────────────────────────────────────────────────────────────
+# gateway/deploy/nginx/node.conf.template.
+
+# The sealed ILP edge: /admin 404, client_max_body_size 1m, limit_req.
+proxy.gateway.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited gateway_proxy 400
+	request_body {
+		max_size 1MiB
+	}
+	reverse_proxy gateway-proxy:4000 {
+		stream_close_delay 5m
+	}
+}
+
+# Every workload, plus the bare domain (which the gateway answers 503
+# `toon-gateway-reason: no_grant`: a grant is held for a label, never for the
+# domain). The wildcard is why ./Caddyfile validates over DNS-01: a label is
+# the base32 of a workload id nobody can predict, so no per-name certificate
+# can exist.
+#
+# The upstream is HTTPS on purpose. The gateway computes the
+# X-Forwarded-Proto it hands a workload from its OWN listener, not a header,
+# so a plain-HTTP hop would tell every workload `http`. Its certificate is
+# self-signed (gateway/deploy/bootstrap.sh; SAN includes `gateway`), never
+# leaves the host, and has no CA to verify against: nginx left
+# `proxy_ssl_verify` off and sent SNI `gateway` (`proxy_ssl_name $upstream`),
+# and so does this. client_max_body_size 64m (a workload is an arbitrary HTTP
+# app: uploads, long polls and WebSockets all cross this hop).
+gw.devnet.toonprotocol.dev, *.gw.devnet.toonprotocol.dev {
+	import rate_limited gateway_workloads 400
+	request_body {
+		max_size 64MiB
+	}
+	reverse_proxy https://gateway-gw:8443 {
+		# nginx: `proxy_set_header Host $host` ("the gateway keys everything
+		# off Host"). Caddy passes Host through to a plain-HTTP upstream but
+		# REWRITES it to the upstream's own address for an HTTPS one, so
+		# without this line the gateway sees `gateway-gw` for every workload
+		# and answers no_grant. Found by ../test/smoke.sh.
+		header_up Host {host}
+		stream_close_delay 5m
+		transport http {
+			tls_insecure_skip_verify
+			tls_server_name gateway
+		}
+	}
+}
+
+# ── faucet ───────────────────────────────────────────────────────────────────
+# connector/infra/linode-faucet/nginx/node.conf.template: limit_req 30r/s
+# burst=60 on everything but `location = /health`; client_max_body_size 1m.
+# (nginx's /health location also set no X-Forwarded-* headers; Caddy sets them
+# on every request, which the faucet ignores on /health.)
+faucet.devnet.toonprotocol.dev {
+	import rate_limited_except faucet 60 /health
+	request_body {
+		max_size 1MiB
+	}
+	reverse_proxy faucet:3500 {
+		stream_close_delay 5m
+	}
+}

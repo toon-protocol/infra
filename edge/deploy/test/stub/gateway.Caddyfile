@@ -1,0 +1,21 @@
+# A stub workload gateway: TLS on :8443, one granted label, and the real
+# gateway's 503 `toon-gateway-reason: no_grant` for every other name.
+{
+	admin off
+	auto_https off
+}
+
+https://:8443 {
+	tls /tls/internal.crt /tls/internal.key
+
+	@granted host workload.gw.devnet.toonprotocol.dev
+	handle @granted {
+		respond "upstream=gateway-gw host={host} xfp={header.X-Forwarded-Proto} sni={http.request.tls.server_name}" 200
+	}
+	handle {
+		header toon-gateway-reason no_grant
+		# Diagnostics only: what reached the stub.
+		header x-stub-saw "host={host} sni={http.request.tls.server_name}"
+		respond 503
+	}
+}

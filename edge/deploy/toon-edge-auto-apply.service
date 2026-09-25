@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply the merged TOON devnet edge bundle (fast-forward, compose up, caddy reload)
+Documentation=https://github.com/toon-protocol/infra/blob/main/edge/deploy/README.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/infra/edge/deploy/auto-apply.sh
+# The script takes its own flock; this only stops systemd stacking runs. An
+# image pull, `up -d` and a 120s health wait fit comfortably.
+TimeoutStartSec=600

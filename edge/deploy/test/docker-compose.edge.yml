@@ -1,0 +1,19 @@
+# The edge, as ../docker-compose.yml runs it, with three changes for a local
+# smoke test (./smoke.sh) and nothing else:
+#   * the image is the one built from edge/Dockerfile on this machine, since
+#     the production pin may not exist yet;
+#   * ports are loopback-only and unprivileged, so the test fights nothing;
+#   * the Caddyfile is ./Caddyfile: Caddy's internal CA instead of ACME. The
+#     SITES are production's own ../caddy/sites.caddy, mounted unchanged.
+services:
+  caddy:
+    image: toon-edge-caddy:local
+    ports: !override
+      - '127.0.0.1:18080:80'
+      - '127.0.0.1:18443:443'
+    volumes: !override
+      - ./caddy:/etc/caddy:ro
+      - ./test/Caddyfile:/etc/caddy-test/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    command: ['caddy', 'run', '--config', '/etc/caddy-test/Caddyfile', '--adapter', 'caddyfile']
