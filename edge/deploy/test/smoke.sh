@@ -171,7 +171,7 @@ fi
 echo "── the host contract"
 cid=$("${EDGE[@]}" ps -q caddy)
 out=$(docker inspect "$cid" --format '{{.HostConfig.Memory}}')
-expect "caddy runs under its mem_limit (256m)" "$out" "268435456"
+expect "caddy runs under its mem_limit (128m)" "$out" "134217728"
 out=$(docker inspect "$cid" --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}')
 for net in "${NETWORKS[@]}"; do
   expect "caddy is on $net" "$out" "$net "
