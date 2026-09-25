@@ -4,12 +4,21 @@ status: accepted
 
 # The devnet is one host; every node keeps its own connector
 
-The devnet has to cost under $25 a month, and six Linodes (four nanodes and two
-4 GB boxes, about $68) did not. So the relay, store, gas station, workload
-gateway and faucet nodes all run on one host — the relay's Linode, resized to
-2 GB — behind one edge that this repo owns, and the devnet runs no compute
-provider of its own. We co-located the nodes rather than merging them behind a
-single connector: a node's seal key is pinned by what it publishes (a relay's
+> **Amended 2026-09-25**: the numbers below were wrong at the time this ADR
+> was written. All six Linodes were `g6-nanode-1` (961 MB) except the
+> provider, a `g6-standard-2` (4 GB) — about $49/month, not $68, and the
+> faucet was a nanode, not a 4 GB box. And at cutover the host was **not**
+> resized to 2 GB as planned below: memory measured on the relay's own
+> nanode showed the whole fleet fit on it as it stood, so it stayed a
+> $5/month nanode. See `docs/devnet.md` for the shape that was actually
+> deployed.
+
+The devnet has to cost under $25 a month, and six Linodes (five nanodes and
+one 4 GB box — the provider — about $49) did not. So the relay, store, gas
+station, workload gateway and faucet nodes all run on one host — the relay's
+Linode, resized to 2 GB — behind one edge that this repo owns, and the devnet
+runs no compute provider of its own. We co-located the nodes rather than
+merging them behind a single connector: a node's seal key is pinned by what it publishes (a relay's
 information document, TOON_Network ADR 0024; a gateway's URL, ADR 0027; ADR 0013
 has the gateway reached through its own connector), so merging would mean
 re-keying and republishing all of it, and it would turn `g.toon.relay.store`

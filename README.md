@@ -36,11 +36,13 @@ own peered connector in the production shape).
 
 ## The public devnet
 
-**[`docs/devnet.md`](docs/devnet.md)** is the other network: a small fleet of
-Linodes on public testnets that anybody can reach and that the console leases
-from — the store, the relay, the gas station, the faucet, and since
-TOON_Network#86 a **compute provider** and a **Workload Gateway**. Every box is
-GitOps: its own repository holds its `deploy/` bundle and a timer on the box
+**[`docs/devnet.md`](docs/devnet.md)** is the other network: relay, store, gas
+station and **Workload Gateway** nodes, plus the faucet, on public testnets
+that anybody can reach and that the console leases from. Since 2026-09-25
+(infra#25) they all run on **one host** behind one **edge** — the relay's
+existing Linode, about $5/month, not resized — and the devnet runs no compute
+provider of its own any more. Every node is still GitOps: its own repository
+holds its `deploy/` bundle, a shared-edge overlay, and a per-node timer that
 applies what merged.
 
 ```bash
