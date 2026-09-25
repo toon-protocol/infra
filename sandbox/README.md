@@ -2361,6 +2361,23 @@ one network. Its gas payer is anvil-mnemonic index 22, funded by the seed. It of
 `receiverAuthorizer` can refund a connector's earned-but-unclaimed value to the payer, so a
 connector always names its own (ADR 0074 decision 5).
 
+**The same image serves the devnet.** With nothing set it is the sandbox's facilitator. Point it at
+a real network and it **fails closed**: off chain 31337 there is no default RPC and no default key.
+The anvil key is public, so defaulting to it anywhere else would be signing with a key the whole
+world holds. `x402-facilitator/config.mjs` owns the rules, and `config.test.mjs` pins them.
+
+| variable | sandbox default | off the sandbox |
+|---|---|---|
+| `X402_NETWORK` | `eip155:31337` | e.g. `eip155:84532` (Base Sepolia) |
+| `EVM_RPC_URL` | `http://anvil:8545` | **required** |
+| `FACILITATOR_EVM_PRIVATE_KEY_FILE` / `FACILITATOR_EVM_PRIVATE_KEY` | index 22, funded by the seed | **required** — one or the other, never both; prefer the file |
+| `PORT` | `4022` | `4022` |
+
+`/health` is 503 in three cases, each of which would otherwise surface only as a failed deposit:
+the RPC serves a different chain than `X402_NETWORK` names, `x402BatchSettlement` is not on the
+chain, or the gas payer holds no ETH. Why the devnet runs this image rather than x402.org's hosted
+facilitator is connector `docs/research/x402-devnet-facilitators.md`.
+
 **`make smoke-x402`** is the whole path, and runs inside `make smoke` and `make smoke-payments`:
 a fresh wallet holding USDC and **no ETH** signs one ERC-3009 authorization, built by the published
 `@x402/evm` client; the facilitator verifies it, relays the deposit and pays the gas; and the
