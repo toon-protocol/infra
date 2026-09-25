@@ -1,9 +1,11 @@
 # EVM bytecode artifacts
 
-Three hex blobs the sandbox places on its own anvil. They are here for the same
+Hex blobs the sandbox places on its own anvil. They are here for the same
 reason the `.so` files next door are: so a fresh clone needs no network dumps.
-`../../scripts/fetch-artifacts.sh` regenerates all three, and
-`../../scripts/seed-toon-evm-amm.sh` is the only consumer.
+`../../scripts/fetch-artifacts.sh` regenerates all of them. The first three are
+the ANYONE asset layer, consumed by `../../scripts/seed-toon-evm-amm.sh`; the
+rest are the x402 layer, consumed by `../../scripts/seed-x402.sh` (see
+"The x402 layer" below).
 
 Every one of them is **the real deployed contract**, not a reimplementation.
 That is the whole point: the connector's TWAP rate source
@@ -65,3 +67,34 @@ different address — so a substituted factory fails the bring-up by name.
 They should not need refreshing. Mainnet bytecode at a fixed address does not
 change, and the Uniswap version is pinned. If you *do* refresh and an address in
 `../../conf/amm-topology.conf` moves, the seed script will say so.
+
+## The x402 layer (toon-protocol/infra#23)
+
+Copied from **Base Sepolia**, because the published `@x402/evm` package
+hardcodes the addresses x402 deploys its batch-settlement stack to, and a
+stock facilitator only works where the contracts are exactly there. Every
+runtime blob below is placed at its Base Sepolia address with `anvil_setCode`;
+none needs storage, and `seed-x402.sh` says why for each.
+
+| file | what it is | where it comes from |
+|---|---|---|
+| `x402BatchSettlement.runtime.hex` | RUNTIME bytecode of x402's channel contract | `eth_getCode` at `0x4020074e9dF2ce1deE5A9C1b5c3f541D02a10003` on Base Sepolia |
+| `ERC3009DepositCollector.runtime.hex` | RUNTIME bytecode of the ERC-3009 deposit collector | `eth_getCode` at `0x4020806089470a89826cB9fB1f4059150b550004` on Base Sepolia |
+| `Permit2DepositCollector.runtime.hex` | RUNTIME bytecode of the Permit2 deposit collector | `eth_getCode` at `0x4020425FAf3B746C082C2f942b4E5159887B0005` on Base Sepolia |
+| `Permit2.runtime.hex` | RUNTIME bytecode of Uniswap's Permit2 | `eth_getCode` at `0x000000000022D473030F116dDEE9F6B43aC78BA3` on Base Sepolia |
+| `Multicall3.runtime.hex` | RUNTIME bytecode of Multicall3 | `eth_getCode` at `0xcA11bde05977b3631167028862bE2a173976CA11` on Base Sepolia |
+| `SignatureChecker.runtime.hex` | RUNTIME bytecode of Circle's `SignatureChecker` library, which FiatToken v2.2 links | `eth_getCode` at `0xbA3b60c21e28C41df4bABd90f228e1D368627DA6` on Base Sepolia |
+| `FiatTokenV2_2.creation.hex` | CREATION bytecode of Circle's FiatToken v2.2 implementation | the input of Base Sepolia tx `0x6dbb9d75…52fe1`, which deployed the implementation behind Base Sepolia USDC |
+| `FiatTokenProxy.creation.hex` | CREATION bytecode of Circle's `FiatTokenProxy`, with its one constructor argument stripped | the input of Base Sepolia tx `0xd835c0ab…9f3`, which deployed Base Sepolia USDC (`0x036CbD53…CF7e`) |
+
+The FiatToken is creation code for the same reason the Uniswap factory is: its
+initialisers write the state that makes it work, so it is deployed and
+initialised rather than placed. The library it links is baked into its creation
+code at `0xbA3b…7DA6`, which is why that one address has to match.
+
+A provenance check you can run: `cast code <address> --rpc-url https://sepolia.base.org`
+against any runtime file above is byte-identical, and `x402BatchSettlement`'s
+`VOUCHER_TYPEHASH()` on the sandbox answers
+`0x1e1bd6ff84c3e0d9029a292b212e039c0ca97ec497c55191a4a5874294609a69`, the
+keccak of `Voucher(bytes32 channelId,uint128 maxClaimableAmount)` — `seed-x402.sh`
+refuses to report success otherwise.
