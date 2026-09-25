@@ -2085,9 +2085,13 @@ docker rm -f probe
 ```
 
 The address that comes back is an `anon` exit, and it is not this host's.
-(`nslookup` works too, but note the daemon answers **AAAA with NXDOMAIN** —
-musl's resolver, and so an alpine image, reads that as "no such host". A glibc
-image resolves fine. It is a property of the daemon, not of this sandbox.)
+`nslookup`/`getent hosts` work too, on any image, musl (Alpine, BusyBox)
+included (TOON_Network#166): the daemon's own DNSPort answers an AAAA query
+with NXDOMAIN even when the name has a good A record, which used to break a
+musl resolver's parallel A/AAAA lookup outright, but port 53 now goes to
+`dns-shim-hs` — on the egress network, at `10.203.0.3` — which forwards A to
+the DNSPort unchanged and answers AAAA itself with NOERROR and no records.
+provider's `src/dns_shim.rs` has the full account.
 
 **A hidden lease is three containers**, not one (TOON_Network #41):
 `toon-<id>-egress` owns the network namespace on `hs-egress` and sets the single

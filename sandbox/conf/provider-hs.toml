@@ -154,9 +154,10 @@ cookie_file = "/var/lib/anon/control/control_auth_cookie"
 # and points its resolver at the gateway. The network is `hs-egress` in
 # docker-compose.yml — `internal: true`, so Docker gives it no NAT and installs
 # no default route at all — and 10.203.0.2 is `anon-hs`'s fixed address on it,
-# whose PREROUTING rules REDIRECT the workload's TCP to the TransPort and its
-# DNS to the DNSPort. Direct egress is dropped by the NETWORK, not by anything
-# the image could ignore.
+# whose PREROUTING rules REDIRECT the workload's TCP to the TransPort and hand
+# its DNS to `dns-shim-hs` (TOON_Network#166; `anon-hs`'s own DNSPort answers
+# an AAAA query with NXDOMAIN, which the shim works around). Direct egress is
+# dropped by the NETWORK, not by anything the image could ignore.
 #
 # The name is what DOCKER sees — the compose network `hs-egress` with this
 # project's prefix on it — not a compose service key: the provider shells out to
