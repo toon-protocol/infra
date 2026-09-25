@@ -37,12 +37,13 @@ services:
       PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:?set PORKBUN_SECRET_KEY in .env}
       # Tell the Go runtime about the container's limit, so the GC works
       # harder near it instead of being OOM-killed at it. ~80% of mem_limit.
-      GOMEMLIMIT: 200MiB
+      GOMEMLIMIT: 100MiB
     # Every service on the shared host carries a limit (ADR 0001): one leak
-    # must not take down the other nodes. Caddy with ten names and a few
-    # hundred open WebSockets sits well under 100 MiB; this leaves headroom
-    # for a burst of TLS handshakes and 64 MiB workload uploads in flight.
-    mem_limit: 256m
+    # must not take down the other nodes. Not yet running to measure idle
+    # (infra#25 step 2); the old per-box caddy/nginx it replaces used 7-16 MB.
+    # 128 MiB is generous headroom on the 961 MB nanode host for a burst of
+    # TLS handshakes and 64 MiB workload uploads in flight.
+    mem_limit: 128m
     ports:
       - '80:80'
       - '443:443'
