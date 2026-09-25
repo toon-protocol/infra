@@ -3,7 +3,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node --test \"scripts/**/*.test.mjs\""
+    "test": "node --test \"scripts/**/*.test.mjs\" \"x402-facilitator/*.test.mjs\""
   },
   "dependencies": {
     "@ar.io/sdk": "^4.3.0",

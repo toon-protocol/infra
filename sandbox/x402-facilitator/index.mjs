@@ -1,11 +1,19 @@
-// The sandbox's x402 facilitator (toon-protocol/infra#23, connector ADR 0074).
+// The sandbox's x402 facilitator (toon-protocol/infra#23, connector ADR 0074),
+// and the devnet's.
 //
 // A stock facilitator, not a TOON one: it is the published `@x402/core` and
 // `@x402/evm` packages, wired the way x402's own e2e facilitator wires them
-// (x402 `e2e/facilitators/typescript/index.ts` at 0cb1a1f0), reduced to the one
-// scheme and the one network the sandbox needs — `batch-settlement` on the
-// local anvil, `eip155:31337`. It works unmodified because `seed-x402.sh` put
-// the batch-settlement contracts at the addresses `@x402/evm` hardcodes.
+// (x402 `e2e/facilitators/typescript/index.ts` at 0cb1a1f0), reduced to one
+// scheme on one network — `batch-settlement`, on the local anvil
+// (`eip155:31337`) by default, or on whatever `X402_NETWORK` names (the devnet
+// runs it on Base Sepolia, `eip155:84532`). On anvil it works unmodified because
+// `seed-x402.sh` put the contracts at the addresses `@x402/evm` hardcodes; on
+// Base Sepolia x402 deployed them there itself.
+//
+// The devnet runs this rather than x402.org's hosted facilitator for the
+// reasons in connector `docs/research/x402-devnet-facilitators.md`: the hosted
+// one runs this same code, carries a "testing only" disclaimer and one shared
+// signer, and has not been seen relaying a batch-settlement deposit.
 //
 // It relays a client's deposit and pays the gas for it, and that is all a
 // TOON connector ever asks of it. It deliberately advertises NO
@@ -14,30 +22,30 @@
 // always names its own. x402.org's hosted facilitator advertises none on Base
 // Sepolia either, so a client written against it sees the same `/supported`.
 //
-// Configuration is environment only, and every variable has the sandbox's
-// value as its default so the compose service needs to set nothing:
-//   EVM_RPC_URL                    anvil, as the compose network sees it
-//   FACILITATOR_EVM_PRIVATE_KEY    anvil-mnemonic index 22 — pays the gas; no
-//                                  role. seed-x402.sh funds it.
-//   PORT                           4022, x402's own facilitator default
+// Configuration is environment only, read by config.mjs, which says what each
+// variable means. With nothing set it is the sandbox's facilitator, so the
+// compose service needs to set nothing; off the sandbox chain there is no
+// default RPC and no default key, and it refuses to start without them.
+import { readFileSync } from "node:fs";
 import express from "express";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { toFacilitatorEvmSigner } from "@x402/evm";
 import { BatchSettlementEvmScheme } from "@x402/evm/batch-settlement/facilitator";
 import { createWalletClient, defineChain, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { readConfig } from "./config.mjs";
 
-const NETWORK = "eip155:31337";
-const RPC_URL = process.env.EVM_RPC_URL ?? "http://anvil:8545";
-const PORT = Number(process.env.PORT ?? 4022);
-// anvil-mnemonic index 22, 0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE.
-const PRIVATE_KEY =
-  process.env.FACILITATOR_EVM_PRIVATE_KEY ??
-  "0x224b7eb7449992aac96d631d9677f7bf5888245eef6d6eeda31e62d2f29a83e4";
+const {
+  network: NETWORK,
+  chainId: CHAIN_ID,
+  rpcUrl: RPC_URL,
+  privateKey: PRIVATE_KEY,
+  port: PORT,
+} = readConfig(process.env, (path) => readFileSync(path, "utf8"));
 
 const chain = defineChain({
-  id: 31337,
-  name: "TOON sandbox anvil",
+  id: CHAIN_ID,
+  name: NETWORK,
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
 });
@@ -89,14 +97,22 @@ for (const [path, run] of [
 
 app.get("/supported", (_req, res) => res.json(facilitator.getSupported()));
 
-// Healthy means the chain answers AND the settlement contract is on it: a
-// facilitator in front of an anvil whose seed has not landed would advertise
-// batch-settlement and then fail every deposit.
+// Healthy means three things, each of which would otherwise surface only as a
+// failed deposit: the RPC is the chain X402_NETWORK names (a Base Sepolia
+// facilitator pointed at a mainnet RPC would advertise one network and settle
+// on another), the settlement contract is on it (an anvil whose seed has not
+// landed), and the gas payer holds gas to pay with (a devnet key nobody funded).
 app.get("/health", async (_req, res) => {
   try {
+    const rpcChainId = await client.getChainId();
+    if (rpcChainId !== CHAIN_ID) {
+      throw new Error(`EVM_RPC_URL serves chain ${rpcChainId}, not ${NETWORK}`);
+    }
     const code = await client.getCode({ address: "0x4020074e9dF2ce1deE5A9C1b5c3f541D02a10003" });
     if (!code || code === "0x") throw new Error("x402BatchSettlement is not on the chain");
-    res.json({ status: "ok", network: NETWORK, facilitator: account.address });
+    const gas = await client.getBalance({ address: account.address });
+    if (gas === 0n) throw new Error(`the gas payer ${account.address} holds no ETH`);
+    res.json({ status: "ok", network: NETWORK, facilitator: account.address, gasWei: gas.toString() });
   } catch (error) {
     res.status(503).json({ status: "unavailable", error: String(error) });
   }
