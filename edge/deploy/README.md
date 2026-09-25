@@ -82,10 +82,6 @@ already uses.
 image, because the Porkbun key, which can rewrite the whole zone, is handed to
 it. `docker-compose.yml` pins it **by digest**.
 
-> **PLACEHOLDER.** No image has been published yet.
-> `docker-compose.yml` pins `sha256:000…000`, which is not a real image.
-> `auto-apply.sh` refuses it by name. Replace it before the first deploy.
-
 ### Bumping the image
 
 1. Merge a change under `edge/` to `main`. `edge-image.yml` builds it, pushes
