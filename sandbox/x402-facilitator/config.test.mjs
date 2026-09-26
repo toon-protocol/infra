@@ -76,3 +76,14 @@ test("a network that is not eip155:<chain id> is refused", () => {
     assert.throws(() => readConfig({ X402_NETWORK: network }, noFiles), /eip155:<chain id>/, network);
   }
 });
+
+test("an EVM_RPC_URL that is not an http(s) URL is refused at start", () => {
+  for (const url of ["sepolia.base.org", "ws://anvil:8545", "not a url"]) {
+    assert.throws(() => readConfig({ EVM_RPC_URL: url }, noFiles), /EVM_RPC_URL/, url);
+  }
+});
+
+test("the RPC's host is kept apart from its URL, which may carry an API key", () => {
+  const config = readConfig({ EVM_RPC_URL: "https://base-sepolia.example.com/v2/SECRET" }, noFiles);
+  assert.equal(config.rpcHost, "base-sepolia.example.com");
+});

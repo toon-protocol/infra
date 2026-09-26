@@ -23,9 +23,11 @@
 // Sepolia either, so a client written against it sees the same `/supported`.
 //
 // Configuration is environment only, read by config.mjs, which says what each
-// variable means. With nothing set it is the sandbox's facilitator, so the
-// compose service needs to set nothing; off the sandbox chain there is no
-// default RPC and no default key, and it refuses to start without them.
+// variable means. With nothing set it is the sandbox's facilitator, but the
+// compose service still names its chain and key explicitly (infra#33), so the
+// sandbox's configuration reads the same as the devnet's; off the sandbox chain
+// there is no default RPC and no default key, and it refuses to start without
+// them.
 import { readFileSync } from "node:fs";
 import express from "express";
 import { x402Facilitator } from "@x402/core/facilitator";
@@ -39,6 +41,7 @@ const {
   network: NETWORK,
   chainId: CHAIN_ID,
   rpcUrl: RPC_URL,
+  rpcHost: RPC_HOST,
   privateKey: PRIVATE_KEY,
   port: PORT,
 } = readConfig(process.env, (path) => readFileSync(path, "utf8"));
@@ -119,6 +122,6 @@ app.get("/health", async (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`x402 facilitator: batch-settlement on ${NETWORK} via ${RPC_URL}, port ${PORT}`);
+  console.log(`x402 facilitator: batch-settlement on ${NETWORK} via ${RPC_HOST}, port ${PORT}`);
   console.log(`  gas paid by ${account.address}; no receiverAuthorizer offered`);
 });
