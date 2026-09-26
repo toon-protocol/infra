@@ -35,6 +35,15 @@ export function readConfig(env, readFile) {
   if (!rpcUrl) {
     throw new Error(`EVM_RPC_URL must be set for ${network}; only the sandbox defaults it`);
   }
+  // Checked here rather than on first use, so a typo stops the start instead
+  // of surfacing as a failed deposit. Never echoed: a hosted RPC URL often
+  // carries its API key, so only its host is logged (`rpcHost`).
+  let rpcHost;
+  try {
+    const url = new URL(rpcUrl);
+    if (url.protocol === "http:" || url.protocol === "https:") rpcHost = url.host;
+  } catch {}
+  if (!rpcHost) throw new Error("EVM_RPC_URL must be an http(s) URL");
 
   if (env.FACILITATOR_EVM_PRIVATE_KEY && env.FACILITATOR_EVM_PRIVATE_KEY_FILE) {
     throw new Error("set FACILITATOR_EVM_PRIVATE_KEY or FACILITATOR_EVM_PRIVATE_KEY_FILE, not both");
@@ -60,6 +69,7 @@ export function readConfig(env, readFile) {
     network,
     chainId: Number(match[1]),
     rpcUrl,
+    rpcHost,
     privateKey: key,
     port: Number(env.PORT ?? 4022),
   };

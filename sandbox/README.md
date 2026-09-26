@@ -2364,7 +2364,10 @@ connector always names its own (ADR 0074 decision 5).
 **The same image serves the devnet.** With nothing set it is the sandbox's facilitator. Point it at
 a real network and it **fails closed**: off chain 31337 there is no default RPC and no default key.
 The anvil key is public, so defaulting to it anywhere else would be signing with a key the whole
-world holds. `x402-facilitator/config.mjs` owns the rules, and `config.test.mjs` pins them.
+world holds. `x402-facilitator/config.mjs` owns the rules, and `config.test.mjs` pins them. The
+sandbox's compose service still sets `X402_NETWORK`, `EVM_RPC_URL` and the key explicitly, so it
+reads like the devnet's; `docker compose up` needs nothing from the operator. `EVM_RPC_URL` must be
+an http(s) URL, and only its host is logged, since a hosted RPC URL often carries its API key.
 
 | variable | sandbox default | off the sandbox |
 |---|---|---|
