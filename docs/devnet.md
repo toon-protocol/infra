@@ -164,6 +164,16 @@ runs a whole 0-ETH deposit through it, into a channel to the relay.
 It does nothing for Solana: there the receiving connector's operator sponsors
 the channel open.
 
+Since 2026-09-27 the **relay** accepts these channels on both chains
+(toon-protocol/relay#172, infra#38): its `GET /ilp` publishes
+`batchSettlements` for Base Sepolia and for Solana devnet, and Solana's entry
+names the `sponsorEndpoint` the relay opens channels through, with a 1 USDC
+`minDeposit`. It is the only node that does; a voucher sent to any other is
+refused `batch_settlement_not_offered`. The relay pays each sponsored open's
+fee and rent from its Solana settlement key, so that key's SOL is now spent by
+strangers' opens as well as by settlement — top it up from the dev funder when
+it runs low. The sandbox does not accept them yet (infra#39).
+
 ## Finishing a node that is waiting on gas
 
 Each new node needs a small amount of devnet SOL on the Solana settlement key
