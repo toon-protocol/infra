@@ -43,7 +43,7 @@ describe('the far side of the edge contract', () => {
     assert.match(top, new RegExp(`^  ${NETWORK}:\\n    external: true\\n    name: ${NETWORK}$`, 'm'));
   });
 
-  it('keeps its own default network, and joins no other node\'s', () => {
+  it('keeps its own default network, and joins no node\'s', () => {
     assert.match(compose(), /^      default: \{\}$/m);
     const joined = [...compose().matchAll(/^    name: (\S+)$/gm)].map((m) => m[1]);
     assert.deepEqual(joined, [NETWORK]);
@@ -132,12 +132,12 @@ describe('GitOps', () => {
     assert.match(read('README.md'), /toon-auto-apply-onboarder\.service toon-auto-apply-onboarder\.timer/);
   });
 
-  it('shares /root/infra with the edge\'s apply, so both lock the checkout around git, and only there', () => {
+  it('shares /root/infra with the edge\'s apply, so both lock the checkout around git, dirty check included, and only there', () => {
     const script = read('auto-apply.sh');
     assert.match(script, /^exec 8>\/var\/lock\/toon-infra-checkout\.lock$/m);
     const locked = script.indexOf('flock -w 120 8');
     const unlocked = script.indexOf('flock -u 8');
-    assert.ok(locked > 0 && locked < script.indexOf('git fetch'));
+    assert.ok(locked > 0 && locked < script.indexOf('git diff --quiet'), 'the dirty check is outside the lock');
     assert.ok(unlocked > script.indexOf('git merge --ff-only') && unlocked < script.indexOf('docker compose'));
   });
 

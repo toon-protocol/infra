@@ -15,8 +15,8 @@
 # 1. Its own units and lock: toon-auto-apply-onboarder.{service,timer} and
 #    /var/lock/toon-auto-apply-onboarder.lock.
 # 2. It shares /root/infra with the edge, so both also take
-#    /var/lock/toon-infra-checkout.lock around the fetch and fast-forward, and
-#    only there: two timers firing together would otherwise race on git's own
+#    /var/lock/toon-infra-checkout.lock around the dirty check, fetch and
+#    fast-forward, and only there: two timers firing together would otherwise race on git's own
 #    index.lock. Whichever runs second finds HEAD already moved and applies it,
 #    because .applied, not HEAD, is what says this bundle is applied.
 # 3. No reload step. Everything the service reads is in its compose definition
@@ -41,14 +41,17 @@ fi
 exec 9>/var/lock/toon-auto-apply-onboarder.lock
 flock -n 9 || { echo "another onboarder apply is already running; leaving it alone"; exit 0; }
 
+# The checkout is shared with the other bundle applied from /root/infra, so the
+# dirty check is inside this lock too: `git diff` can take git's index.lock,
+# and a check made mid-fast-forward would see a half-moved tree.
+exec 8>/var/lock/toon-infra-checkout.lock
+flock -w 120 8 || { echo "FAILED: the infra checkout stayed locked for 120s (the edge's apply?)"; exit 1; }
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "REFUSING: the working tree at $REPO_DIR is dirty."
   echo "Someone is editing on the host. Commit, stash or discard it, then this resumes on its own."
   exit 1
 fi
 
-exec 8>/var/lock/toon-infra-checkout.lock
-flock -w 120 8 || { echo "FAILED: the infra checkout stayed locked for 120s (the edge's apply?)"; exit 1; }
 if ! git fetch -q origin "$TRACK_BRANCH"; then
   echo "FAILED: origin has no branch '$TRACK_BRANCH'. Set TRACK_BRANCH in onboarder/deploy/.env."
   exit 1

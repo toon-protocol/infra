@@ -52,6 +52,9 @@ runs out. Back the key up with the others from the host.
 
 ## Bring-up (on the host)
 
+0. **The image, published and pinned.** Until § "Bumping the image" has run
+   once, `docker-compose.yml` pins an all-zero placeholder. Key generation
+   below and `up -d` both need the real image.
 1. **DNS**: an `A` record for `onboard.devnet.toonprotocol.dev` pointing at the
    host. The edge issues the certificate over DNS-01, so this can be done at
    any point.
@@ -113,7 +116,10 @@ curl -s https://onboard.devnet.toonprotocol.dev/health      # "status":"ok", the
 `/supported` must list `batch-settlement` on `eip155:84532`, and no extra
 `receiverAuthorizer`. The end-to-end check is a deposit of devnet USDC, from a
 wallet holding 0 ETH, to a devnet connector's `payTo`, then reading the channel
-back on chain. The sandbox's `../smoke.mjs` does exactly that against anvil.
+back on chain. The sandbox's `../smoke.mjs` does exactly that, but against
+anvil only: its chain, its USDC minter and its receiver are the sandbox's. A
+devnet mode (Base Sepolia, faucet USDC, a real connector's `payTo`) is still to
+be written (infra#23).
 
 ## Testing it
 

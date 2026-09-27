@@ -8,7 +8,8 @@
 # them"). Every hostname and upstream is in ./caddy/sites.caddy.
 #
 # Bring it up FIRST, before any node's shared-edge overlay: this project
-# creates the six per-node networks those overlays declare external.
+# creates the five per-node networks those overlays declare external, and the
+# Onboarder's.
 #
 #   cp .env.example .env    # then fill it in
 #   docker compose up -d

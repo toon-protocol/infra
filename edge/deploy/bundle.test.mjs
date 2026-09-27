@@ -15,7 +15,7 @@
 //     `edge-<node>` network under,
 //     and no hostname is served that is not in the contract. Four other repos
 //     implement the far side of this table; a typo here is an outage there.
-//   * the six per-node networks (five nodes and the Onboarder) are created
+//   * the five per-node networks, and the Onboarder's, are created
 //     HERE, under their literal names, Caddy joins all six, and no flat
 //     network joins the nodes;
 //   * the Caddy image is pinned by digest, because the Porkbun key lives in it;
@@ -429,12 +429,12 @@ describe('GitOps', () => {
     }
   });
 
-  it('shares /root/infra with the Onboarder\'s apply, so both lock the checkout around git, and only there', () => {
+  it('shares /root/infra with the Onboarder\'s apply, so both lock the checkout around git, dirty check included, and only there', () => {
     const script = read('auto-apply.sh');
     assert.match(script, /^exec 8>\/var\/lock\/toon-infra-checkout\.lock$/m);
     const locked = script.indexOf('flock -w 120 8');
     const unlocked = script.indexOf('flock -u 8');
-    assert.ok(locked > 0 && locked < script.indexOf('git fetch'));
+    assert.ok(locked > 0 && locked < script.indexOf('git diff --quiet'), 'the dirty check is outside the lock');
     assert.ok(unlocked > script.indexOf('git merge --ff-only') && unlocked < script.indexOf('docker compose'));
   });
 

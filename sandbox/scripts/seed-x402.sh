@@ -26,7 +26,7 @@
 #      immutables that it rebuilds when `block.chainid` differs from the cached
 #      one, so it answers correctly on 31337 with no storage written.
 #   2. Multicall3 (0xcA11…CA11) — the canonical deployment every public chain
-#      carries and plain anvil does not. The facilitator batches its channel
+#      carries and plain anvil does not. The Onboarder batches its channel
 #      reads through it (`tryAggregate`), so without it every `/verify` fails
 #      500. Stateless.
 #   3. x402BatchSettlement — ownerless; its constructor is OpenZeppelin EIP712
@@ -89,7 +89,7 @@ TOKEN_OWNER=0x02484cb50AAC86Eae85610D6f4Bf026f30f6627D
 TOKEN_OWNER_KEY=0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b
 # index 22 — the onboarder service's gas payer (docker-compose.yml
 # passes it that key, which is also the image's sandbox default). Funded here so it can relay from the first request.
-FACILITATOR=0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE
+ONBOARDER=0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE
 # The two CREATE addresses of index 20 at nonces 0 and 1.
 FIAT_TOKEN_IMPL=0x6D8da4B12D658a36909ec1C75F81E54B8DB4eBf9
 X402_USDC=0x0A867CA0442383c2A89951244B955AA19b615b58
@@ -102,7 +102,7 @@ lc()   { echo "$1" | tr 'A-F' 'a-f'; }
 same() { [ "$(lc "$1")" = "$(lc "$2")" ]; }
 has_code() { c="$(cast code "$1" --rpc-url "$RPC")"; [ -n "$c" ] && [ "$c" != 0x ]; }
 
-for who in "$TOKEN_ADMIN" "$TOKEN_OWNER" "$FACILITATOR"; do
+for who in "$TOKEN_ADMIN" "$TOKEN_OWNER" "$ONBOARDER"; do
   rpc anvil_setBalance "$who" 0x56bc75e2d63100000 # 100 ETH
 done
 

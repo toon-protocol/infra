@@ -16,7 +16,9 @@ on:
     branches: [main]
     paths: ['onboarder/**', '.github/workflows/onboarder-image.yml']
   pull_request:
-    paths: ['onboarder/**', '.github/workflows/onboarder-image.yml']
+    # edge/deploy/caddy too: the bundle test checks the edge routes to this
+    # service's alias and port, and an edge-only change could break that.
+    paths: ['onboarder/**', 'edge/deploy/caddy/**', '.github/workflows/onboarder-image.yml']
   workflow_dispatch:
 
 concurrency: onboarder-image-${{ github.ref }}

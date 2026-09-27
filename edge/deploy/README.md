@@ -2,8 +2,8 @@
 
 One Caddy on the devnet host that terminates TLS for every public hostname the
 host's nodes serve (infra#24, ADR 0001, the **Edge** in `CONTEXT.md`). It owns
-ports 80 and 443 and six Docker networks, **one per node**: `edge-relay`,
-`edge-store`, `edge-gas`, `edge-gateway` and `edge-faucet`, plus
+ports 80 and 443 and six Docker networks: **one per node**, `edge-relay`,
+`edge-store`, `edge-gas`, `edge-gateway` and `edge-faucet`, and
 `edge-onboarder` for the **Onboarder**, which is fronted like a node but is not
 one (`CONTEXT.md`, ADR 0002). Caddy joins all six. Each node joins **only its own**, from its repository's shared-edge
 overlay, and is reached as `alias:port`. The edge holds no node's keys and
