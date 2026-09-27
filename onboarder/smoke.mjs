@@ -1,9 +1,9 @@
 // `make smoke-x402`: a gasless x402 batch-settlement deposit, end to end, on
-// the sandbox's own chain and through the sandbox's own facilitator
+// the sandbox's own chain and through the sandbox's own Onboarder
 // (toon-protocol/infra#23, connector ADR 0074).
 //
 // A fresh wallet holding USDC and NO ETH signs one ERC-3009 authorization. The
-// facilitator verifies it, relays the deposit and pays the gas, and the
+// Onboarder verifies it, relays the deposit and pays the gas, and the
 // channel the deposit creates is then read back off the chain. The channel's
 // receiver and receiverAuthorizer are the HUB connector's EVM settlement
 // address, as ADR 0074 decision 2 requires of a channel a connector admits.
@@ -13,7 +13,7 @@
 // It also RUNS the question ADR 0074's first prerequisite could only answer by
 // reading: whether a deposit carrying a ZERO voucher is accepted on a fresh
 // channel. x402's spec contradicts itself on it and its reference facilitators
-// split (TypeScript and Python refuse, Go accepts). This facilitator is the
+// split (TypeScript and Python refuse, Go accepts). This Onboarder is the
 // TypeScript one, so the smoke asserts the refusal, and fails loudly if a
 // package bump changes the answer, since a client written against the old
 // answer would then be wrong.
@@ -36,7 +36,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RPC_URL = process.env.EVM_RPC_URL ?? "http://localhost:8545";
-const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "http://localhost:4022";
+const ONBOARDER_URL = process.env.ONBOARDER_URL ?? "http://localhost:4022";
 const NETWORK = "eip155:31337";
 
 // Written by scripts/seed-x402.sh; see there for why each is where it is.
@@ -70,8 +70,8 @@ function check(label, ok, detail = "") {
   if (!ok) failures += 1;
 }
 
-async function facilitator(path, body) {
-  const res = await fetch(`${FACILITATOR_URL}${path}`, {
+async function onboarder(path, body) {
+  const res = await fetch(`${ONBOARDER_URL}${path}`, {
     method: body ? "POST" : "GET",
     headers: body ? { "content-type": "application/json" } : undefined,
     body: body ? JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)) : undefined,
@@ -82,17 +82,17 @@ async function facilitator(path, body) {
 
 // The hub connector's EVM settlement address, from its committed throwaway key.
 const hubKey = readFileSync(
-  join(HERE, "..", "keys", "toon", "relay-connector", "settlement.key"),
+  join(HERE, "..", "sandbox", "keys", "toon", "relay-connector", "settlement.key"),
   "utf8",
 ).trim();
 const hub = privateKeyToAccount(`0x${hubKey.replace(/^0x/, "")}`).address;
 
 // 1. /supported offers batch-settlement here, and offers no receiverAuthorizer.
-const supported = await facilitator("/supported");
+const supported = await onboarder("/supported");
 const kind = supported.kinds.find((k) => k.scheme === "batch-settlement" && k.network === NETWORK);
-check("facilitator offers batch-settlement on eip155:31337", Boolean(kind));
+check("the Onboarder offers batch-settlement on eip155:31337", Boolean(kind));
 check(
-  "facilitator offers no receiverAuthorizer (ADR 0074 decision 5)",
+  "the Onboarder offers no receiverAuthorizer (ADR 0074 decision 5)",
   kind && !kind.extra?.receiverAuthorizer,
   JSON.stringify(kind?.extra ?? null),
 );
@@ -127,10 +127,10 @@ const configFor = (salt) => ({
 const deposit = (config, maxClaimable) =>
   createBatchSettlementEIP3009DepositPayload(signer, 2, requirements, config, DEPOSIT.toString(), maxClaimable);
 
-// 3. A zero voucher on a fresh channel's deposit: refused by this facilitator.
+// 3. A zero voucher on a fresh channel's deposit: refused by this Onboarder.
 const zeroConfig = configFor(`0x${"00".repeat(31)}01`);
 const zero = await deposit(zeroConfig, "0");
-const zeroVerdict = await facilitator("/verify", {
+const zeroVerdict = await onboarder("/verify", {
   paymentPayload: { x402Version: 2, accepted: requirements, ...zero },
   paymentRequirements: requirements,
 });
@@ -150,10 +150,10 @@ check(
 );
 const one = await deposit(config, "1");
 const body = { paymentPayload: { x402Version: 2, accepted: requirements, ...one }, paymentRequirements: requirements };
-const verdict = await facilitator("/verify", body);
+const verdict = await onboarder("/verify", body);
 check("a one-unit voucher on a fresh deposit verifies", verdict.isValid === true, [verdict.invalidReason, verdict.invalidMessage].filter(Boolean).join(": "));
-const settled = await facilitator("/settle", body);
-check("the facilitator settles the deposit", settled.success === true, settled.transaction ?? settled.errorReason);
+const settled = await onboarder("/settle", body);
+check("the Onboarder settles the deposit", settled.success === true, settled.transaction ?? settled.errorReason);
 
 const [balance, totalClaimed] = await chainClient.readContract({
   address: BATCH_SETTLEMENT,

@@ -8,7 +8,8 @@
 # them"). Every hostname and upstream is in ./caddy/sites.caddy.
 #
 # Bring it up FIRST, before any node's shared-edge overlay: this project
-# creates the five per-node networks those overlays declare external.
+# creates the five per-node networks those overlays declare external, and the
+# Onboarder's.
 #
 #   cp .env.example .env    # then fill it in
 #   docker compose up -d
@@ -63,6 +64,7 @@ services:
       - edge-gas
       - edge-gateway
       - edge-faucet
+      - edge-onboarder
     healthcheck:
       # The admin API answers once the config is loaded. 127.0.0.1, never
       # localhost: "localhost" in a container can resolve to ::1.
@@ -96,6 +98,9 @@ networks:
     name: edge-gateway
   edge-faucet:
     name: edge-faucet
+  # Not a node's: the Onboarder's (onboarder/deploy, infra#23). Same rule.
+  edge-onboarder:
+    name: edge-onboarder
 
 volumes:
   caddy_data:

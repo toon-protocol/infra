@@ -1082,7 +1082,7 @@ The admission round itself does not cross the circuit — the hidden provider's
 | `arlocal` | fake Arweave node (the gateway's "trusted node") | 1984 |
 | `envoy` + `core` + `redis` | AR.IO gateway (ar-io-node r83; service definitions vendored, images pinned to r83's SHAs — no ar-io-node checkout needed) | 3000 (gateway), 3004 (core direct) |
 | `upload-service` + `fulfillment-service` + `upload-service-pg` + `localstack` | Turbo bundler stack | 5100 (upload), 4566 (localstack) |
-| `x402-facilitator` | a stock x402 facilitator (the published `@x402/core` + `@x402/evm`): `batch-settlement` on `eip155:31337`, relays a client's gasless deposit and pays the gas; offers no `receiverAuthorizer` (§6.10). `make smoke-x402` | 4022 (`/supported`, `/verify`, `/settle`, `/health`) |
+| `onboarder` | the **Onboarder**: a stock x402 facilitator (the published `@x402/core` + `@x402/evm`), built from `../onboarder`: `batch-settlement` on `eip155:31337`, relays a client's gasless deposit and pays the gas; offers no `receiverAuthorizer` (§6.10). `make smoke-x402` | 4022 (`/supported`, `/verify`, `/settle`, `/health`) |
 | `relay-connector` | TOON ILP connector — the HUB (`g.toon.relay`, forwards `g.toon.store` / `g.toon.gastation` over peerings) | 3200 (client edge) |
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
@@ -2318,13 +2318,14 @@ something the hidden connector serves. `scripts/hs-provider-address.sh` now
 renders three files rather than four, and `docker-compose.yml` reads one
 `env_file` rather than two.
 
-### 6.10 The x402 layer: batch-settlement, a facilitator, and production's addresses
+### 6.10 The x402 layer: batch-settlement, the Onboarder, and production's addresses
 
 A client can pay a connector over an **x402 `batch-settlement` channel** at the client edge
 (connector ADR 0074, toon-protocol/infra#23): on Base it is x402's own audited
-`x402BatchSettlement`, whose deposits a facilitator relays and pays the gas for; on Solana it is
-solana-foundation's `payment-channels`, sponsored by the receiving connector. Production has a
-facilitator, so the sandbox runs one — otherwise the one step a gasless client cannot do for
+`x402BatchSettlement`, whose deposits an **Onboarder** (`CONTEXT.md`; x402 calls it a
+facilitator) relays and pays the gas for; on Solana it is
+solana-foundation's `payment-channels`, sponsored by the receiving connector. Production has an
+Onboarder, so the sandbox runs one — otherwise the one step a gasless client cannot do for
 itself is the one step nothing here could rehearse.
 
 **Everything sits where production has it.** The published `@x402/evm` package hardcodes the
@@ -2340,7 +2341,7 @@ with `anvil_setCode`, the same way §6.7 places ANYONE and WETH9:
 | `ERC3009DepositCollector` | `0x40208060…0004` | pulls a deposit by `receiveWithAuthorization` — the gasless path |
 | `Permit2DepositCollector` | `0x4020425F…0005` | the Permit2 path, for a token without ERC-3009 |
 | Permit2 | `0x00000000…8BA3` | Uniswap's canonical deployment; the Permit2 collector's immutable |
-| Multicall3 | `0xcA11bde0…CA11` | the facilitator batches its channel reads through it; plain anvil has none |
+| Multicall3 | `0xcA11bde0…CA11` | the Onboarder batches its channel reads through it; plain anvil has none |
 | Circle `SignatureChecker` | `0xbA3b60c2…7DA6` | the external library FiatToken v2.2 links at this address |
 | USDC (FiatToken v2.2) | `0x0A867CA0…5b58` | Circle's real proxy + implementation, deployed from Base Sepolia's own creation transactions; EIP-712 name `USDC`, version `2`, as on Base Sepolia |
 
@@ -2355,16 +2356,17 @@ cast send 0x0A867CA0442383c2A89951244B955AA19b615b58 'mint(address,uint256)' <yo
   --private-key 0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b --rpc-url http://localhost:8545
 ```
 
-**The facilitator** (`x402-facilitator/`) is x402's own e2e facilitator reduced to one scheme and
-one network. Its gas payer is anvil-mnemonic index 22, funded by the seed. It offers **no
+**The Onboarder** (`../onboarder/`, the `onboarder` service) is x402's own e2e facilitator reduced
+to one scheme and one network. Its gas payer is anvil-mnemonic index 22, funded by the seed. It offers **no
 `receiverAuthorizer`**, deliberately and like x402.org's hosted facilitator on Base Sepolia: a
 `receiverAuthorizer` can refund a connector's earned-but-unclaimed value to the payer, so a
 connector always names its own (ADR 0074 decision 5).
 
-**The same image serves the devnet.** With nothing set it is the sandbox's facilitator. Point it at
+**The same image serves the devnet**, at `onboard.devnet.toonprotocol.dev`
+(`../onboarder/deploy/README.md`). With nothing set it is the sandbox's Onboarder. Point it at
 a real network and it **fails closed**: off chain 31337 there is no default RPC and no default key.
 The anvil key is public, so defaulting to it anywhere else would be signing with a key the whole
-world holds. `x402-facilitator/config.mjs` owns the rules, and `config.test.mjs` pins them. The
+world holds. `../onboarder/config.mjs` owns the rules, and `config.test.mjs` pins them. The
 sandbox's compose service still sets `X402_NETWORK`, `EVM_RPC_URL` and the key explicitly, so it
 reads like the devnet's; `docker compose up` needs nothing from the operator. `EVM_RPC_URL` must be
 an http(s) URL, and only its host is logged, since a hosted RPC URL often carries its API key.
@@ -2373,7 +2375,7 @@ an http(s) URL, and only its host is logged, since a hosted RPC URL often carrie
 |---|---|---|
 | `X402_NETWORK` | `eip155:31337` | e.g. `eip155:84532` (Base Sepolia) |
 | `EVM_RPC_URL` | `http://anvil:8545` | **required** |
-| `FACILITATOR_EVM_PRIVATE_KEY_FILE` / `FACILITATOR_EVM_PRIVATE_KEY` | index 22, funded by the seed | **required** — one or the other, never both; prefer the file |
+| `ONBOARDER_EVM_PRIVATE_KEY_FILE` / `ONBOARDER_EVM_PRIVATE_KEY` | index 22, funded by the seed | **required** — one or the other, never both; prefer the file. x402's own `FACILITATOR_EVM_PRIVATE_KEY` is not read |
 | `PORT` | `4022` | `4022` |
 
 `/health` is 503 in three cases, each of which would otherwise surface only as a failed deposit:
@@ -2383,7 +2385,7 @@ facilitator is connector `docs/research/x402-devnet-facilitators.md`.
 
 **`make smoke-x402`** is the whole path, and runs inside `make smoke` and `make smoke-payments`:
 a fresh wallet holding USDC and **no ETH** signs one ERC-3009 authorization, built by the published
-`@x402/evm` client; the facilitator verifies it, relays the deposit and pays the gas; and the
+`@x402/evm` client; the Onboarder verifies it, relays the deposit and pays the gas; and the
 channel — receiver and `receiverAuthorizer` both the hub connector's settlement address — is read
 back off anvil holding the deposit, with the payer still at zero ETH. It also runs the one
 question ADR 0074 could only answer by reading: a deposit whose voucher is **zero** is refused on a
@@ -2393,7 +2395,7 @@ package bump changes it. Last, it checks `payment-channels` is loaded and execut
 
 **What is not here yet.** No connector in the sandbox accepts a batch-settlement voucher: that is
 the connector work ADR 0074's follow-up tickets describe. This layer is the chain and the
-facilitator it will be tested against.
+Onboarder it will be tested against.
 
 ## 7. Lifecycle and state
 

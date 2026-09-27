@@ -7,7 +7,7 @@
 # ── The contract (infra#24) ──────────────────────────────────────────────────
 # Each node's own repository ships a shared-edge overlay that joins its
 # containers to that node's OWN external Docker network, `edge-<node>`, under
-# the aliases below. Caddy is on all five networks; no node is on another's
+# the aliases below. Caddy is on all six networks; no node is on another's
 # (../docker-compose.yml says why). The ports are each container's own
 # listening port, read off the front that node used to ship.
 # ../bundle.test.mjs holds this table still.
@@ -22,6 +22,11 @@
 #   proxy.gateway.devnet           gateway-proxy:4000        edge-gateway (connector)
 #   gw.devnet, *.gw.devnet         https://gateway-gw:8443   edge-gateway (workloads)
 #   faucet.devnet                  faucet:3500               edge-faucet
+#   onboard.devnet                 onboarder:4022            edge-onboarder
+#
+# The Onboarder (CONTEXT.md, infra#23) is not a node: it has no connector and
+# no ILP address. It is fronted the same way, and ../../../onboarder/deploy is
+# its far side of this table.
 #
 # ── What Caddy already does that the nginx fronts spelled out ────────────────
 # * `proxy_set_header Host $host`: reverse_proxy passes Host through untouched
@@ -243,6 +248,25 @@ faucet.devnet.toonprotocol.dev {
 		max_size 1MiB
 	}
 	reverse_proxy faucet:3500 {
+		stream_close_delay 5m
+	}
+}
+
+# ── onboarder ────────────────────────────────────────────────────────────────
+# onboarder/deploy (infra#23): x402's stock facilitator on Base Sepolia, which
+# relays a user's gasless channel deposit and pays its gas. No old front to
+# carry over, so each rule is new and says why:
+# * 1 MiB: express.json's limit in onboarder/index.mjs; nothing larger is read.
+# * the faucet's rate limit: every /settle spends the Onboarder's own ETH, so
+#   it is the other public door here that costs the devnet money per request.
+# * no /admin rule, no CORS: it serves neither. A client or connector calls
+#   /verify and /settle server to server, as x402 has it.
+onboard.devnet.toonprotocol.dev {
+	import rate_limited onboarder 60
+	request_body {
+		max_size 1MiB
+	}
+	reverse_proxy onboarder:4022 {
 		stream_close_delay 5m
 	}
 }

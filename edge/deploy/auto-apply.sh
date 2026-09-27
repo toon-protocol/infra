@@ -32,6 +32,10 @@
 #    stream_close_delay), it is a no-op when nothing changed, and an invalid
 #    config is REJECTED while the old one keeps serving. Restarting the one TLS
 #    front on the host would drop every node's traffic at once.
+# 4. The Onboarder's bundle (onboarder/deploy) applies from this same checkout
+#    on its own timer, so both take /var/lock/toon-infra-checkout.lock around
+#    the dirty check, fetch and fast-forward, and only there: two timers firing together
+#    would otherwise race on git's own index.lock.
 set -euo pipefail
 
 DEPLOY_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -50,6 +54,11 @@ fi
 exec 9>/var/lock/toon-auto-apply-edge.lock
 flock -n 9 || { echo "another edge apply is already running; leaving it alone"; exit 0; }
 
+# The checkout is shared with the other bundle applied from /root/infra, so the
+# dirty check is inside this lock too: `git diff` can take git's index.lock,
+# and a check made mid-fast-forward would see a half-moved tree.
+exec 8>/var/lock/toon-infra-checkout.lock
+flock -w 120 8 || { echo "FAILED: the infra checkout stayed locked for 120s (the onboarder's apply?)"; exit 1; }
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "REFUSING: the working tree at $REPO_DIR is dirty."
   echo "Someone is editing on the host. Commit, stash or discard it, then this resumes on its own."
@@ -75,6 +84,7 @@ else
   LAST=${APPLIED:-never}
   echo "re-applying ${REMOTE:0:7}: the last successful apply was ${LAST:0:7}"
 fi
+flock -u 8
 
 cd "$DEPLOY_DIR"
 # Which compose files this host runs is .env's COMPOSE_FILE, when it sets one,

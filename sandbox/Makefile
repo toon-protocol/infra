@@ -184,8 +184,8 @@ up: require-store-context require-anytoon-context
 
 ## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
 ## the relay + the hub + the Solana channel-open job + BOTH compute providers,
-## each with its own connector and its own directory publisher + the x402
-## facilitator (14 services).
+## each with its own connector and its own directory publisher + the
+## Onboarder (14 services).
 ## No gateway, no bundler, no store, no gas station — and no store sibling
 ## checkout.
 up-payments: COMPOSE_PROFILE = payments
@@ -389,13 +389,13 @@ smoke-payments:
 
 ## x402 batch-settlement proof (toon-protocol/infra#23, connector ADR 0074): a
 ## wallet with USDC and NO ETH deposits into a channel whose receiver is the
-## hub, through the sandbox's own facilitator, which pays the gas — then the
+## hub, through the sandbox's own Onboarder, which pays the gas — then the
 ## channel is read back off anvil. Also runs ADR 0074's zero-voucher question
 ## and checks payment-channels is loaded on the validator. Runs in every
 ## profile that starts anvil (payments, credentials, full).
 smoke-x402:
-	npm --prefix x402-facilitator ci --no-audit --no-fund --silent
-	node x402-facilitator/smoke.mjs
+	npm --prefix ../onboarder ci --no-audit --no-fund --silent
+	node ../onboarder/smoke.mjs
 
 ## credentials proof for `make up-credentials`: the payments assertions PLUS
 ## the denomination boundary end to end — the price triple asserted, the
