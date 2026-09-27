@@ -75,7 +75,13 @@ Every name is issued over **DNS-01 through Porkbun** (`caddy/Caddyfile`). The
 wildcard `*.gw.devnet` can only be issued that way. For the other names it
 means a certificate exists **before** their DNS is flipped to this host, so
 moving a node (infra#25) has no TLS gap. Porkbun API access must be enabled
-for `toonprotocol.dev`. The keys are the same pair the workload gateway node
+for `toonprotocol.dev`.
+
+A brand-new name can take several minutes to issue. `onboard.devnet` took about
+seven (infra#23): Porkbun's nameservers took longer to serve the challenge
+TXT than Caddy's 2-minute propagation window, so the first two attempts timed
+out and Caddy retried on its own, falling back to ZeroSSL. Until it lands, the
+name answers with a TLS `internal error` alert. Wait rather than restart. The keys are the same pair the workload gateway node
 already uses.
 
 ## The image

@@ -116,10 +116,19 @@ curl -s https://onboard.devnet.toonprotocol.dev/health      # "status":"ok", the
 `/supported` must list `batch-settlement` on `eip155:84532`, and no extra
 `receiverAuthorizer`. The end-to-end check is a deposit of devnet USDC, from a
 wallet holding 0 ETH, to a devnet connector's `payTo`, then reading the channel
-back on chain. The sandbox's `../smoke.mjs` does exactly that, but against
-anvil only: its chain, its USDC minter and its receiver are the sandbox's. A
-devnet mode (Base Sepolia, faucet USDC, a real connector's `payTo`) is still to
-be written (infra#23).
+back on chain. `../smoke.mjs --devnet` does exactly that:
+
+```bash
+npm --prefix onboarder ci --no-audit --no-fund --silent
+node onboarder/smoke.mjs --devnet
+```
+
+It needs no key and no ETH. A fresh payer gets 1000 USDC from the faucet. The
+receiver is the relay connector's `evm:84532` settlement address, read off its
+`GET /ilp`. Each run leaves a 5 USDC channel of faucet money behind, and costs
+the Onboarder one deposit's gas. `ONBOARDER_URL`, `EVM_RPC_URL`, `FAUCET_URL`
+and `CONNECTOR_URL` override the defaults. Without `--devnet` it is the
+sandbox's `make smoke-x402`.
 
 ## Testing it
 

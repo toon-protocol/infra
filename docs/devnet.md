@@ -158,7 +158,8 @@ Onboarder relays the deposit into an x402 batch-settlement channel and pays the
 gas (connector ADR 0074). It is the same image the sandbox runs as its
 `onboarder` service. Its gas payer is a key of its own, topped up from the dev
 funder, and `/health` says `holds no ETH` when it runs dry. How it is deployed
-and bumped is `onboarder/deploy/README.md`.
+and bumped is `onboarder/deploy/README.md`. `node onboarder/smoke.mjs --devnet`
+runs a whole 0-ETH deposit through it, into a channel to the relay.
 
 It does nothing for Solana: there the receiving connector's operator sponsors
 the channel open.
