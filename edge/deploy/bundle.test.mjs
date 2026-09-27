@@ -15,14 +15,15 @@
 //     `edge-<node>` network under,
 //     and no hostname is served that is not in the contract. Four other repos
 //     implement the far side of this table; a typo here is an outage there.
-//   * the five per-node networks are created HERE, under their literal
-//     names, Caddy joins all five, and no flat network joins the nodes;
+//   * the six per-node networks (five nodes and the Onboarder) are created
+//     HERE, under their literal names, Caddy joins all six, and no flat
+//     network joins the nodes;
 //   * the Caddy image is pinned by digest, because the Porkbun key lives in it;
 //   * the wildcard is issued over DNS-01 through Porkbun, keys from the env;
 //   * the per-node rules the old nginx/Caddy fronts applied beyond plain
 //     proxying: /admin, body limits, CORS, the gateway's TLS upstream;
 //   * exposure: only 80/443 are published, and only by Caddy;
-//   * a memory limit, because one leak on a shared host takes down five nodes.
+//   * a memory limit, because one leak on a shared host takes down every node.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +53,8 @@ const CONTRACT = {
   [`proxy.gateway.devnet.${ZONE}`]: 'gateway-proxy:4000',
   // faucet — connector/infra/linode-faucet/nginx/node.conf.template
   [`faucet.devnet.${ZONE}`]: 'faucet:3500',
+  // the Onboarder, not a node — onboarder/deploy/docker-compose.yml (infra#23)
+  [`onboard.devnet.${ZONE}`]: 'onboarder:4022',
 };
 
 /**
@@ -122,6 +125,7 @@ const GAS = ['proxy.gas.devnet', 'gas.devnet'].map((h) => `${h}.${ZONE}`);
 const GW_EDGE = `proxy.gateway.devnet.${ZONE}`;
 const GW_WORKLOADS = `gw.devnet.${ZONE}`; // the block that also holds *.gw
 const FAUCET = `faucet.devnet.${ZONE}`;
+const ONBOARD = `onboard.devnet.${ZONE}`;
 const RELAY = [`proxy.relay.devnet.${ZONE}`, `relay-ws.devnet.${ZONE}`];
 
 // client_max_body_size, from each node's nginx `location /`. nginx's `m` is
@@ -134,6 +138,8 @@ const BODY_LIMITS = {
   [GW_EDGE]: '1MiB',
   [GW_WORKLOADS]: '64MiB',
   [FAUCET]: '1MiB',
+  // express.json({ limit: '1mb' }) in onboarder/index.mjs: nothing larger is read.
+  [ONBOARD]: '1MiB',
 };
 
 // limit_req: `rate=200r/s burst=400` on store, gas and gateway, `rate=30r/s
@@ -147,6 +153,9 @@ const RATE_LIMITS = {
   [GW_EDGE]: 400,
   [GW_WORKLOADS]: 400,
   [FAUCET]: 60,
+  // New, not carried over: the faucet's limit, because each /settle spends
+  // the Onboarder's own ETH.
+  [ONBOARD]: 60,
 };
 
 const body = (host) => siteFor(host).body;
@@ -324,7 +333,8 @@ describe('the image', () => {
 // One network per node (contract v2): only the edge reaches a node, so no node
 // can reach another's connector /admin or the gateway's handover door. A node's
 // overlay joins its own network, `external`, and nothing else of the edge's.
-const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet'];
+// The Onboarder is not a node, but it is fronted the same way, on its own network.
+const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet', 'edge-onboarder'];
 
 // Every file in the bundle, for the checks that must hold across all of them.
 const BUNDLE_FILES = [
@@ -348,7 +358,7 @@ describe('the compose project', () => {
     assert.deepEqual([...top.matchAll(/^    name: (\S+)$/gm)].map((m) => m[1]).sort(), [...NODE_NETWORKS].sort());
   });
 
-  it('joins Caddy to all five, and to nothing else', () => {
+  it('joins Caddy to all six, and to nothing else', () => {
     const caddy = compose().slice(compose().indexOf('  caddy:'), compose().indexOf('\nnetworks:'));
     const joined = [...caddy.slice(caddy.indexOf('    networks:')).matchAll(/^      - (\S+)$/gm)].map((m) => m[1]);
     assert.deepEqual(joined.sort(), [...NODE_NETWORKS].sort());
@@ -417,6 +427,15 @@ describe('GitOps', () => {
     for (const name of BUNDLE_FILES) {
       assert.doesNotMatch(read(name), /toon-edge-auto-apply/, `${name} still names the old units`);
     }
+  });
+
+  it('shares /root/infra with the Onboarder\'s apply, so both lock the checkout around git, and only there', () => {
+    const script = read('auto-apply.sh');
+    assert.match(script, /^exec 8>\/var\/lock\/toon-infra-checkout\.lock$/m);
+    const locked = script.indexOf('flock -w 120 8');
+    const unlocked = script.indexOf('flock -u 8');
+    assert.ok(locked > 0 && locked < script.indexOf('git fetch'));
+    assert.ok(unlocked > script.indexOf('git merge --ff-only') && unlocked < script.indexOf('docker compose'));
   });
 
   it('takes its own lock, so it neither blocks nor is blocked by a node applying', () => {

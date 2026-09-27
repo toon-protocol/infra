@@ -4,7 +4,7 @@
 # =============================================================================
 # Runs INSIDE the anvil container (foundry image), from the anvil entrypoint,
 # after seed-toon-evm-amm.sh and BEFORE the anvil healthcheck can pass: the
-# `x402-facilitator` service answers `/supported` for batch-settlement only if
+# `onboarder` service answers `/supported` for batch-settlement only if
 # the settlement contract is on the chain it dials.
 #
 # WHY THE ADDRESSES ARE PRODUCTION'S (toon-protocol/infra#23, connector ADR 0074)
@@ -87,7 +87,7 @@ TOKEN_ADMIN_KEY=0xeaa861a9a01391ed3d587d8a5a84ca56ee277629a8b02c22093a419bf240e6
 # mints x402 USDC to a depositor from this key, on demand.
 TOKEN_OWNER=0x02484cb50AAC86Eae85610D6f4Bf026f30f6627D
 TOKEN_OWNER_KEY=0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b
-# index 22 — the x402-facilitator service's gas payer (docker-compose.yml
+# index 22 — the onboarder service's gas payer (docker-compose.yml
 # passes it that key, which is also the image's sandbox default). Funded here so it can relay from the first request.
 FACILITATOR=0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE
 # The two CREATE addresses of index 20 at nonces 0 and 1.

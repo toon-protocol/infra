@@ -1,0 +1,70 @@
+# =============================================================================
+# The devnet's Onboarder (infra#23, CONTEXT.md, ADR 0002)
+# =============================================================================
+#   visitor ──▶ edge caddy :443 ──(network edge-onboarder)──▶ onboarder:4022
+#
+# x402's stock facilitator, offering batch-settlement on Base Sepolia: it relays
+# a user's gasless channel deposit and pays the gas from its own key. It is not
+# a Node (no connector, no ILP address), but it sits behind the edge the same
+# way one does, on a network of its own.
+#
+# Bring the EDGE up first: its project creates `edge-onboarder`.
+#
+#   cp .env.example .env               # then fill it in
+#   (write onboarder.key; README.md § "The key")
+#   docker compose up -d
+#
+# See ./README.md.
+# =============================================================================
+
+name: onboarder
+
+services:
+  onboarder:
+    # Built from ../ by .github/workflows/onboarder-image.yml. Pinned by DIGEST,
+    # never a tag: the gas payer's key is handed to whatever this resolves to.
+    # All zeroes until the first image is published: README § "Bumping the
+    # image", and auto-apply.sh refuses it by name.
+    image: ghcr.io/toon-protocol/onboarder@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    environment:
+      # The devnet's EVM chain. Fixed here, not in .env, so which network this
+      # host pays gas on is a reviewed commit.
+      X402_NETWORK: eip155:84532
+      # A Base Sepolia RPC. From .env, because a hosted one's URL carries its
+      # API key; the service logs only the host.
+      EVM_RPC_URL: ${EVM_RPC_URL:?set EVM_RPC_URL in .env}
+      # From the mounted file below, never as a value: a value shows up in
+      # `docker inspect`. The image refuses to start on this chain without it.
+      ONBOARDER_EVM_PRIVATE_KEY_FILE: /run/secrets/onboarder.key
+      PORT: '4022'
+      # Tell V8 about the container's limit, so it collects harder near it
+      # instead of being OOM-killed at it.
+      NODE_OPTIONS: --max-old-space-size=96
+    volumes:
+      # Mode 600 on the host; auto-apply.sh refuses to start without it.
+      - ./onboarder.key:/run/secrets/onboarder.key:ro
+    # Every service on the shared host carries a limit (ADR 0001). Measured at
+    # 49 MiB idle against Base Sepolia (infra#23).
+    mem_limit: 128m
+    # No `ports:`. The edge is the only way in.
+    networks:
+      default: {}
+      edge-onboarder:
+        aliases: [onboarder]
+    healthcheck:
+      # /health is 503 when the RPC is the wrong chain, x402BatchSettlement is
+      # missing, or the gas payer holds no ETH (../index.mjs). 127.0.0.1, never
+      # localhost: "localhost" in a container can resolve to ::1.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:4022/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  # Created by the edge's project (edge/deploy/docker-compose.yml). Only this
+  # service and the edge's Caddy are on it.
+  edge-onboarder:
+    external: true
+    name: edge-onboarder

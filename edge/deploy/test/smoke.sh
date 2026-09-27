@@ -13,8 +13,8 @@
 # questions with the real hostnames, verifying every certificate against the
 # edge's own root, and checks that one stub node cannot reach the other.
 #
-# It needs Docker, curl and openssl, and the five network names edge-relay,
-# edge-store, edge-gas, edge-gateway and edge-faucet to be free: it creates and
+# It needs Docker, curl and openssl, and the six network names edge-relay,
+# edge-store, edge-gas, edge-gateway, edge-faucet and edge-onboarder to be free: it creates and
 # removes them, so it refuses to run on a host that already has any of them (a
 # real devnet host, say).
 set -euo pipefail
@@ -24,7 +24,7 @@ DEPLOY=$(cd "$HERE/.." && pwd)
 EDGE=(docker compose -p edge-smoke --project-directory "$DEPLOY" -f "$DEPLOY/docker-compose.yml" -f "$HERE/docker-compose.edge.yml")
 STUB_STORE=(docker compose -f "$HERE/docker-compose.stub-store.yml")
 STUB_GATEWAY=(docker compose -f "$HERE/docker-compose.stub-gateway.yml")
-NETWORKS=(edge-relay edge-store edge-gas edge-gateway edge-faucet)
+NETWORKS=(edge-relay edge-store edge-gas edge-gateway edge-faucet edge-onboarder)
 ZONE=devnet.toonprotocol.dev
 WORK=$(mktemp -d)
 
@@ -138,6 +138,8 @@ out=$(get "dvm.$ZONE" /ilp/identity -o /dev/null -w '%{http_code}')
 expect "dvm's /ilp/identity goes to the store's connector, as nginx's did" "$out" "200"
 out=$(get "dvm.$ZONE" / -o /dev/null -w '%{http_code}')
 expect "a node that is not up is a 502, never another node's answer" "$out" "502"
+out=$(get "onboard.$ZONE" /health -o /dev/null -w '%{http_code}')
+expect "onboard.devnet is served, and with no Onboarder up is a 502" "$out" "502"
 codes=$(seq 1 600 | xargs -P 60 -I{} curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 \
   --cacert "$WORK/root.crt" --resolve "proxy.ario.$ZONE:18443:127.0.0.1" "https://proxy.ario.$ZONE:18443/ilp" | sort | uniq -c)
 expect "a burst past 400 per 2s is rate-limited" "$codes" " 429"

@@ -1,7 +1,9 @@
-// The sandbox's x402 facilitator (toon-protocol/infra#23, connector ADR 0074),
-// and the devnet's.
+// The Onboarder (toon-protocol/infra#23, connector ADR 0074; CONTEXT.md):
+// the sandbox's, and the devnet's at onboard.devnet.toonprotocol.dev.
 //
-// A stock facilitator, not a TOON one: it is the published `@x402/core` and
+// It puts a user's Funding Authorization on chain and pays its gas. On the
+// wire it is a stock x402 FACILITATOR, which is x402's word for the same thing
+// and the one TOON's own language avoids: the published `@x402/core` and
 // `@x402/evm` packages, wired the way x402's own e2e facilitator wires them
 // (x402 `e2e/facilitators/typescript/index.ts` at 0cb1a1f0), reduced to one
 // scheme on one network — `batch-settlement`, on the local anvil
@@ -16,14 +18,15 @@
 // signer, and has not been seen relaying a batch-settlement deposit.
 //
 // It relays a client's deposit and pays the gas for it, and that is all a
-// TOON connector ever asks of it. It deliberately advertises NO
-// `receiverAuthorizer`: ADR 0074 decision 5 — a receiverAuthorizer can refund
-// a connector's earned-but-unclaimed value to the payer, so a connector
-// always names its own. x402.org's hosted facilitator advertises none on Base
-// Sepolia either, so a client written against it sees the same `/supported`.
+// TOON connector ever asks of it. It never holds the user's funds. It
+// deliberately advertises NO `receiverAuthorizer`: ADR 0074 decision 5 — a
+// receiverAuthorizer can refund a connector's earned-but-unclaimed value to
+// the payer, so a connector always names its own. x402.org's hosted
+// facilitator advertises none on Base Sepolia either, so a client written
+// against it sees the same `/supported`.
 //
 // Configuration is environment only, read by config.mjs, which says what each
-// variable means. With nothing set it is the sandbox's facilitator, but the
+// variable means. With nothing set it is the sandbox's Onboarder, but the
 // compose service still names its chain and key explicitly (infra#33), so the
 // sandbox's configuration reads the same as the devnet's; off the sandbox chain
 // there is no default RPC and no default key, and it refuses to start without
@@ -102,7 +105,7 @@ app.get("/supported", (_req, res) => res.json(facilitator.getSupported()));
 
 // Healthy means three things, each of which would otherwise surface only as a
 // failed deposit: the RPC is the chain X402_NETWORK names (a Base Sepolia
-// facilitator pointed at a mainnet RPC would advertise one network and settle
+// Onboarder pointed at a mainnet RPC would advertise one network and settle
 // on another), the settlement contract is on it (an anvil whose seed has not
 // landed), and the gas payer holds gas to pay with (a devnet key nobody funded).
 app.get("/health", async (_req, res) => {
@@ -115,13 +118,13 @@ app.get("/health", async (_req, res) => {
     if (!code || code === "0x") throw new Error("x402BatchSettlement is not on the chain");
     const gas = await client.getBalance({ address: account.address });
     if (gas === 0n) throw new Error(`the gas payer ${account.address} holds no ETH`);
-    res.json({ status: "ok", network: NETWORK, facilitator: account.address, gasWei: gas.toString() });
+    res.json({ status: "ok", network: NETWORK, gasPayer: account.address, gasWei: gas.toString() });
   } catch (error) {
     res.status(503).json({ status: "unavailable", error: String(error) });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`x402 facilitator: batch-settlement on ${NETWORK} via ${RPC_HOST}, port ${PORT}`);
+  console.log(`onboarder (an x402 facilitator): batch-settlement on ${NETWORK} via ${RPC_HOST}, port ${PORT}`);
   console.log(`  gas paid by ${account.address}; no receiverAuthorizer offered`);
 });

@@ -2,9 +2,10 @@
 
 One Caddy on the devnet host that terminates TLS for every public hostname the
 host's nodes serve (infra#24, ADR 0001, the **Edge** in `CONTEXT.md`). It owns
-ports 80 and 443 and five Docker networks, **one per node**: `edge-relay`,
-`edge-store`, `edge-gas`, `edge-gateway` and `edge-faucet`. Caddy joins all
-five. Each node joins **only its own**, from its repository's shared-edge
+ports 80 and 443 and six Docker networks, **one per node**: `edge-relay`,
+`edge-store`, `edge-gas`, `edge-gateway` and `edge-faucet`, plus
+`edge-onboarder` for the **Onboarder**, which is fronted like a node but is not
+one (`CONTEXT.md`, ADR 0002). Caddy joins all six. Each node joins **only its own**, from its repository's shared-edge
 overlay, and is reached as `alias:port`. The edge holds no node's keys and
 never talks ILP.
 
@@ -36,6 +37,7 @@ of truth and `bundle.test.mjs` holds it still.
 | gateway | `edge-gateway` | `gw.devnet`, `*.gw.devnet` | `gateway-gw` | 8443 (**TLS**) |
 | gateway | `edge-gateway` | `proxy.gateway.devnet` | `gateway-proxy` | 4000 |
 | faucet | `edge-faucet` | `faucet.devnet` | `faucet` | 3500 |
+| Onboarder (not a node) | `edge-onboarder` | `onboard.devnet` | `onboarder` | 4022 |
 
 A node's overlay declares its network `external: true` and keeps its own
 `default: {}` network for its services' traffic among themselves.
@@ -49,10 +51,12 @@ plain proxying are carried over, each with its source cited in
 
 - `/admin*` answers 404 on the store, gas and gateway-proxy names.
 - Body limits: 4 MiB for the store, 512 KiB for gas, 1 MiB for the
-  gateway proxy and the faucet, and 64 MiB for gateway workloads.
+  gateway proxy, the faucet and the Onboarder, and 64 MiB for gateway
+  workloads.
 - Per-client rate limits: 400 per 2s on store, gas and gateway, and 60 per
   2s on the faucet, with `/health` exempt. An excess request gets **429**,
-  where nginx answered 503.
+  where nginx answered 503. The Onboarder had no old front; it gets the
+  faucet's 60 per 2s, because each `/settle` spends its own ETH.
 - CORS on `/ilp/identity` for store and gas. That path always reaches the
   node's connector, on either of its names.
 - The gateway's workload hop is TLS, with SNI `gateway` and no verification,
@@ -94,7 +98,7 @@ it. `docker-compose.yml` pins it **by digest**.
 
 ## Bring-up (on the host)
 
-Start the edge **before** any node's overlay. This project creates the five
+Start the edge **before** any node's overlay. This project creates the six
 networks, and the overlays declare them external. Nothing else on the host may
 hold 80 or 443: stop a node's old nginx, certbot or Caddy first (ADR 0001).
 
@@ -199,8 +203,8 @@ the way an overlay joins: `store-proxy` on `edge-store`, and the wildcard's
 - the wildcard certificate and `no_grant`;
 - `/admin`, the body cap, CORS, the redirect, and a 502 for a node that is down;
 - the rate limit and `mem_limit`;
-- that the edge is on all five networks and created them;
+- that the edge is on all six networks and created them;
 - that the store stub **cannot** reach the gateway stub by alias or by IP
   address, with a control probe that does reach the store's own alias.
 
-It refuses to run where any of the five network names already exists.
+It refuses to run where any of the six network names already exists.

@@ -1,8 +1,8 @@
 {
-  "name": "toon-sandbox-x402-facilitator",
+  "name": "toon-onboarder",
   "private": true,
   "type": "module",
-  "description": "The sandbox's x402 facilitator: batch-settlement on the local anvil, from the published @x402 packages (toon-protocol/infra#23)",
+  "description": "The Onboarder: a stock x402 facilitator offering batch-settlement, from the published @x402 packages, for the sandbox and the devnet (toon-protocol/infra#23)",
   "scripts": {
     "start": "node index.mjs"
   },

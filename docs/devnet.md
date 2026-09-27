@@ -33,7 +33,8 @@ serves. Behind it sit four **Nodes**, each still GitOps from its own
 repository (connector ADR 0068) — its own `deploy/` bundle, a shared-edge
 overlay that joins only that node's `edge-<node>` network, and its own
 `toon-auto-apply-<node>` timer and lock, so a stuck or dirty node never blocks
-another node's or the edge's apply — plus the faucet, still hand-deployed.
+another node's or the edge's apply — plus the faucet, still hand-deployed, and the **Onboarder**, which
+is not a node (see "The Onboarder" below).
 
 | Node | Repository | Serves |
 |---|---|---|
@@ -42,6 +43,7 @@ another node's or the edge's apply — plus the faucet, still hand-deployed.
 | gas | `toon-protocol/gas-station` | `proxy.gas.devnet…` — sponsored transactions at `g.toon.gas` |
 | workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…`, `proxy.gateway.devnet…` — a hostname for a workload |
 | faucet | (hand-deployed, from `/root/faucet-connector/infra/linode-faucet`) | `faucet.devnet…` — mock USDC on both chains |
+| Onboarder (not a node) | `toon-protocol/infra` (`onboarder/deploy`) | `onboard.devnet…` — pays the gas for a gasless channel deposit on Base Sepolia |
 
 Every node kept its own connector, its own keys, its own ILP address and its
 own seal key across the move — nothing was re-keyed or republished, and no
@@ -146,6 +148,21 @@ this one. Day to day, the operator also keeps a dev funder wallet on hand for
 topping an existing node's settlement key back up if it runs low; no key,
 mnemonic or address for it belongs in this file.
 
+## The Onboarder
+
+The one exception to "a payer needs gas of its own" is the **Onboarder**
+(`CONTEXT.md`, ADR 0002) at `https://onboard.devnet.toonprotocol.dev`. It is
+x402's stock facilitator offering `batch-settlement` on Base Sepolia. A wallet
+holding devnet USDC and **no ETH** signs one ERC-3009 authorization, and the
+Onboarder relays the deposit into an x402 batch-settlement channel and pays the
+gas (connector ADR 0074). It is the same image the sandbox runs as its
+`onboarder` service. Its gas payer is a key of its own, topped up from the dev
+funder, and `/health` says `holds no ETH` when it runs dry. How it is deployed
+and bumped is `onboarder/deploy/README.md`.
+
+It does nothing for Solana: there the receiving connector's operator sponsors
+the channel open.
+
 ## Finishing a node that is waiting on gas
 
 Each new node needs a small amount of devnet SOL on the Solana settlement key
@@ -244,6 +261,7 @@ records points at the one host, `97.107.134.182`:
 | `proxy.gas.devnet`, `gas.devnet` | gas |
 | `faucet.devnet` | faucet |
 | `gw.devnet`, `*.gw.devnet`, `proxy.gateway.devnet` | workload-gateway |
+| `onboard.devnet` | the Onboarder |
 
 `proxy.provider.devnet` and `provider.devnet` are no longer part of the
 devnet's contract: the edge has no `edge-provider` network and fronts no

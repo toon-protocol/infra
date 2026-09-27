@@ -26,15 +26,23 @@ One app's deployed stack — its connector, the app behind it and their keys —
 _Avoid_: box, service, deployment
 
 **Edge**:
-The single TLS front on a host that terminates every public hostname its nodes serve.
+The single TLS front on a host that terminates every public hostname the host serves: its nodes', and its Onboarder's.
 _Avoid_: proxy, ingress, load balancer
 
 **Hop**:
 One connector forwarding a packet to a peered connector, whichever host each runs on.
 _Avoid_: network hop, loopback
 
+### Onboarding
+
+**Onboarder**:
+The service that puts a user's Funding Authorization (toon-meta's glossary) on chain and pays its gas, so a wallet holding USDC and no native gas can open a payment channel. On the wire it is a stock x402 facilitator offering `batch-settlement`; it never holds the user's funds. The sandbox runs one on anvil, and the devnet runs the same image on Base Sepolia at `onboard.devnet`.
+_Avoid_: facilitator (x402's word for it), gas station (which relays operations on a channel the user already has), sponsor
+
 ### Relationships
 
 - A **Host** runs one **Edge** and any number of **Nodes**.
 - A **Node** has exactly one connector; nodes are never merged into a shared connector, because each one's seal key is pinned by what it publishes.
 - A **Hop** between two nodes on the same host is still a real hop: two connectors, two keys, one payment channel.
+- An **Onboarder** is not a **Node**: it has no connector, no ILP address and no seal key. On the devnet it runs on the **Host** behind the **Edge**, on its own network, the way a node does (ADR 0002).
+- An **Onboarder** serves EVM chains only. On Solana the receiving connector's operator sponsors the channel open itself.

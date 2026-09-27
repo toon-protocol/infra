@@ -1,3 +1,4 @@
 node_modules
 smoke.mjs
 *.test.mjs
+deploy

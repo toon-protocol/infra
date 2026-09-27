@@ -1,0 +1,99 @@
+name: Onboarder image
+
+# Builds the Onboarder (onboarder/Dockerfile: x402's stock facilitator from the
+# published @x402 packages) and pushes it to GHCR, infra#23.
+#
+# The devnet pins it by DIGEST (onboarder/deploy/docker-compose.yml), so no tag
+# this publishes is ever followed by a host: the host moves when a reviewed
+# commit changes that digest, and auto-apply.sh fast-forwards to it. The step
+# summary prints the digest to commit. The sandbox builds the same directory
+# itself and never pulls this.
+#
+# Pull requests build and test but push nothing.
+
+on:
+  push:
+    branches: [main]
+    paths: ['onboarder/**', '.github/workflows/onboarder-image.yml']
+  pull_request:
+    paths: ['onboarder/**', '.github/workflows/onboarder-image.yml']
+  workflow_dispatch:
+
+concurrency: onboarder-image-${{ github.ref }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Config and bundle tests
+        run: node --test onboarder/config.test.mjs onboarder/deploy/bundle.test.mjs
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/toon-protocol/onboarder
+          # An immutable sha tag as a human-readable handle; the deploy pins the
+          # digest regardless.
+          tags: |
+            type=sha,format=long
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: onboarder
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The built image fails closed off the sandbox
+        # With a real network and no key it must refuse to start, never fall
+        # back to the sandbox's public anvil key. Pull requests only: that is
+        # where the image was loaded locally.
+        if: github.event_name == 'pull_request'
+        env:
+          # Through the environment, never interpolated into the script.
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
+        run: |
+          if out=$(docker run --rm -e X402_NETWORK=eip155:84532 -e EVM_RPC_URL=https://sepolia.base.org "$IMAGE_ID" 2>&1); then
+            echo "the image started with no key on eip155:84532:"; echo "$out"; exit 1
+          fi
+          echo "$out" | grep -q 'ONBOARDER_EVM_PRIVATE_KEY'
+
+      - name: The digest to pin
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ghcr.io/toon-protocol/onboarder"
+            echo
+            echo "Pin this in \`onboarder/deploy/docker-compose.yml\`:"
+            echo
+            echo '```'
+            echo "image: ghcr.io/toon-protocol/onboarder@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

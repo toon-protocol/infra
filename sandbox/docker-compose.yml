@@ -216,7 +216,7 @@ services:
       # MAINNET-BETA (scripts/fetch-artifacts.sh) so the sandbox runs the
       # binary production runs. A client-edge channel on it is opened with the
       # receiving connector's operator as sponsor (connector ADR 0074), so
-      # Solana needs no facilitator — only the program.
+      # Solana needs no Onboarder — only the program.
       - --bpf-program
       - CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX # payment-channels (x402 batch-settlement)
       - /data/payment_channels.so
@@ -320,7 +320,7 @@ services:
         # Last, THE x402 LAYER (scripts/seed-x402.sh, toon-protocol/infra#23):
         # x402's batch-settlement contracts, Permit2 and Multicall3 at their
         # production addresses, and Circle's FiatToken as an ERC-3009 USDC —
-        # what the x402-facilitator service relays deposits into.
+        # what the onboarder service relays deposits into.
         if forge script script/DeployLocal.s.sol:DeployLocalScript \
              --rpc-url http://localhost:8545 --broadcast --skip-simulation \
            && forge script /sandbox-extras/DeploySandboxExtras.s.sol:DeploySandboxExtrasScript \
@@ -379,27 +379,28 @@ services:
       retries: 60
       start_period: 20s
 
-  # The sandbox's x402 FACILITATOR (toon-protocol/infra#23, connector ADR
-  # 0074): what production calls a facilitator, run locally so a client-edge
+  # The sandbox's ONBOARDER (toon-protocol/infra#23, connector ADR 0074;
+  # CONTEXT.md): what x402 calls a facilitator, run locally so a client-edge
   # batch-settlement channel can be opened here the way it is on Base — a
-  # wallet holding USDC and no ETH signs one ERC-3009 authorization, and this
-  # service relays the deposit and pays the gas. It is the published
+  # wallet holding USDC and no ETH signs one Funding Authorization (ERC-3009),
+  # and this service relays the deposit and pays the gas. It is the published
   # `@x402/core` + `@x402/evm` packages, stock, offering `batch-settlement` on
-  # `eip155:31337` and nothing else (x402-facilitator/index.mjs), and it
-  # offers NO receiverAuthorizer, like x402.org's hosted one. It works
+  # `eip155:31337` and nothing else (../onboarder/index.mjs), and it offers NO
+  # receiverAuthorizer, like x402.org's hosted facilitator. It works
   # unmodified only because the anvil seed placed the contracts at the
-  # addresses `@x402/evm` hardcodes. Solana has no counterpart: there the
+  # addresses `@x402/evm` hardcodes. The devnet runs the same image against
+  # Base Sepolia (../onboarder/deploy). Solana has no counterpart: there the
   # receiving connector sponsors the channel itself.
-  x402-facilitator:
+  onboarder:
     profiles: ['payments', 'credentials', 'full']
-    build: ./x402-facilitator
+    build: ../onboarder
     # Every value the devnet must set, set here too (infra#33), though each is
     # also the image's sandbox default: the chain, anvil, and the gas payer's
     # key — anvil-mnemonic index 22, 0x08135Da0…1BbE, which seed-x402.sh funds.
     environment:
       X402_NETWORK: eip155:31337
       EVM_RPC_URL: http://anvil:8545
-      FACILITATOR_EVM_PRIVATE_KEY: '0x224b7eb7449992aac96d631d9677f7bf5888245eef6d6eeda31e62d2f29a83e4'
+      ONBOARDER_EVM_PRIVATE_KEY: '0x224b7eb7449992aac96d631d9677f7bf5888245eef6d6eeda31e62d2f29a83e4'
     depends_on:
       anvil:
         condition: service_healthy

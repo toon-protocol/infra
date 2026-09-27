@@ -32,6 +32,10 @@
 #    stream_close_delay), it is a no-op when nothing changed, and an invalid
 #    config is REJECTED while the old one keeps serving. Restarting the one TLS
 #    front on the host would drop every node's traffic at once.
+# 4. The Onboarder's bundle (onboarder/deploy) applies from this same checkout
+#    on its own timer, so both take /var/lock/toon-infra-checkout.lock around
+#    the fetch and fast-forward, and only there: two timers firing together
+#    would otherwise race on git's own index.lock.
 set -euo pipefail
 
 DEPLOY_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -56,6 +60,8 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 1
 fi
 
+exec 8>/var/lock/toon-infra-checkout.lock
+flock -w 120 8 || { echo "FAILED: the infra checkout stayed locked for 120s (the onboarder's apply?)"; exit 1; }
 if ! git fetch -q origin "$TRACK_BRANCH"; then
   echo "FAILED: origin has no branch '$TRACK_BRANCH'. Set TRACK_BRANCH in edge/deploy/.env."
   exit 1
@@ -75,6 +81,7 @@ else
   LAST=${APPLIED:-never}
   echo "re-applying ${REMOTE:0:7}: the last successful apply was ${LAST:0:7}"
 fi
+flock -u 8
 
 cd "$DEPLOY_DIR"
 # Which compose files this host runs is .env's COMPOSE_FILE, when it sets one,

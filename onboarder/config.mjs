@@ -1,17 +1,21 @@
-// The facilitator's configuration, read from the environment once at start.
+// The Onboarder's configuration, read from the environment once at start.
 //
-// With nothing set it is the SANDBOX's facilitator: anvil, chain 31337, and
+// With nothing set it is the SANDBOX's Onboarder: anvil, chain 31337, and
 // the key seed-x402.sh funds. Pointed at a real network (the devnet runs it
 // against Base Sepolia, toon-protocol/infra#23), it FAILS CLOSED: off the
-// sandbox chain there is no default RPC and no default key, because a
-// facilitator that fell back to anvil's public test key would be signing with a
+// sandbox chain there is no default RPC and no default key, because an
+// Onboarder that fell back to anvil's public test key would be signing with a
 // key the whole world holds, and one that fell back to `http://anvil:8545`
 // would advertise a network it cannot reach.
 //
+// The key's variables carry this service's name, not x402's
+// (`FACILITATOR_EVM_PRIVATE_KEY`), and the old name is not read: a .env still
+// using it fails closed at start rather than running on a key nobody meant.
+//
 //   X402_NETWORK                      CAIP-2, eip155:<chain id>; default eip155:31337
 //   EVM_RPC_URL                       default http://anvil:8545, sandbox only
-//   FACILITATOR_EVM_PRIVATE_KEY       the gas payer's key, 0x-hex, or
-//   FACILITATOR_EVM_PRIVATE_KEY_FILE  a file holding it (preferred off the sandbox:
+//   ONBOARDER_EVM_PRIVATE_KEY         the gas payer's key, 0x-hex, or
+//   ONBOARDER_EVM_PRIVATE_KEY_FILE    a file holding it (preferred off the sandbox:
 //                                     a mounted file stays out of `docker inspect`)
 //   PORT                              default 4022, x402's own facilitator default
 //
@@ -45,16 +49,16 @@ export function readConfig(env, readFile) {
   } catch {}
   if (!rpcHost) throw new Error("EVM_RPC_URL must be an http(s) URL");
 
-  if (env.FACILITATOR_EVM_PRIVATE_KEY && env.FACILITATOR_EVM_PRIVATE_KEY_FILE) {
-    throw new Error("set FACILITATOR_EVM_PRIVATE_KEY or FACILITATOR_EVM_PRIVATE_KEY_FILE, not both");
+  if (env.ONBOARDER_EVM_PRIVATE_KEY && env.ONBOARDER_EVM_PRIVATE_KEY_FILE) {
+    throw new Error("set ONBOARDER_EVM_PRIVATE_KEY or ONBOARDER_EVM_PRIVATE_KEY_FILE, not both");
   }
-  let key = env.FACILITATOR_EVM_PRIVATE_KEY_FILE
-    ? String(readFile(env.FACILITATOR_EVM_PRIVATE_KEY_FILE)).trim()
-    : env.FACILITATOR_EVM_PRIVATE_KEY;
+  let key = env.ONBOARDER_EVM_PRIVATE_KEY_FILE
+    ? String(readFile(env.ONBOARDER_EVM_PRIVATE_KEY_FILE)).trim()
+    : env.ONBOARDER_EVM_PRIVATE_KEY;
   if (!key) {
     if (!sandbox) {
       throw new Error(
-        `FACILITATOR_EVM_PRIVATE_KEY or FACILITATOR_EVM_PRIVATE_KEY_FILE must be set for ${network}; ` +
+        `ONBOARDER_EVM_PRIVATE_KEY or ONBOARDER_EVM_PRIVATE_KEY_FILE must be set for ${network}; ` +
           "only the sandbox has a default key",
       );
     }
@@ -62,7 +66,7 @@ export function readConfig(env, readFile) {
   }
   if (!key.startsWith("0x")) key = `0x${key}`;
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-    throw new Error("the facilitator key must be 32 bytes of hex");
+    throw new Error("the Onboarder's key must be 32 bytes of hex");
   }
 
   return {
