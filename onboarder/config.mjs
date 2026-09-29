@@ -18,6 +18,9 @@
 //   ONBOARDER_EVM_PRIVATE_KEY_FILE    a file holding it (preferred off the sandbox:
 //                                     a mounted file stays out of `docker inspect`)
 //   PORT                              default 4022, x402's own facilitator default
+//   ONBOARDER_SPONSORED_TOKENS        comma-separated token addresses whose Permit2
+//                                     approval it sponsors (erc20ApprovalGasSponsoring);
+//                                     unset sponsors none, and does not advertise it
 //   ONBOARDER_MAX_APPROVAL_GAS        the most gas a sponsored Permit2 approval
 //                                     may ask for; default 70000 (x402's own)
 //   ONBOARDER_MAX_APPROVAL_FEE_PER_GAS  the most wei per gas it may pay; default
@@ -30,6 +33,16 @@ export const SANDBOX_RPC_URL = "http://anvil:8545";
 // anvil-mnemonic index 22, 0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE, which
 // scripts/seed-x402.sh funds. A public test key: valid on the sandbox only.
 export const SANDBOX_KEY = "0x224b7eb7449992aac96d631d9677f7bf5888245eef6d6eeda31e62d2f29a83e4";
+
+function addressList(env, name) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return [];
+  const list = raw.split(",").map((a) => a.trim()).filter(Boolean);
+  for (const a of list) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(a)) throw new Error(`${name} holds ${JSON.stringify(a)}, which is not an address`);
+  }
+  return list;
+}
 
 function positiveBigInt(env, name, fallback) {
   const raw = env[name];
@@ -87,6 +100,7 @@ export function readConfig(env, readFile) {
     rpcHost,
     privateKey: key,
     port: Number(env.PORT ?? 4022),
+    sponsoredTokens: addressList(env, "ONBOARDER_SPONSORED_TOKENS"),
     maxApprovalGas: positiveBigInt(env, "ONBOARDER_MAX_APPROVAL_GAS", 70_000n),
     maxApprovalFeePerGas: positiveBigInt(env, "ONBOARDER_MAX_APPROVAL_FEE_PER_GAS", 1_000_000_000n),
   };

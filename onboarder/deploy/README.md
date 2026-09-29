@@ -31,12 +31,22 @@ x402's extensions for that:
   permit for Permit2 rides inside the deposit. One transaction, no extra cost.
 - **`erc20ApprovalGasSponsoring`**, for a token with neither: the payer signs
   the approval without sending it, and `sponsor.mjs` funds exactly what the
-  payer lacks for its fee, broadcasts it, then deposits. An approval asking for
-  more than `ONBOARDER_MAX_APPROVAL_GAS` gas (default 70,000, x402's own), or a
-  fee above both `ONBOARDER_MAX_APPROVAL_FEE_PER_GAS` (default 1 gwei) and twice
-  the Onboarder's own current fee estimate, is refused before anything is sent.
-  That bounds what one sponsored approval can cost the gas payer, and the edge
-  rate-limits `/settle` as before.
+  payer lacks for its fee (plus Base's L1 data fee), broadcasts it, then
+  deposits. Funding is ETH given before anything exists, so it is refused,
+  before anything is sent, unless the approval:
+  - is for a token in `ONBOARDER_SPONSORED_TOKENS` (set in `docker-compose.yml`;
+    unset sponsors none and does not advertise the extension);
+  - is for this chain, at the payer's next nonce, and succeeds when simulated;
+  - asks for at most `ONBOARDER_MAX_APPROVAL_GAS` gas (default 70,000, x402's
+    own), at a fee no higher than the larger of
+    `ONBOARDER_MAX_APPROVAL_FEE_PER_GAS` (default 1 gwei) and twice the
+    Onboarder's own current estimate;
+  - comes from a payer never funded before (in this process's lifetime): a
+    payer approves Permit2 once, for the maximum, and concurrent requests for
+    one payer cannot each be funded.
+
+  What remains exposed is one approval's fee per fresh wallet holding a
+  sponsored token, and the edge rate-limits `/settle` as before.
 
 It offers **no `receiverAuthorizer`**. That key could refund a connector's
 earned-but-unclaimed value, so a connector always names its own (ADR 0074

@@ -49,6 +49,7 @@ const {
   rpcHost: RPC_HOST,
   privateKey: PRIVATE_KEY,
   port: PORT,
+  sponsoredTokens: SPONSORED_TOKENS,
   maxApprovalGas: MAX_APPROVAL_GAS,
   maxApprovalFeePerGas: MAX_APPROVAL_FEE_PER_GAS,
 } = readConfig(process.env, (path) => readFileSync(path, "utf8"));
@@ -84,18 +85,26 @@ const signer = toFacilitatorEvmSigner({
 //   - erc20ApprovalGasSponsoring, for a token with neither: the payer signs
 //     `approve(Permit2, …)` without sending it, and sponsor.mjs funds that
 //     approval's gas, broadcasts it, then deposits.
+//
+// The second gives ETH to the approval's sender before its approval exists, so
+// it is offered only for the tokens ONBOARDER_SPONSORED_TOKENS names (the ones
+// the operator's connectors are paid in), and sponsor.mjs guards it further.
 const facilitator = new x402Facilitator()
   .register(NETWORK, new BatchSettlementEvmScheme(signer))
-  .registerExtension({ key: "eip2612GasSponsoring" })
-  .registerExtension(
+  .registerExtension({ key: "eip2612GasSponsoring" });
+if (SPONSORED_TOKENS.length > 0) {
+  facilitator.registerExtension(
     createErc20ApprovalGasSponsoringExtension({
       ...signer,
       sendTransactions: approvalSponsor(client, {
+        chainId: CHAIN_ID,
+        sponsoredTokens: SPONSORED_TOKENS,
         maxApprovalGas: MAX_APPROVAL_GAS,
         maxFeePerGas: MAX_APPROVAL_FEE_PER_GAS,
       }),
     }),
   );
+}
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -149,6 +158,8 @@ app.listen(PORT, () => {
   console.log(`onboarder (an x402 facilitator): batch-settlement on ${NETWORK} via ${RPC_HOST}, port ${PORT}`);
   console.log(`  gas paid by ${account.address}; no receiverAuthorizer offered`);
   console.log(
-    `  sponsors Permit2 approvals up to ${MAX_APPROVAL_GAS} gas at ${MAX_APPROVAL_FEE_PER_GAS} wei/gas`,
+    SPONSORED_TOKENS.length > 0
+      ? `  sponsors Permit2 approvals of ${SPONSORED_TOKENS.join(", ")}, each sender once, up to ${MAX_APPROVAL_GAS} gas`
+      : "  sponsors no Permit2 approval (ONBOARDER_SPONSORED_TOKENS is unset)",
   );
 });

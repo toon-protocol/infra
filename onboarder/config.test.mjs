@@ -99,6 +99,17 @@ test("x402's own name for the key is not read, so a stale .env fails closed inst
   );
 });
 
+test("sponsors no approval unless tokens are named, and refuses a list that is not addresses", () => {
+  assert.deepEqual(readConfig({}, noFiles).sponsoredTokens, []);
+  const TOKEN = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce";
+  assert.deepEqual(
+    readConfig({ ONBOARDER_SPONSORED_TOKENS: ` ${TOKEN}, 0x4200000000000000000000000000000000000006 ` }, noFiles)
+      .sponsoredTokens,
+    [TOKEN, "0x4200000000000000000000000000000000000006"],
+  );
+  assert.throws(() => readConfig({ ONBOARDER_SPONSORED_TOKENS: "usdc" }, noFiles), /not an address/);
+});
+
 test("sponsored approvals are bounded by x402's own defaults, or by what is configured", () => {
   const config = readConfig({}, noFiles);
   assert.equal(config.maxApprovalGas, 70_000n);
