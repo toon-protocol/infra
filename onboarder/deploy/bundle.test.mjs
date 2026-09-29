@@ -100,7 +100,7 @@ describe('the image', () => {
     const workflow = readRepo('.github/workflows/onboarder-image.yml');
     assert.ok(workflow.includes(IMAGE), 'the workflow pushes some other image');
     assert.match(workflow, /context: onboarder$/m);
-    assert.match(workflow, /node --test onboarder\/config\.test\.mjs onboarder\/deploy\/bundle\.test\.mjs/);
+    assert.match(workflow, /node --test onboarder\/config\.test\.mjs onboarder\/sponsor\.test\.mjs onboarder\/deploy\/bundle\.test\.mjs/);
   });
 
   it('keeps the bundle out of the image', () => {

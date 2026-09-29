@@ -7,6 +7,6 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY index.mjs config.mjs ./
+COPY index.mjs config.mjs sponsor.mjs ./
 EXPOSE 4022
 CMD ["node", "index.mjs"]

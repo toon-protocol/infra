@@ -31,6 +31,13 @@ services:
       # The devnet's EVM chain. Fixed here, not in .env, so which network this
       # host pays gas on is a reviewed commit.
       X402_NETWORK: eip155:84532
+      # The tokens whose Permit2 approval it funds and broadcasts for a payer
+      # with no ETH (erc20ApprovalGasSponsoring; sponsor.mjs). Only a token
+      # with neither ERC-3009 nor a permit needs it: the devnet's first mock
+      # USDC, which toon-client's acceptance deposits. Devnet USDC has both, so
+      # it needs no entry. Fixed here, like the network, so what this host
+      # gives ETH for is a reviewed commit.
+      ONBOARDER_SPONSORED_TOKENS: "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
       # A Base Sepolia RPC. From .env, because a hosted one's URL carries its
       # API key; the service logs only the host.
       EVM_RPC_URL: ${EVM_RPC_URL:?set EVM_RPC_URL in .env}
