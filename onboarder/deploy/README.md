@@ -9,7 +9,8 @@ Base Sepolia (`eip155:84532`). It is the same image the sandbox builds from
 
 ```
 https://onboard.devnet.toonprotocol.dev
-  GET  /supported   batch-settlement on eip155:84532, no receiverAuthorizer
+  GET  /supported   batch-settlement on eip155:84532, no receiverAuthorizer,
+                    extensions eip2612GasSponsoring and erc20ApprovalGasSponsoring
   GET  /health      ok, or 503 with the reason
   POST /verify      x402 v2 §7
   POST /settle      x402 v2 §7: relays the deposit, pays the gas
@@ -20,6 +21,22 @@ nothing pays it over ILP. It runs on the devnet host behind the edge, on its
 own network `edge-onboarder`, the way a node would (ADR 0002 says why it lives
 here). It never holds a user's funds. The only thing of value it has is the
 gas payer's Base Sepolia ETH.
+
+It deposits **any ERC-20**, not only ERC-3009 tokens (toon-protocol/toon-client#695).
+A token without ERC-3009 deposits through Permit2, which first needs the payer's
+`approve(Permit2, …)`, a transaction of its own. The Onboarder offers both of
+x402's extensions for that:
+
+- **`eip2612GasSponsoring`**, for a token with an EIP-2612 permit: the payer's
+  permit for Permit2 rides inside the deposit. One transaction, no extra cost.
+- **`erc20ApprovalGasSponsoring`**, for a token with neither: the payer signs
+  the approval without sending it, and `sponsor.mjs` funds exactly what the
+  payer lacks for its fee, broadcasts it, then deposits. An approval asking for
+  more than `ONBOARDER_MAX_APPROVAL_GAS` gas (default 70,000, x402's own), or a
+  fee above both `ONBOARDER_MAX_APPROVAL_FEE_PER_GAS` (default 1 gwei) and twice
+  the Onboarder's own current fee estimate, is refused before anything is sent.
+  That bounds what one sponsored approval can cost the gas payer, and the edge
+  rate-limits `/settle` as before.
 
 It offers **no `receiverAuthorizer`**. That key could refund a connector's
 earned-but-unclaimed value, so a connector always names its own (ADR 0074

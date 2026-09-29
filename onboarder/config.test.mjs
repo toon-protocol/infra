@@ -98,3 +98,17 @@ test("x402's own name for the key is not read, so a stale .env fails closed inst
     /ONBOARDER_EVM_PRIVATE_KEY/,
   );
 });
+
+test("sponsored approvals are bounded by x402's own defaults, or by what is configured", () => {
+  const config = readConfig({}, noFiles);
+  assert.equal(config.maxApprovalGas, 70_000n);
+  assert.equal(config.maxApprovalFeePerGas, 1_000_000_000n);
+  const tuned = readConfig(
+    { ONBOARDER_MAX_APPROVAL_GAS: "90000", ONBOARDER_MAX_APPROVAL_FEE_PER_GAS: "5000000" },
+    noFiles,
+  );
+  assert.equal(tuned.maxApprovalGas, 90_000n);
+  assert.equal(tuned.maxApprovalFeePerGas, 5_000_000n);
+  assert.throws(() => readConfig({ ONBOARDER_MAX_APPROVAL_GAS: "0" }, noFiles), /positive whole number/);
+  assert.throws(() => readConfig({ ONBOARDER_MAX_APPROVAL_FEE_PER_GAS: "1e9" }, noFiles), /positive whole number/);
+});

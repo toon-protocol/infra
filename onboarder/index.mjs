@@ -36,9 +36,11 @@ import express from "express";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { toFacilitatorEvmSigner } from "@x402/evm";
 import { BatchSettlementEvmScheme } from "@x402/evm/batch-settlement/facilitator";
+import { createErc20ApprovalGasSponsoringExtension } from "@x402/extensions";
 import { createWalletClient, defineChain, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { readConfig } from "./config.mjs";
+import { approvalSponsor } from "./sponsor.mjs";
 
 const {
   network: NETWORK,
@@ -47,6 +49,8 @@ const {
   rpcHost: RPC_HOST,
   privateKey: PRIVATE_KEY,
   port: PORT,
+  maxApprovalGas: MAX_APPROVAL_GAS,
+  maxApprovalFeePerGas: MAX_APPROVAL_FEE_PER_GAS,
 } = readConfig(process.env, (path) => readFileSync(path, "utf8"));
 
 const chain = defineChain({
@@ -71,10 +75,27 @@ const signer = toFacilitatorEvmSigner({
 });
 
 // No second argument: no receiverAuthorizer is offered (see the header).
-const facilitator = new x402Facilitator().register(
-  NETWORK,
-  new BatchSettlementEvmScheme(signer),
-);
+//
+// Both of x402's gas-sponsoring extensions are offered, so a token WITHOUT
+// ERC-3009 deposits through Permit2 with no ETH of the payer's either:
+//   - eip2612GasSponsoring, for a token with an EIP-2612 permit: the payer's
+//     permit for Permit2 rides inside the deposit, one transaction, sent by
+//     the scheme itself. Registering it only advertises it on /supported.
+//   - erc20ApprovalGasSponsoring, for a token with neither: the payer signs
+//     `approve(Permit2, …)` without sending it, and sponsor.mjs funds that
+//     approval's gas, broadcasts it, then deposits.
+const facilitator = new x402Facilitator()
+  .register(NETWORK, new BatchSettlementEvmScheme(signer))
+  .registerExtension({ key: "eip2612GasSponsoring" })
+  .registerExtension(
+    createErc20ApprovalGasSponsoringExtension({
+      ...signer,
+      sendTransactions: approvalSponsor(client, {
+        maxApprovalGas: MAX_APPROVAL_GAS,
+        maxFeePerGas: MAX_APPROVAL_FEE_PER_GAS,
+      }),
+    }),
+  );
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -127,4 +148,7 @@ app.get("/health", async (_req, res) => {
 app.listen(PORT, () => {
   console.log(`onboarder (an x402 facilitator): batch-settlement on ${NETWORK} via ${RPC_HOST}, port ${PORT}`);
   console.log(`  gas paid by ${account.address}; no receiverAuthorizer offered`);
+  console.log(
+    `  sponsors Permit2 approvals up to ${MAX_APPROVAL_GAS} gas at ${MAX_APPROVAL_FEE_PER_GAS} wei/gas`,
+  );
 });

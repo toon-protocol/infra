@@ -18,6 +18,10 @@
 //   ONBOARDER_EVM_PRIVATE_KEY_FILE    a file holding it (preferred off the sandbox:
 //                                     a mounted file stays out of `docker inspect`)
 //   PORT                              default 4022, x402's own facilitator default
+//   ONBOARDER_MAX_APPROVAL_GAS        the most gas a sponsored Permit2 approval
+//                                     may ask for; default 70000 (x402's own)
+//   ONBOARDER_MAX_APPROVAL_FEE_PER_GAS  the most wei per gas it may pay; default
+//                                     1000000000 (1 gwei, x402's own fallback)
 //
 // Pure — `readFile` is passed in — so config.test.mjs needs no filesystem.
 
@@ -26,6 +30,13 @@ export const SANDBOX_RPC_URL = "http://anvil:8545";
 // anvil-mnemonic index 22, 0x08135Da0A343E492FA2d4282F2AE34c6c5CC1BbE, which
 // scripts/seed-x402.sh funds. A public test key: valid on the sandbox only.
 export const SANDBOX_KEY = "0x224b7eb7449992aac96d631d9677f7bf5888245eef6d6eeda31e62d2f29a83e4";
+
+function positiveBigInt(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined) return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw)) throw new Error(`${name} must be a positive whole number, not ${JSON.stringify(raw)}`);
+  return BigInt(raw);
+}
 
 export function readConfig(env, readFile) {
   const network = env.X402_NETWORK ?? SANDBOX_NETWORK;
@@ -76,5 +87,7 @@ export function readConfig(env, readFile) {
     rpcHost,
     privateKey: key,
     port: Number(env.PORT ?? 4022),
+    maxApprovalGas: positiveBigInt(env, "ONBOARDER_MAX_APPROVAL_GAS", 70_000n),
+    maxApprovalFeePerGas: positiveBigInt(env, "ONBOARDER_MAX_APPROVAL_FEE_PER_GAS", 1_000_000_000n),
   };
 }
