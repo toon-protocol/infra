@@ -12,5 +12,9 @@
     "@x402/extensions": "2.27.0",
     "express": "4.21.2",
     "viem": "2.48.11"
+  },
+  "devDependencies": {
+    "@toon-protocol/client": "4.1.1",
+    "nostr-tools": "2.25.1"
   }
 }
