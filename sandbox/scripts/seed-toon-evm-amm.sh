@@ -7,11 +7,9 @@
 # leg's token is seed-x402.sh's FiatToken) — and BEFORE the anvil healthcheck
 # can pass, which gates on an `observe()` over the ANYONE pool.
 #
-# NOTHING PRICES OFF THIS LAYER UNTIL infra#42. The hub dealt ANYONE at this
-# market's TWAP until the sandbox went x402-only (infra#39); a node holds one
-# token per chain, and the hub settles USDC on EVM now, so the flip moves to a
-# Dealer node in #42 (infra ADR 0003). The layer keeps building and the swap
-# driver keeps trading so that #42 starts from a live market, not a rebuild.
+# THE DEALER PRICES OFF THIS LAYER (conf/connector-dealer.toml, infra ADR
+# 0003): its ANYONE quote is these two pools' TWAPs, composed. The hub dealt
+# at this market until the sandbox went x402-only (infra#39).
 #
 # WHAT IT BUILDS, AND WHY EACH PIECE IS THE REAL THING
 # ----------------------------------------------------

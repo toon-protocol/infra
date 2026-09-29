@@ -1,0 +1,199 @@
+# =============================================================================
+# dealer-connector — THE DEALER (infra#42, docs/adr/0003-the-anyone-flip-lives-
+# in-a-dealer-node.md). No app sits behind it. It takes the hub's forwarded
+# g.anyone.credentials traffic in µUSDC on Solana and pays anytoon-connector
+# in ANYONE on anvil, converting at a live Uniswap v3 TWAP (connector ADR 0071).
+# The hub used to do this; a node holds one token per chain, and the hub
+# settles USDC on EVM since infra#39, so the flip has a node of its own.
+# =============================================================================
+# Same three rules as every connector file here: no environment layer, every
+# table deny_unknown_fields, startup fail-closed (conf/connector-relay.toml says
+# each at length).
+#
+#   client ──µUSDC, Solana──▶ relay-connector (hub)
+#                ──µUSDC at par, Solana, peering relay-dealer──▶ dealer-connector
+#                ──ANYONE, anvil, the dealer AS A CLIENT──▶ anytoon-connector
+#
+# NEITHER PEERING IS IN THIS FILE, and neither are its routes. Both halves are
+# x402 channels opened with a fresh salt, which no config can name — a
+# `[[pay_channels]]` row must name a channel this node's journal already holds,
+# or the node refuses to start — so the `open-peerings` init job writes them at
+# runtime (scripts/peerings.mjs is the table, `GET /peers` and `GET
+# /routes/peers` show them live):
+#
+#   relay-dealer    both ends write POST /peers, as every hub peering does. The
+#                   hub pays this node µUSDC over Solana at par.
+#   dealer-anytoon  ONLY THIS END writes POST /peers. It binds anytoon's voucher
+#                   signer, opens this node's own x402 channel in ANYONE toward
+#                   anytoon (a Permit2 deposit, after a one-time `approve` the
+#                   connector sends from the settlement key below), and carries
+#                   the two routes, 10900 and 110 µUSDC. ANYTOON BINDS NOTHING
+#                   FOR THIS NODE, so a voucher from it is a CLIENT's there, and
+#                   anytoon's claim minter is told `X-TOON-Payer =
+#                   evm:0x<this node's channel id>`. A forwarded, peer-role
+#                   packet states no payer (connector ADR 0040), and the minter
+#                   refuses a purchase it cannot attribute — after the client
+#                   paid for it. That is the whole reason this peering is
+#                   one-sided (infra ADR 0003).
+#
+# The route prices are what a packet ARRIVES here with (µUSDC), because a route
+# price is always in the incoming unit, and they are STATIC while the rate
+# floats: this node carries the FX risk between quoting and settling, which is
+# what a dealer is. Each has to cover anytoon's price at the worst rate the
+# market can show:
+#
+#   anytoon's price       40000000000000000   0.04 ANYONE (conf/anytoon.conf)
+#   + the peering fee        400000000000000   0.0004 ANYONE
+#   = must arrive          40400000000000000
+#
+#   mid rate           4e12 ANYONE base units per µUSDC (ANYONE = 0.25 USDC,
+#                      conf/amm-topology.conf)
+#   less the spread    x 0.997    ([rate_guards] below)
+#   less the band      x 0.98     (the swap driver's 200 ticks, 2.02%)
+#   = worst rate       3.908e12
+#
+#   40400000000000000 / 3.908e12 = 10338 µUSDC   <- the floor
+#   10900                                        <- this node's route price
+#
+# The key document is free at anytoon, so its route only has to buy the fee:
+# 400000000000000 / 3.908e12 = 103 µUSDC, and the route charges 110. At the
+# 10 µUSDC it would get were the hub still charging 110, the forward would come
+# out negative — which is why a client pays 210 for the key document now.
+#
+# `npm test` re-derives both inequalities from this file's spread and the
+# committed topology (scripts/lib/peering-plan.test.mjs), and `make smoke`
+# re-derives them from this node's live GET /rates.
+#
+# THE u64 CEILING. A voucher's amount is a u64 in the connector (the contract's
+# is uint128; widening it is connector#1429), so the dealer-anytoon channel can
+# carry at most about 18.45 ANYONE over its whole life — some 460 bundles.
+# Plenty for a sandbox `make clean` resets; not a property to copy anywhere
+# that lives longer.
+
+client_edge_addr = "0.0.0.0:3000"
+
+# The claim journal, the outbound-channel journal and the runtime peer/route
+# table (named volume, uid 10001).
+state_dir = "/app/state"
+
+# The hub dials this node: its POST /peers reads this node's self-description,
+# and it forwards over the peer carriage. `http` only — every node here
+# publishes that. Anytoon dials nothing back.
+peer_expose = "http"
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# The compose-network name, which is what the hub's POST /peers dials. A host
+# smoke reaches it at 127.0.0.1:3270 through scripts/lib/sandbox-endpoints.mjs.
+[node]
+addresses = ["g.toon.dealer"]
+http_endpoint = "http://dealer-connector:3000/ilp"
+
+# ── Settlement ───────────────────────────────────────────────────────────────
+# EVM: ANYONE — the real mainnet AnyoneProtocolToken bytecode at its mainnet
+# address, placed by scripts/seed-toon-evm-amm.sh. The one line that makes this
+# node pay anytoon in ANYONE: a peering's token is the `token_address` of the
+# settlement table on its chain, one per chain per node. `decimals = 18` is
+# checked against the token's own `decimals()` at boot.
+#
+# ANYONE has no ERC-3009, so its deposits go through Permit2
+# (`Permit2DepositCollector`): this node's own deposit toward anytoon, and any
+# payer's toward this node. The EIP-712 name and version are still required,
+# and published, but no boot check tests them under permit2 — a Permit2 deposit
+# is signed under Permit2's domain, not the token's. They are ANYONE's own
+# `name()` and the OpenZeppelin default version.
+#
+# NO facilitator_url: the Onboarder pays for no Permit2 approval
+# (`erc20ApprovalGasSponsoring` is out of scope), and nobody pays this node on
+# EVM anyway. It holds anvil ETH for its own approval and deposits
+# (scripts/seed-evm-nodes.sh).
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+token_address = "0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
+decimals = 18
+asset_eip712_name = "ANyONe Protocol"
+asset_eip712_version = "1"
+asset_transfer_method = "permit2"
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# Solana: the mock USDC mint, where the hub pays this node. The key holds SOL
+# before boot (scripts/seed-toon-solana.mjs): it pays the rent of the hub's
+# channel toward it, which it sponsors, and funds its own 1-USDC channel back.
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+min_sponsored_deposit = 1000000
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+# Reads (GET /claims, GET /channels, GET /rates) need the bearer token; writes
+# (the open-peerings job's POST /peers, /channels/:id/fund, /routes/peers) need
+# an RFC 9421 signature from the allowlisted key.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WHAT THIS NODE DEALS (connector ADR 0071 decision 3)
+# ═════════════════════════════════════════════════════════════════════════════
+# Once any row exists, every ordered pair this node forwards across needs a
+# rate or is refused F02, and every token a settlement table names must be
+# declared here. Three rows:
+#
+#   evm:0x0A86…   the FiatToken USDC — THE NUMERAIRE, the USDC people pay in.
+#                 Nothing on this node settles in it; a numeraire is a unit of
+#                 account, and it is where the ANYONE quote has to end (on the
+#                 numeraire's own chain).
+#   evm:0xFeAc…   ANYONE, quoted LIVE off this sandbox's anvil.
+#   solana:H8HS…  the mock USDC the hub pays in. No quote — the connector has no
+#                 Solana rate source — so it is priced by the par row below.
+[[tokens]]
+asset = "evm:0x0A867CA0442383c2A89951244B955AA19b615b58"
+numeraire = true
+
+# Two legs, ANYONE -> WETH -> USDC, because ANYONE's venue is a 1% ANYONE/WETH
+# pool and WETH is priced in USDC one hop further on. Both are real Uniswap v3
+# pools on anvil (scripts/seed-toon-evm-amm.sh), kept trading by
+# scripts/swap-driver.sh; the addresses are conf/amm-topology.conf's. `pool` is
+# bare, `quote_token` prefixed, and the last leg ends at the numeraire.
+# 300 s windows against 900 s of primed history and a 128-observation ring.
+[[tokens]]
+asset = "evm:0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
+quote = [
+  { pool = "0x8983f1366e1c0d20647c9a1b0cb46ce4c46e13c7", quote_token = "evm:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", twap_window_secs = 300 },
+  { pool = "0x9668cfad9c9148bf8f1bf28b788e19e610d59b2d", quote_token = "evm:0x0A867CA0442383c2A89951244B955AA19b615b58", twap_window_secs = 300 },
+]
+
+[[tokens]]
+asset = "solana:H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+
+# The one declared rate: Solana µUSDC to the numeraire at par. ORDERED — the
+# rate table only looks for `(token, numeraire)` — so the pair the packets
+# actually cross, `solana:H8HS… -> evm:0xFeAc…`, is composed from this row and
+# the ANYONE quote read backwards. `spread = 0` turns dealing off on this leg;
+# the spread taken is the composed pair's, from [rate_guards], once.
+[[rates]]
+from = "solana:H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+to = "evm:0x0A867CA0442383c2A89951244B955AA19b615b58"
+rate = { numerator = 1, denominator = 1 }
+spread = { numerator = 0, denominator = 1 }
+
+# Required as a set once anything can produce a rate.
+#   spread   0.3%, this node's dealing margin: the 0.997 in the derivation at
+#            the top of this file.
+#   ttl_secs 120, which also sets the polling cadence (ttl/3 = 40 s). A pair
+#            that goes stale refuses T00 — with nothing trading, one ttl after
+#            the last block; the swap driver keeps blocks coming.
+#   max_move 5%: a refresh further than that from the last accepted one is
+#            refused and shows as `refused_refresh` on GET /rates. The driver
+#            moves the 300 s TWAP about 0.5% between polls.
+[rate_guards]
+spread = { numerator = 30, denominator = 10000 }
+ttl_secs = 120
+max_move = { numerator = 5, denominator = 100 }

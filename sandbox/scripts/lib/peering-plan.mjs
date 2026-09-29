@@ -5,6 +5,20 @@
 import { CHANNEL_TARGET, OPEN_DEPOSIT } from '../peerings.mjs';
 
 /**
+ * Whether `side` of a peering writes `POST /peers` at all. The payer always
+ * does. The payee does unless the peering is `payeeBinds: false` — the
+ * Dealer's to anytoon (infra ADR 0003), where binding the dealer's voucher
+ * signer would turn its vouchers into a PEER's, and a peer-role arrival tells
+ * anytoon's claim minter nobody paid (connector ADR 0040).
+ */
+export function binds(peering, side) {
+  return side === 'payer' || peering.payeeBinds !== false;
+}
+
+/** What the payer keeps behind its channel: the peering's own, or 100 USDC. */
+export const targetOf = (peering) => peering.target ?? CHANNEL_TARGET;
+
+/**
  * The `POST /peers` body one side of a peering sends.
  *
  * The PAYEE goes first and names the payer: it reads the payer's
@@ -22,12 +36,14 @@ export function peerBody(peering, side, nodes) {
     url: nodes[payer ? peering.payee : peering.payer].url,
     fee: payer ? peering.fee : 0,
     // 0 keeps the connector's default cap (one USDC at six decimals), far
-    // above any single packet this sandbox sends.
-    max_packet_amount: 0,
+    // above any single packet a USDC peering here sends. An 18-decimal leg
+    // names its own: that default is 1e-12 ANYONE, and every forward onto it
+    // would refuse T04.
+    max_packet_amount: payer ? (peering.max_packet_amount ?? 0) : 0,
     chain: peering.chain,
-    // A JSON number: the connector reads it as a u128. Both figures are far
-    // inside a double's exact range.
-    deposit: Number(payer ? CHANNEL_TARGET : OPEN_DEPOSIT),
+    // JSON numbers: the connector reads them as u128. Every figure in the
+    // table (1e18, 1e19 included) is one a double holds exactly.
+    deposit: Number(payer ? targetOf(peering) : OPEN_DEPOSIT),
   });
 }
 

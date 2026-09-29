@@ -26,9 +26,11 @@
 # declares, connector ADR 0034). The table, fees and forwarding prices are
 # scripts/peerings.mjs; `GET /peers` and `GET /routes/peers` show them live.
 #
-# The ANYONE flip this node used to deal (connector ADR 0071) is out of the
-# sandbox until infra#42 moves it into a Dealer node: a node holds one token
-# per chain, and this one settles USDC on EVM now (infra ADR 0003).
+# The ANYONE flip this node used to deal (connector ADR 0071) lives in the
+# Dealer now (conf/connector-dealer.toml, infra ADR 0003): a node holds one
+# token per chain, and this one settles USDC on EVM. This node keeps no ANYONE
+# and no quote; it forwards g.anyone.credentials* to the dealer over Solana at
+# par, like any other peering (scripts/peerings.mjs, `relay-dealer`).
 
 client_edge_addr = "0.0.0.0:3000"
 

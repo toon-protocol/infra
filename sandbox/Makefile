@@ -5,9 +5,9 @@
 #   full         the whole stack, every service — the sandbox's default
 #   payments     chains + hub + both providers + the open-peerings job, no
 #                sibling app checkout needed beyond the provider's
-#   credentials  `payments` PLUS the Anyone credentials issuer path and the
-#                swap driver — the denomination boundary without the permaweb
-#                half. Needs the anytoon checkout, NOT the store one
+#   credentials  the chains, the hub, the Dealer, the Anyone credentials issuer
+#                path and the swap driver — the denomination boundary without
+#                the permaweb half. Needs the anytoon checkout, NOT the store one
 #   hs           `full` PLUS the anon daemon, its forwarder, the buyer's SOCKS
 #                proxy and THE HIDDEN PROVIDER (its own daemon, connector,
 #                publisher and provider app, TOON_Network #43) — OPT-IN
@@ -23,10 +23,11 @@ COMPOSE = docker compose --profile $(COMPOSE_PROFILE)
 
 # `up-hs` is `full` PLUS `hs`: three services on top of the whole stack, never a
 # stack of their own. What it does change about `full` is what the anytoon node
-# ADVERTISES — the rendered config below points its [node] endpoints at the
+# ADVERTISES — the rendered config below points its [node] endpoint at the
 # generated `.anyone` address, because a client dials what a node publishes.
-# The hub is unaffected (it dials its own [[peers]] endpoint); a clearnet client
-# aimed straight at localhost:3230 is not. See README §2 + §6.6.
+# The Dealer is unaffected (its peering was established against the compose
+# name before anytoon was recreated; see up-hs); a clearnet client aimed
+# straight at localhost:3230 is not. See README §2 + §6.6.
 COMPOSE_HS = docker compose --profile full --profile hs
 
 # `up-gateway` is `$(COMPOSE_PROFILE)` PLUS `gateway`: the Workload Gateway and
@@ -36,9 +37,7 @@ COMPOSE_GW = $(COMPOSE) --profile gateway
 
 # down/clean must sweep EVERY profile's containers, whichever one brought them
 # up — otherwise `make up-hs && make down` leaves three daemons running.
-# `anytoon` is the parked anytoon-connector's profile (until infra#42): nothing
-# starts it, but a sweep must still reach a container someone started by hand.
-COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway --profile anytoon
+COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway
 
 # The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
 # own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
@@ -215,13 +214,12 @@ up-payments: COMPOSE_PROFILE = payments
 up-payments: state-guard require-provider-publisher
 	$(COMPOSE) up -d --build
 
-## start the CREDENTIALS slice: the chains, the hub and the paid side of the
-## denomination boundary — the issuer path (issuer + minter + datastores + key
-## job) and the swap driver that keeps the ANYONE TWAP fresh. The anytoon
-## connector that sold across the boundary is PARKED until infra#42 (a Dealer
-## node takes the flip over, infra ADR 0003), so no bundle can be bought here
-## yet. Needs the anytoon sibling checkout (claim-minter builds from it) but
-## NOT the store checkout — the whole point of the profile.
+## start the CREDENTIALS slice: the chains, the hub, the DEALER (infra#42, ADR
+## 0003) and the paid side of the denomination boundary — anytoon-connector,
+## the issuer path (issuer + minter + datastores + key job) — and the swap
+## driver that keeps the ANYONE TWAP the dealer converts at fresh. Needs the
+## anytoon sibling checkout (claim-minter builds from it) but NOT the store
+## checkout — the whole point of the profile.
 up-credentials: COMPOSE_PROFILE = credentials
 up-credentials: state-guard require-anytoon-context
 	$(COMPOSE) up -d --build
@@ -263,20 +261,30 @@ up-hs: state-guard require-store-context require-anytoon-context require-provide
 	# The addresses, out of the daemons and into the configs that mount them.
 	./scripts/hs-address.sh
 	./scripts/hs-provider-address.sh
-	# Now the rest of the stack, with the anytoon-connector recreated against
-	# the rendered config so it PUBLISHES the .anyone endpoint. A client dials
-	# what a node publishes, not what the caller typed. The hidden provider and
-	# its connector mount their rendered configs for the same reason.
-	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) \
+	# Now the rest of the stack — anytoon-connector on its COMMITTED config
+	# first, publishing its compose name, because the Dealer's peering toward it
+	# is a POST /peers, which dials what anytoon publishes, and the dealer cannot
+	# dial a `.anyone` address. The hidden provider and its connector mount
+	# their rendered configs from the start: nothing peers with them.
 	PROVIDER_HS_CONNECTOR_CONF=$(HS_PROVIDER_CONNECTOR_CONF) \
 	PROVIDER_HS_CONF=$(HS_PROVIDER_CONF) \
 	  $(COMPOSE_HS) up -d
+	@$(call wait_completed,open-peerings)
+	# Then anytoon-connector alone, recreated against the rendered config so it
+	# PUBLISHES the .anyone endpoint: a buyer over the circuit dials what a node
+	# publishes, not what the caller typed. The dealer keeps the peering it
+	# already has (scripts/open-peerings.mjs leaves one toward a hidden endpoint
+	# be).
+	ANYTOON_CONNECTOR_CONF=$(HS_CONNECTOR_CONF) \
+	PROVIDER_HS_CONNECTOR_CONF=$(HS_PROVIDER_CONNECTOR_CONF) \
+	PROVIDER_HS_CONF=$(HS_PROVIDER_CONF) \
+	  $(COMPOSE_HS) up -d --no-deps anytoon-connector
+	@$(call wait_healthy,anytoon-connector)
 	@echo "  re-checking the daemons, in case the rest of the stack disturbed them"
 	@$(call wait_healthy,anon anon-client anon-hs)
 	@echo
-	@echo "up. \`make smoke-m4\` rehearses the hidden provider over the circuit."
-	@echo "(\`make smoke-hs\`, the credentials purchase over the anytoon daemon's address,"
-	@echo "is parked with anytoon until infra#42.) See README §2 + §6.8."
+	@echo "up. \`make smoke-hs\` buys a credentials bundle over the anytoon daemon's address;"
+	@echo "\`make smoke-m4\` rehearses the hidden provider over the circuit. See README §2 + §6.8."
 
 ## THE WORKLOAD GATEWAY (TOON_Network ADR 0013, spec §12; Milestones 5 and 6,
 ## #53 and #62): `full` PLUS the gateway and its own connector — two services,
@@ -315,6 +323,25 @@ up-gateway-hs: require-gateway-context
 hs-address:
 	./scripts/hs-address.sh
 	./scripts/hs-provider-address.sh
+
+# Waits until the named one-shot services have EXITED 0 — the open-peerings job
+# before `up-hs` points anytoon at its `.anyone` address.
+define wait_completed
+	for svc in $(1); do \
+		n=0; \
+		while :; do \
+			cid=$$($(COMPOSE_HS) ps -a -q $$svc 2>/dev/null); \
+			state="$$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' $$cid 2>/dev/null)"; \
+			if [ "$$state" = "exited 0" ]; then echo "  $$svc: done"; break; fi; \
+			case "$$state" in exited*) \
+				echo "  $$svc failed ($$state): docker compose --profile hs logs $$svc"; exit 1;; \
+			esac; \
+			n=$$((n+1)); \
+			if [ $$n -gt 120 ]; then echo "  $$svc did not finish in ~10 minutes"; exit 1; fi; \
+			sleep 5; \
+		done; \
+	done
+endef
 
 # Waits until the named services report docker-healthy. `anon`'s healthcheck is
 # "hostname file exists AND Bootstrapped 100%", so this is a wait for a CIRCUIT,
@@ -411,15 +438,15 @@ smoke-x402:
 	npm --prefix ../onboarder ci --no-audit --no-fund --silent
 	node ../onboarder/smoke.mjs
 
-## credentials proof — PARKED UNTIL infra#42. It bought a bundle across the
-## denomination boundary, which the hub dealt: uUSDC in, ANYONE out at a live
-## TWAP. The x402-only connector (infra#39) holds one token per chain per
-## node, the hub settles USDC on EVM now, and anytoon-connector is out of the
-## stack until #42 gives the flip its own Dealer node (infra ADR 0003).
+## credentials proof for `make up-credentials` (infra#42): smoke-toon.mjs told
+## to run the payment layer's hub half and the DENOMINATION BOUNDARY — a client
+## pays the hub µUSDC on Solana, the hub pays the Dealer at par, the Dealer
+## converts at the live TWAP and pays anytoon ANYONE as a client, anytoon's
+## book names the dealer's channel, and the rate moved during the run. Then
+## smoke-x402.
 smoke-credentials:
-	@echo "smoke-credentials is parked until infra#42: the ANYONE flip moves from the hub to a"
-	@echo "Dealer node there (docs/adr/0003), and anytoon-connector is out of the stack until then."
-	@exit 2
+	TOON_SMOKE_CREDENTIALS_ONLY=1 node scripts/smoke-toon.mjs
+	$(MAKE) smoke-x402
 
 ## compute-provider proof for `make up-payments` (or `make up`): a tenant
 ## opens an x402 channel in mock USDC on Solana against the hub, builds a Lease Request
@@ -566,16 +593,14 @@ smoke-ci:
 test:
 	npm test
 
-## hidden-service proof for `make up-hs` — PARKED UNTIL infra#42, with the
-## anytoon node it buys from: a client dialled this sandbox's `.anyone` address
-## through the SOCKS5h proxy and bought one real bundle of blind signatures,
-## paying anytoon directly in ANYONE. #42 brings anytoon back and moves this
-## buyer onto a Permit2 x402 deposit. (`make smoke-m4`, the HIDDEN PROVIDER,
-## is not parked: it is the same overlay with a node this issue migrated.)
+## hidden-service proof for `make up-hs` ONLY — it dials the REAL Anyone
+## network, so exit 1 is this sandbox and exit 75 the overlay not carrying. A
+## client with only this sandbox's `.anyone` address and the SOCKS5h proxy buys
+## one real bundle of blind signatures, paying anytoon directly in ANYONE from
+## an x402 channel it opens with a Permit2 deposit — its approval and deposit
+## paid from its own anvil ETH, every JSON-RPC call over the same circuit.
 smoke-hs:
-	@echo "smoke-hs is parked until infra#42, with the anytoon node it buys credentials from."
-	@echo "The hidden-provider rehearsal on the same overlay is \`make smoke-m4\`."
-	@exit 2
+	node scripts/smoke-hs.mjs
 
 ## MILESTONE 4 ACCEPTANCE TEST (TOON_Network #12 / #44, scripts/smoke-milestone4.mjs)
 ## for `make up-hs` ONLY — it dials the REAL Anyone network, and like
