@@ -5,9 +5,12 @@
 // `node onboarder/smoke.mjs --devnet` runs the same path on the devnet: Base
 // Sepolia, through https://onboard.devnet.toonprotocol.dev, with devnet USDC
 // from the faucet, into a channel whose receiver is the devnet RELAY
-// connector's EVM settlement address, read off its own `GET /ilp`. That is
-// infra#23's acceptance check. It spends no ETH of the caller's (the Onboarder
-// pays) and leaves a 5 USDC channel of faucet money behind.
+// connector's EVM `batchSettlements` offer, read off its own `GET /ilp`, which
+// must name this Onboarder as its `facilitator`. After the deposit it pays the
+// relay one write (`g.toon.relay`, 1 µUSDC) with a voucher on that same
+// channel, through the published `@toon-protocol/client`, and checks the relay
+// fulfils it (infra#43). It spends no ETH of the caller's (the Onboarder pays)
+// and leaves a 5 USDC channel of faucet money behind.
 //
 // A fresh wallet holding USDC and NO ETH signs one ERC-3009 authorization. The
 // Onboarder verifies it, relays the deposit and pays the gas, and the
@@ -101,6 +104,11 @@ function check(label, ok, detail = "") {
   if (!ok) failures += 1;
 }
 
+function finish() {
+  console.log(failures === 0 ? "\nsmoke-x402: all checks passed" : `\nsmoke-x402: ${failures} check(s) failed`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 async function onboarder(path, body) {
   const res = await fetch(`${ONBOARDER_URL}${path}`, {
     method: body ? "POST" : "GET",
@@ -111,26 +119,57 @@ async function onboarder(path, body) {
   return res.json();
 }
 
-// The receiving connector's EVM settlement address. On the sandbox, the hub's,
-// from its committed throwaway key. On the devnet, the relay's, as its own
-// `GET /ilp` publishes it for this chain and this token.
-async function receiverAddress() {
+// The receiving connector's channel terms. On the sandbox, the hub's EVM
+// settlement address, from its committed throwaway key, on ADR 0074's defaults.
+// On the devnet, the relay's own `GET /ilp`: its `batchSettlements` offer for
+// this chain and this token, and the endpoint a paid packet goes to.
+async function receiverOffer() {
   if (!DEVNET) {
     const hubKey = readFileSync(
       join(HERE, "..", "sandbox", "keys", "toon", "relay-connector", "settlement.key"),
       "utf8",
     ).trim();
-    return privateKeyToAccount(`0x${hubKey.replace(/^0x/, "")}`).address;
+    const hub = privateKeyToAccount(`0x${hubKey.replace(/^0x/, "")}`).address;
+    return { payTo: hub, receiverAuthorizer: hub, withdrawDelay: WITHDRAW_DELAY, name: "USDC", version: "2" };
   }
   const self = await fetch(`${TARGET.connectorUrl}/ilp`).then((res) => res.json());
-  const evm = self.settlements?.find(
-    (s) => s.chain === `evm:${TARGET.chainId}` && s.tokenAddress?.toLowerCase() === USDC.toLowerCase(),
+  const offer = self.batchSettlements?.find(
+    (b) => b.network === NETWORK && b.asset?.toLowerCase() === USDC.toLowerCase(),
   );
-  if (!evm) throw new Error(`${TARGET.connectorUrl}/ilp publishes no evm:${TARGET.chainId} settlement in ${USDC}`);
-  return getAddress(evm.settlementAddress);
+  if (!offer) throw new Error(`${TARGET.connectorUrl}/ilp offers no batch-settlement on ${NETWORK} in ${USDC}`);
+  if (!self.httpEndpoint) throw new Error(`${TARGET.connectorUrl}/ilp publishes no httpEndpoint`);
+  return {
+    payTo: getAddress(offer.payTo),
+    receiverAuthorizer: getAddress(offer.receiverAuthorizer),
+    withdrawDelay: offer.withdrawDelay,
+    name: offer.name,
+    version: offer.version,
+    facilitator: offer.facilitator,
+    assetTransferMethod: offer.assetTransferMethod,
+    endpoint: self.httpEndpoint,
+  };
 }
-const hub = await receiverAddress();
+const offer = await receiverOffer();
+const hub = offer.payTo;
 console.log(`${TARGET.name}: Onboarder ${ONBOARDER_URL}, receiver ${hub}`);
+
+// 0. Devnet only: the relay's offer sends a gasless deposit to this Onboarder.
+// A client learns its Onboarder from here, so a relay that stops naming it
+// strands every 0-ETH payer, and this says so before anything is spent.
+if (DEVNET) {
+  const trim = (url) => url?.replace(/\/+$/, "");
+  check(
+    `the relay's ${NETWORK} offer names the Onboarder as its \`facilitator\``,
+    trim(offer.facilitator) === trim(ONBOARDER_URL),
+    `facilitator ${JSON.stringify(offer.facilitator ?? null)}`,
+  );
+  check(
+    `the relay's ${NETWORK} offer takes an eip3009 deposit`,
+    offer.assetTransferMethod === "eip3009",
+    `assetTransferMethod ${JSON.stringify(offer.assetTransferMethod ?? null)}`,
+  );
+  if (failures > 0) finish();
+}
 
 // Two deposits' worth of USDC for a fresh payer. The sandbox mints it; the
 // devnet asks the faucet, which drips far more, then waits for it to land.
@@ -166,7 +205,8 @@ check(
 );
 
 // 2. A fresh payer: USDC, and not one wei of ETH.
-const payer = privateKeyToAccount(generatePrivateKey());
+const payerKey = generatePrivateKey();
+const payer = privateKeyToAccount(payerKey);
 await fund(payer.address);
 check("the payer holds no ETH", (await chainClient.getBalance({ address: payer.address })) === 0n);
 
@@ -178,15 +218,20 @@ const requirements = {
   asset: USDC,
   payTo: hub,
   maxTimeoutSeconds: 300,
-  extra: { receiverAuthorizer: hub, withdrawDelay: WITHDRAW_DELAY, name: "USDC", version: "2" },
+  extra: {
+    receiverAuthorizer: offer.receiverAuthorizer,
+    withdrawDelay: offer.withdrawDelay,
+    name: offer.name,
+    version: offer.version,
+  },
 };
 const configFor = (salt) => ({
   payer: payer.address,
   payerAuthorizer: payer.address,
   receiver: hub,
-  receiverAuthorizer: hub,
+  receiverAuthorizer: offer.receiverAuthorizer,
   token: USDC,
-  withdrawDelay: WITHDRAW_DELAY,
+  withdrawDelay: offer.withdrawDelay,
   salt,
 });
 const deposit = (config, maxClaimable) =>
@@ -228,9 +273,65 @@ const [balance, totalClaimed] = await chainClient.readContract({
 });
 check("the channel holds the deposit on chain", balance === DEPOSIT, `balance ${balance}`);
 check("nothing is claimed yet", totalClaimed === 0n, `totalClaimed ${totalClaimed}`);
+
+// 5. Devnet only: pay the relay one write with a voucher on THAT channel. The
+// published client does the paying (the relay requires BTP for this route, and
+// the sealed request and voucher envelope are its own), and is handed the
+// channel through its store instead of opening one: it adopts the binding, and
+// autoOpenChannel off makes a miss throw rather than deposit again. The body
+// is what the relay app takes, a signed Nostr event (as sandbox smoke-toon).
+if (DEVNET) {
+  const { BatchChannelManager, InMemoryChannelStore, ToonClient } = await import("@toon-protocol/client");
+  const { finalizeEvent, generateSecretKey } = await import("nostr-tools/pure");
+  const store = new InMemoryChannelStore();
+  const client = await ToonClient.create({
+    connector: offer.endpoint,
+    evmPrivateKey: payerKey,
+    chain: "evm",
+    rpcUrl: RPC_URL,
+    channelStore: store,
+    autoOpenChannel: false,
+    facilitatorUrl: ONBOARDER_URL,
+    depositGas: "facilitator",
+  });
+  try {
+    new BatchChannelManager(store).adopt(client.connector, { chain: "evm", channelId, network: NETWORK, config }, balance);
+    const price = await client.price("g.toon.relay");
+    check("the relay prices g.toon.relay at 1 µUSDC", price === 1n, `price ${price}`);
+    const event = finalizeEvent(
+      {
+        kind: 30078,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["d", "toon-infra/smoke-x402"]],
+        content: JSON.stringify({ channelId }),
+      },
+      generateSecretKey(),
+    );
+    const written = await client.send("g.toon.relay", {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event }),
+    });
+    check(
+      "a paid relay write over the new channel is fulfilled",
+      written.fulfilled === true && written.status === 200,
+      written.fulfilled ? `HTTP ${written.status}` : `${written.code} from ${written.refusedBy}: ${written.message}`,
+    );
+    // The relay's own watermark, asked of it rather than inferred from the
+    // fulfil: the one voucher the client signed on this channel was accepted.
+    const [state] = await client.claimState([channelId]);
+    check(
+      "the relay banked the 1 µUSDC voucher on that channel",
+      state?.ok === true && state.cumulativeClaimed === "1",
+      JSON.stringify(state ?? null),
+    );
+  } finally {
+    await client.close();
+  }
+}
+
 check("the payer still holds no ETH", (await chainClient.getBalance({ address: payer.address })) === 0n);
 
-// 5. Solana, sandbox only: payment-channels is loaded, at its canonical id, and
+// 6. Solana, sandbox only: payment-channels is loaded, at its canonical id, and
 // executable. (Solana has no Onboarder, so the devnet run has nothing to add.)
 if (!DEVNET) {
   const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL ?? "http://localhost:8899";
@@ -251,5 +352,4 @@ if (!DEVNET) {
   );
 }
 
-console.log(failures === 0 ? "\nsmoke-x402: all checks passed" : `\nsmoke-x402: ${failures} check(s) failed`);
-process.exit(failures === 0 ? 0 : 1);
+finish();

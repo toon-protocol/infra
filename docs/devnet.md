@@ -159,10 +159,45 @@ gas (connector ADR 0074). It is the same image the sandbox runs as its
 `onboarder` service. Its gas payer is a key of its own, topped up from the dev
 funder, and `/health` says `holds no ETH` when it runs dry. How it is deployed
 and bumped is `onboarder/deploy/README.md`. `node onboarder/smoke.mjs --devnet`
-runs a whole 0-ETH deposit through it, into a channel to the relay.
+runs a whole 0-ETH deposit through it, into a channel to the relay, and
+pays the relay over that channel (see below).
 
 It does nothing for Solana: there the receiving connector's operator sponsors
 the channel open.
+
+Since 2026-09-29 the devnet is **x402-only**: every node accepts x402
+batch-settlement channels on both chains, and `toon-channel` channels are gone
+(connector ADR 0075). The relay, store and gas station run connector
+`2026.09.29.1` (toon-protocol/relay#177, store#147, gas-station#39); the
+gateway is still on `2026.09.28.1`, which is x402-only as well (infra#44).
+Each node's `GET /ilp` publishes a `batchSettlements` entry for Base Sepolia
+and one for Solana devnet. Solana's entry names the `sponsorEndpoint` the node opens channels
+through, with a 1 USDC `minDeposit`. The Base Sepolia entry names its
+`assetTransferMethod` (`eip3009`) and the Onboarder as its `facilitator`, so a
+client learns where to take a gasless deposit from the node itself. The relay,
+store and gas station name it today; the gateway does not yet (infra#44).
+
+A node pays each sponsored Solana open's fee and rent from its Solana
+settlement key, so that key's SOL is now spent by strangers' opens as well as
+by settlement. Top it up from the dev funder when it runs low.
+
+### What `smoke.mjs --devnet` proves
+
+`node onboarder/smoke.mjs --devnet` starts from a fresh wallet that holds
+faucet USDC and no ETH. It reads the relay's receiver, `facilitator` and
+endpoint off the relay's own `GET /ilp`, and fails if the Base Sepolia entry
+stops naming the Onboarder. It then:
+
+1. signs one ERC-3009 deposit, which the Onboarder settles into a 5 USDC
+   channel to the relay;
+2. reads that channel back off the chain;
+3. pays one relay write (`g.toon.relay`, 1 µUSDC) with a voucher on that same
+   channel, through the published `@toon-protocol/client`, and checks that the
+   relay fulfils it and has banked exactly that 1 µUSDC on the channel;
+4. checks that the payer still holds no ETH.
+
+It stays EVM-only, because there is no Onboarder for Solana. Each run leaves a
+5 USDC channel of faucet money behind, which nobody withdraws.
 
 ## Finishing a node that is waiting on gas
 
@@ -175,7 +210,7 @@ bootstrap — which is idempotent and will pick up where it stopped.
 # spells the same bytes in base58.
 cd /root/<repo>/deploy
 T=$(mktemp -d); chmod 755 "$T"; cp settlement-solana.key "$T/k"; chmod 644 "$T/k"
-docker run --rm -v "$T:/d:ro" ghcr.io/toon-protocol/connector:rust-2026.09.11.1 \
+docker run --rm -v "$T:/d:ro" ghcr.io/toon-protocol/connector:rust-2026.09.29.1 \
   send --operator-key /d/k --print-keyid
 rm -rf "$T"
 ```
