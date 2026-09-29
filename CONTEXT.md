@@ -22,8 +22,12 @@ One machine a network's nodes run on — on the devnet, a Linode.
 _Avoid_: box, server, VM
 
 **Node**:
-One app's deployed stack — its connector, the app behind it and their keys — with its own ILP address and seal key, deployed from that app's own repository.
+One connector's deployed stack — the connector, the app behind it if any, and their keys — with its own ILP address and seal key, deployed from that app's own repository, or from infra when there is no app.
 _Avoid_: box, service, deployment
+
+**Dealer**:
+A Node with no app behind it, which converts a forward from one token to another at a live rate and carries the FX risk between quoting a price and settling it (connector ADR 0071).
+_Avoid_: bridge, swap, exchange
 
 **Edge**:
 The single TLS front on a host that terminates every public hostname the host serves: its nodes', and its Onboarder's.
@@ -42,7 +46,9 @@ _Avoid_: facilitator (x402's word for it), gas station (which relays operations 
 ### Relationships
 
 - A **Host** runs one **Edge** and any number of **Nodes**.
+- A **Node** that accepts payment on EVM names the **Onboarder** its payers deposit through (connector ADR 0076).
 - A **Node** has exactly one connector; nodes are never merged into a shared connector, because each one's seal key is pinned by what it publishes.
 - A **Hop** between two nodes on the same host is still a real hop: two connectors, two keys, one payment channel.
 - An **Onboarder** is not a **Node**: it has no connector, no ILP address and no seal key. On the devnet it runs on the **Host** behind the **Edge**, on its own network, the way a node does (ADR 0002).
+- A **Dealer** pays the next Node as its client, not its peer, so that Node's app is still told who paid.
 - An **Onboarder** serves EVM chains only. On Solana the receiving connector's operator sponsors the channel open itself.

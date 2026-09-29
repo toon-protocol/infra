@@ -27,13 +27,18 @@
 // port 8545 of the SAME address so that default can hold. `proxyRpc: false` is
 // the thing being avoided here, not a fallback.
 //
-// ITS OWN BUYER, AND WHY. accountIndex 5, not 0. `make smoke` opens a
-// ZERO-DEPOSIT channel between account 0 and this same node — deliberately: it
-// is how step 4c proves an unpaid request is refused. A client that reuses
-// account 0 ADOPTS that channel (openOrAdopt takes an existing on-chain channel
-// as it finds it, deposit and all) and can never pay from it; collateralising
-// it instead would silently break the assertion `make smoke` makes. Two buyers,
-// two channels, no interference in either direction.
+// ITS OWN BUYER, AND WHY. accountIndex 5, not 0. `make smoke`'s buyer is
+// account 0, and two processes paying from one wallet toward one node would
+// share a channel and so a watermark, whose loser has every later voucher
+// refused. Two buyers, two channels, no interference in either direction.
+//
+// THE DEPOSIT IS A PERMIT2 DEPOSIT (infra#42). anytoon settles ANYONE, which
+// has no ERC-3009, so its offer says `assetTransferMethod: "permit2"`: the
+// buyer approves Permit2 once and deposits through `Permit2DepositCollector`.
+// Both transactions are the buyer's own, paid from its anvil ETH
+// (`depositGas: 'self'`): the Onboarder pays for no Permit2 approval, and
+// a hidden buyer must not be seen talking to anything but the node it pays —
+// the Onboarder is a private compose service no circuit reaches anyway.
 //
 // A REHEARSAL, NOT A GATE. `anon` bootstraps against the REAL Anyone network;
 // there is no local directory authority and no private relay set. So this can
@@ -57,6 +62,7 @@ import { fileURLToPath } from 'node:url';
 import { ToonClient } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
 import { HDNodeWallet, Interface, Wallet as EthersWallet, randomBytes } from 'ethers';
+import { X402_BATCH_SETTLEMENT } from './lib/evm-channel.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // sandbox/
 const RENDERED = join(ROOT, 'conf', '.rendered', 'connector-anytoon.toml');
@@ -73,6 +79,7 @@ const ATTEMPTS = Number(process.env.SMOKE_HS_ATTEMPTS ?? 3);
 const MNEMONIC = 'test test test test test test test test test test test junk';
 const ACCOUNT_INDEX = 5;
 const EVM_CHAIN_ID = 31337;
+const X402 = new Interface(['function channels(bytes32) view returns (uint128 balance, uint128 totalClaimed)']);
 // THIS BUYER PAYS ANYONE, not mock USDC, and that is the one thing the
 // cross-asset flip changed about this file: the anytoon node's
 // `[settlement.evm]` token is the real mainnet ANYONE ERC-20 (18 decimals), so
@@ -205,9 +212,9 @@ async function preflight() {
   // THE CHECK THAT CATCHES THE INTERESTING MISTAKE. A client dials the endpoint
   // a node PUBLISHES, not the URL the caller typed. If `make up-hs` had not
   // recreated this connector against the rendered config it would still be
-  // advertising http://127.0.0.1:3230/ilp, and every packet below would be sent
-  // at the buyer's own loopback through the proxy — a failure that looks exactly
-  // like a network fault and is not one.
+  // advertising http://anytoon-connector:3000/ilp, and every packet below would
+  // be sent at a name nothing past the circuit resolves — a failure that looks
+  // exactly like a network fault and is not one.
   let described;
   try {
     const res = await fetch(`${ANYTOON_EDGE}/ilp`, { signal: AbortSignal.timeout(10_000) });
@@ -238,16 +245,19 @@ async function preflight() {
   }
   ok(`and prices g.anyone.credentials at ${price} base units (= conf/anytoon.conf BUNDLE_PRICE)`);
 
-  // The token the node settles in — ANYONE — taken from the node's own
-  // description rather than hardcoded, because the buyer has to hold that token
-  // and not merely believe it does.
-  const evm = (described.settlements ?? []).find((s) => s.chain === `evm:${EVM_CHAIN_ID}`);
-  if (!evm?.tokenAddress) {
-    throw new SandboxFault(`the node publishes no evm:${EVM_CHAIN_ID} settlement for this buyer to pay on.`);
+  // The token the node settles in — ANYONE — taken from the node's own x402
+  // terms rather than hardcoded, because the buyer has to hold that token and
+  // not merely believe it does; and the method it deposits by.
+  const evm = (described.batchSettlements ?? []).find((b) => b.network === `eip155:${EVM_CHAIN_ID}`);
+  if (!evm?.asset) {
+    throw new SandboxFault(`the node publishes no eip155:${EVM_CHAIN_ID} batch-settlement terms for this buyer to pay on.`);
   }
-  ok(`it settles on evm:${EVM_CHAIN_ID} in ${evm.tokenAddress}`);
+  if (evm.assetTransferMethod !== 'permit2') {
+    throw new SandboxFault(`the node offers ${evm.asset} by ${evm.assetTransferMethod}, not permit2 — ANYONE has no ERC-3009, so no deposit could land.`);
+  }
+  ok(`it takes x402 channels on eip155:${EVM_CHAIN_ID} in ${evm.asset}, deposited by permit2`);
 
-  return { address, price, token: evm.tokenAddress };
+  return { address, price, token: evm.asset };
 }
 
 // ── raw JSON-RPC, over the circuit ────────────────────────────────────────
@@ -358,6 +368,10 @@ async function purchase({ address, price, token }, attempt) {
     // hidden-service default is already 120s, and every chain read here is a
     // round trip through the overlay as well.
     timeoutMs: 180_000,
+    // The Permit2 approval and the deposit from this wallet's own ETH, over
+    // the circuit (see the header).
+    depositGas: 'self',
+    facilitatorUrl: '',
   });
   // The transport for the hand-written funding RPC below. The ToonClient builds
   // its own from the same proxy — this one is not shared with it.
@@ -407,25 +421,20 @@ async function purchase({ address, price, token }, attempt) {
     ok(`the buyer ${wallet.address} holds ${funded.held} base units of ANYONE` +
        (funded.minted > 0n ? ` (sent ${funded.minted} by the faucet over the circuit, tx ${funded.hash})` : ' (already funded)'));
 
-    // (iii) THE CHANNEL. The registry read, the approve, the openChannel and
-    //       the setTotalDeposit are the client's own; every one of them leaves
-    //       through the proxy because `proxyRpc` is on. This is the step
-    //       `proxyRpc: false` would take off the overlay.
+    // (iii) THE CHANNEL. The Permit2 approval and the deposit are the
+    //       client's own transactions; every one of them, and every read
+    //       around them, leaves through the proxy because `proxyRpc` is on.
+    //       This is the step `proxyRpc: false` would take off the overlay.
     const t1 = Date.now();
-    let opened = await client.channel.open({ deposit: DEPOSIT });
+    let opened = (await client.channel.open()).channel;
 
-    // IS THE CHANNEL THE STORE NAMES STILL ON THE CHAIN? Two ways it might not
-    // be, both routine here and neither the network's doing:
-    //   - anvil keeps no state across a restart, so `make down` + `make up-hs`
-    //     leaves a fresh chain under a channel store that remembers the old
-    //     one. The node then answers F01 "no record of that channel";
-    //   - a channel opened by someone else with no collateral is ADOPTED as
-    //     found (openOrAdopt takes an open channel deposit and all), and a
-    //     claim above the counterparty's on-chain deposit could never be
-    //     redeemed, so the node answers F03.
-    // Both are cheaper to detect here, in one chain read, than to diagnose from
-    // a refusal after a claim has been signed.
-    const collateralOf = async () => BigInt((await client.channel.state({ onChain: true })).onChain?.deposit ?? 0);
+    // IS THE CHANNEL THE STORE NAMES STILL ON THE CHAIN? anvil keeps no state
+    // across a restart, so `make down` + `make up-hs` leaves a fresh chain
+    // under a channel store that remembers the old one. That is cheaper to
+    // detect here, in one chain read over the circuit, than to diagnose from a
+    // refusal after a voucher has been signed.
+    const collateralOf = async () => BigInt(X402.decodeFunctionResult('channels',
+      await rpc('eth_call', [{ to: X402_BATCH_SETTLEMENT, data: X402.encodeFunctionData('channels', [opened.channelId]) }, 'latest']))[0]);
     if (await collateralOf() < price) {
       info(`the chain does not back channel ${opened.channelId} (on-chain collateral below ${price}) —`);
       info('anvil is wiped by any restart, so a kept channel store can outlive its chain. Starting fresh.');
@@ -434,12 +443,12 @@ async function purchase({ address, price, token }, attempt) {
       // binding left behind without its watermark refuses to open at all.
       for (const f of [STORE, STORE.replace(/\.json$/, '.peers.json')]) rmSync(f, { force: true });
       client = await makeClient();
-      opened = await client.channel.open({ deposit: DEPOSIT });
+      opened = (await client.channel.open()).channel;
       const collateral = await collateralOf();
       if (collateral < price) {
         throw new SandboxFault(
           `channel ${opened.channelId} holds ${collateral} of on-chain collateral, less than the ${price} a bundle costs,\n` +
-          '  even after opening a fresh one. A claim above the counterparty deposit could never be redeemed.');
+          '  even after opening a fresh one. A voucher above the channel\'s balance could never be redeemed.');
       }
     }
     const channelId = opened.channelId;

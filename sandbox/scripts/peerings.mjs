@@ -25,6 +25,10 @@ export const NODES = {
   'gas-connector': { url: 'http://gas-connector:3000/ilp', port: 3220 },
   'provider-connector': { url: 'http://provider-connector:3000/ilp', port: 3240 },
   'provider2-connector': { url: 'http://provider2-connector:3000/ilp', port: 3250 },
+  // The Dealer (infra#42, infra ADR 0003) and the node it pays, which are the
+  // `credentials` and `full` profiles' only.
+  'dealer-connector': { url: 'http://dealer-connector:3000/ilp', port: 3270 },
+  'anytoon-connector': { url: 'http://anytoon-connector:3000/ilp', port: 3230 },
 };
 
 // What every channel is OPENED with, in 6-decimal USDC base units: 1 USDC,
@@ -44,13 +48,25 @@ export const CHANNEL_TARGET = 100_000_000n;
 // `id` is each node's local label for the relation (nothing puts it on the
 // wire), the same on both ends so `GET /peers` reads alike. `fee` is what the
 // payer keeps per packet it carries, in the base units of the channel it pays
-// from (connector ADR 0061). Every peering settles on SOLANA, in the mock USDC
-// mint: the payer's channel is opened through the payee's sponsor endpoint,
-// so the payee holds the `payee` and `rent_payer` seats (ADR 0075 decision 3).
+// from (connector ADR 0061). Every peering but the Dealer's to anytoon settles
+// on SOLANA, in the mock USDC mint: the payer's channel is opened through the
+// payee's sponsor endpoint, so the payee holds the `payee` and `rent_payer`
+// seats (ADR 0075 decision 3).
 //
 // `routes` are the payer's forwarding rows, written with `POST /routes/peers`
 // once the peering stands. ADR 0028 arithmetic: `price - fee` is what arrives,
-// and it must be the payee's own price exactly.
+// and it must be the payee's own price exactly — except on a peering that
+// `converts`, where what arrives is `floor(price x rate) - fee` in another
+// token, and the price has to cover the payee's at the worst rate instead
+// (scripts/lib/dealer-pricing.mjs).
+//
+// Optional per peering: `target` (what the payer keeps behind its channel, in
+// that channel's base units; default CHANNEL_TARGET), `max_packet_amount`
+// (default: the connector's, one USDC; snake_case because it is the wire
+// field), `payeeBinds: false` (the payee writes no `POST /peers`, so the
+// payer's vouchers arrive as a client's) and `converts: true` (the payer
+// pays the payee in another token, so its prices are held to the worst rate,
+// not to the payee's plus the fee).
 export const PEERINGS = [
   {
     id: 'relay-store',
@@ -87,6 +103,59 @@ export const PEERINGS = [
     chain: 'solana',
     fee: 100,
     routes: providerRoutes('g.toon.provider2', { ci: false }),
+  },
+  {
+    // THE ANYONE CREDENTIALS, hub -> Dealer at par (infra#42, infra ADR 0003):
+    // the client pays the hub µUSDC and the hub pays the dealer µUSDC on
+    // Solana, exactly as it pays the store. The dealer is where the token
+    // changes. A bundle costs a client 11000; the key document costs 210, not
+    // the 110 it cost when the hub dealt, because two hops' fees now sit in
+    // front of anytoon and 10 µUSDC would not buy the dealer's ANYONE fee.
+    id: 'relay-dealer',
+    payer: 'relay-connector',
+    payee: 'dealer-connector',
+    chain: 'solana',
+    fee: 100,
+    routes: [
+      { prefix: 'g.anyone.credentials', price: 11000 },
+      { prefix: 'g.anyone.credentials.keys', price: 210 },
+    ],
+  },
+  {
+    // THE FLIP: Dealer -> anytoon, µUSDC in, ANYONE out at the live Uniswap v3
+    // TWAP (connector ADR 0071), on the dealer's own x402 channel on anvil.
+    //
+    // ONE-SIDED, and that is the design (infra ADR 0003): anytoon writes no
+    // POST /peers and binds nothing, so the dealer's vouchers arrive at its
+    // client edge as a CLIENT's, and its claim minter is told the payer —
+    // `evm:<the dealer's channel id>`. A peer-role arrival states no payer
+    // (connector ADR 0040), and the minter refuses a purchase it cannot
+    // attribute. The dealer's own POST /peers still binds anytoon's voucher
+    // signer and opens the channel; nothing ever flows back on it.
+    //
+    // Every figure on this row is in ANYONE base units (18 decimals), the unit
+    // of the channel it pays from: the fee is 0.0004 ANYONE, which is about the
+    // 100 µUSDC every other hop keeps; the cap is 1 ANYONE, about 25 bundles
+    // (the connector's default, 1e6 base units, is 1e-12 ANYONE); the target is
+    // 10 ANYONE. A voucher's amount is a u64 in the connector (its contract's
+    // is uint128, connector#1429), so this channel carries at most about 18.45
+    // ANYONE over its whole life — some 460 bundles. `make clean` resets it.
+    //
+    // The routes' prices are µUSDC, the unit a packet ARRIVES in: 11000 - 100
+    // at the hub, and 210 - 100. They carry the FX buffer the hub's used to.
+    id: 'dealer-anytoon',
+    payer: 'dealer-connector',
+    payee: 'anytoon-connector',
+    chain: 'evm',
+    fee: 400_000_000_000_000,
+    max_packet_amount: 1_000_000_000_000_000_000,
+    target: 10_000_000_000_000_000_000n,
+    payeeBinds: false,
+    converts: true,
+    routes: [
+      { prefix: 'g.anyone.credentials', price: 10900 },
+      { prefix: 'g.anyone.credentials.keys', price: 110 },
+    ],
   },
 ];
 

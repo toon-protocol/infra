@@ -13,6 +13,12 @@
 #   * each connector's EVM settlement key: 100 ETH (a node lands its own
 #     `claim`/`settle` transactions, and pays its own gas on any outbound
 #     channel it opens) + 1000 USDC in the FiatToken
+#   * the two ANYONE nodes (infra#42): anytoon-connector 100 ETH, to land
+#     its own claims; the Dealer, dealer-connector, 100 ETH + 100 ANYONE, the
+#     float it pays anytoon from (its channel's target is 10; the u64 voucher
+#     ceiling caps what one channel can ever carry at ~18.45). ANYONE is the
+#     real contract, with no mint: it comes from anvil account 0, which holds
+#     the supply seed-toon-evm-amm.sh wrote.
 #   * the gas station's dedicated kind:5098 relayer: 100 ETH, the float it
 #     pays relayed ERC-2771 forward requests from (conf/gas-station.conf)
 #
@@ -36,16 +42,28 @@ die() { echo "[seed-evm-nodes] FATAL: $*" >&2; exit 1; }
 c="$(cast code "$USDC" --rpc-url "$RPC")"
 [ -n "$c" ] && [ "$c" != 0x ] || die "no FiatToken at $USDC — seed-x402.sh must run first"
 
-# Every connector that settles on EVM, whatever profile runs it: the chain is
-# seeded once and cold, so `make up-hs` needs no re-seed for its hidden
-# provider. (anytoon-connector is parked until infra#42; its Dealer brings
-# its own funding.)
+# Every connector that settles USDC on EVM, whatever profile runs it: the
+# chain is seeded once and cold, so `make up-hs` needs no re-seed for its
+# hidden provider.
 for node in relay-connector store-connector gas-connector provider-connector provider2-connector provider-hs-connector; do
   addr="$(cast wallet address --private-key "0x$(cat "$KEYS/$node/settlement.key")")"
   cast send --rpc-url "$RPC" --private-key "$FUNDER_KEY" --value 100ether "$addr" >/dev/null
   cast send --rpc-url "$RPC" --private-key "$MINTER_KEY" "$USDC" 'mint(address,uint256)' "$addr" "$NODE_USDC" >/dev/null
   say "$node: funded $addr with 100 ETH + 1000 USDC"
 done
+
+# The ANYONE nodes: ETH for their own transactions, and the dealer's float.
+ANYONE=0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9
+DEALER_ANYONE=100000000000000000000 # 100 ANYONE at 18dp
+for node in anytoon-connector dealer-connector; do
+  addr="$(cast wallet address --private-key "0x$(cat "$KEYS/$node/settlement.key")")"
+  cast send --rpc-url "$RPC" --private-key "$FUNDER_KEY" --value 100ether "$addr" >/dev/null
+  say "$node: funded $addr with 100 ETH"
+done
+dealer="$(cast wallet address --private-key "0x$(cat "$KEYS/dealer-connector/settlement.key")")"
+cast send --rpc-url "$RPC" --private-key "$FUNDER_KEY" "$ANYONE" 'transfer(address,uint256)' "$dealer" "$DEALER_ANYONE" >/dev/null \
+  || die "could not send the dealer its ANYONE — seed-toon-evm-amm.sh must run first"
+say "dealer-connector: sent $dealer 100 ANYONE"
 
 # The kind:5098 relayer. The healthcheck already gates on the forwarder and
 # probe DeploySandboxExtras placed; asserted again so a broken extras deploy

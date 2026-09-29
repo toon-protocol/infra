@@ -26,10 +26,10 @@
 #   * it MOVES, so `GET /rates` genuinely changes between two polls a minute
 #     apart, and the smoke test's liveness assertion is about a live market
 #     rather than about a number someone typed;
-#   * it is BOUNDED, and stays bounded for ever. The hub quotes a STATIC price
-#     in uUSDC for a route whose downstream price is in ANYONE, so the hub's
+#   * it is BOUNDED, and stays bounded for ever. The Dealer quotes a STATIC
+#     price in uUSDC for a route whose downstream price is in ANYONE, so its
 #     price has to carry enough headroom to cover the worst rate inside the
-#     band (see conf/connector-relay.toml's arithmetic). A random walk would
+#     band (see conf/connector-dealer.toml's arithmetic). A random walk would
 #     eventually leave that headroom and start refusing purchases at 3am, which
 #     is a true fact about FX risk and a terrible property in a sandbox.
 #

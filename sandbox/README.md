@@ -37,8 +37,9 @@ Four layers, one compose project:
 - **AR.IO stack** — a real ar-io-node gateway (r83) plus the Turbo upload
   bundler, fully local: uploads are served back instantly, ArNS names bought
   on the local validator resolve at `http://<name>.ar.localhost:3000/`.
-- **TOON payment layer** — the **hub** (`relay-connector`) and four peered
-  connectors (store, gas station, two compute providers), on the connector
+- **TOON payment layer** — the **hub** (`relay-connector`) and five peered
+  connectors (store, gas station, two compute providers, and the **Dealer**,
+  `dealer-connector`, which pays anytoon in ANYONE), on the connector
   release `rust-2026.09.29.1`, which is **x402-only**: every channel is an
   x402 `batch-settlement` channel (connector ADR 0075) — on EVM in
   `x402BatchSettlement`, in the FiatToken USDC, deposited gaslessly through
@@ -46,13 +47,13 @@ Four layers, one compose project:
   mock USDC mint, opened through the receiving node's own sponsor endpoint —
   and every payment is a **voucher** on one. A peering is two such channels,
   opened at runtime by each node's own `POST /peers` (§6.2). The ANYONE
-  denomination boundary the hub used to deal is **out of the stack until
-  infra#42** (§6.7).
+  denomination boundary lives in the Dealer, which converts µUSDC into ANYONE
+  at a live Uniswap v3 TWAP (§6.7).
 - **TOON apps** — the relay (paid Nostr writes), the store (paid Arweave
   uploads + brokered ArNS buys), the gas station (pays your Solana rent or
   relays your EVM meta-tx), two compute providers, and the **Anyone Protocol
   credentials issuer** (blind-signed credential bundles, behind a claim
-  minter — its connector parked until infra#42). The first three are
+  minter and `anytoon-connector`, paid in ANYONE). The first three are
   payment-oblivious HTTP apps behind their connector — the pattern **your**
   app will follow (§5); the issuer is the counter-example, an app that
   refuses to serve without proof of payment at its own layer (§6.5).
@@ -66,13 +67,16 @@ Everything can be reached through the hub by ILP address:
 | `g.toon.store` | blob store (kind:5094), ArNS broker (kind:5095) | 1100 base + 10/KiB |
 | `g.toon.gastation` | gas station (kind:5096 Solana, kind:5098 EVM) | 1100 |
 | `g.toon.provider.*`, `g.toon.provider2.*` | the two compute providers (spawn/extend paid, four routes free) | listing price + 100 |
+| `g.anyone.credentials` | a blind-signed credentials bundle, through the Dealer (§6.7) | 11000 |
+| `g.anyone.credentials.keys` | the issuer's epoch key document, through the Dealer (free at anytoon) | 210 |
 
-Every forwarded row is the payee's own price plus the hub's flat 100 fee.
+Every forwarded row is the payee's own price plus the hub's flat 100 fee —
+the two credentials rows included: the Dealer charges 10900 and 110, and it
+is the Dealer's price, not anytoon's, that carries the FX buffer (§6.7).
 Those rows are not in the hub's config any more: a peering is established at
 runtime, and so are the routes over it — `scripts/peerings.mjs` is the table,
-and `npm test` holds every hub price to the payee's committed config (§6.2).
-The two `g.anyone.credentials*` routes are parked with the anytoon node until
-infra#42 (§6.7).
+and `npm test` holds every hub price to the payee's (§6.2), and the Dealer's
+to anytoon's at the worst rate the sandbox's market can show.
 
 What `make smoke` proves on every run — all flows paid, all entering at the
 hub's edge:
@@ -93,9 +97,14 @@ hub's edge:
    `op=buy` has the store's DVM purchase a fresh name → the gateway
    resolves it), a paid Solana gas quote, and a paid EVM ERC-2771 relay
    (an unfunded wallet's signed request lands on anvil with `_msgSender()`
-   read back as the client). The connectors' own books are asserted per leg:
-   the hub's voucher watermark on the buyer's channel, and each payee's
-   watermark on the hub's channel toward it, at par.
+   read back as the client), and a **credentials bundle bought through the
+   Dealer**: the key document read through the hub at 210, then 11000 µUSDC
+   for a bundle the Dealer pays anytoon for in ANYONE at the live TWAP (§6.7).
+   The connectors' own books are asserted per leg: the hub's voucher
+   watermark on the buyer's channel, each payee's watermark on the hub's
+   channel toward it, at par, and anytoon's CLIENT book holding the Dealer's
+   payment in ANYONE, keyed by the Dealer's channel — and the ANYONE rate has
+   to have moved during the run.
 3. **x402 on EVM** (`make smoke-x402`): a wallet holding FiatToken USDC and
    no ETH deposits into a channel to the hub through the Onboarder the hub
    names as its `facilitator`, then pays the hub a relay write with a voucher
@@ -116,9 +125,9 @@ whose Blob Record is paged.
 And one thing `make smoke` deliberately does **not** prove, because it takes a
 third-party dependency: reaching a node whose **only** ingress is a `.anyone`
 hidden service. That is the opt-in `hs` profile — `make up-hs` + `make
-smoke-m4` (the hidden provider), never part of a cold start (§2,
-*Hidden-service ingress*); `make smoke-hs`, which buys from the anytoon node,
-is parked with it until infra#42.
+smoke-m4` (the hidden provider) and `make smoke-hs` (a credentials bundle
+bought over the anytoon node's `.anyone` address), never part of a cold start
+(§2, *Hidden-service ingress*).
 
 Everything here was distilled from three proven throwaway prototypes on the
 `prototype/local-ar-io-stack` branch
@@ -518,11 +527,12 @@ and real OCI layouts in a temp directory; see `scripts/publisher/README.md`.
 Left out: the AR.IO gateway and Turbo bundler (`envoy`, `core`, `redis`,
 `arlocal`, `upload-service`, `fulfillment-service`, `upload-service-pg`,
 `localstack`, `seed-gateway-block`, `seed-solana`), the `store`,
-`gas-station` and credentials-issuer apps, the two peering connectors that
-front the first two (`store-connector`, `gas-connector`), and `swap-driver`.
+`gas-station` and credentials-issuer apps, the connectors that front them
+(`store-connector`, `gas-connector`, `anytoon-connector`), the Dealer
+(`dealer-connector`) and `swap-driver`.
 
 The `open-peerings` job establishes the two provider peerings and skips the
-store and gas ones **by name** — their far side does not exist on this
+store, gas and Dealer ones **by name** — their far side does not exist on this
 profile — so `g.toon.store` and `g.toon.gastation` are simply not routed
 here. `g.toon.relay` (price 1) and `g.toon.relay.ephemeral` (free) work
 exactly as in the full stack, which is what `make smoke-payments` proves:
@@ -536,33 +546,38 @@ voucher on it (§6.10).
 
 The ANYONE pools are still built on anvil here (anvil builds them on every
 profile), but nothing trades them without `swap-driver` and nothing on this
-profile prices off them — nothing does until infra#42 (§6.7).
+profile prices off them: the Dealer does, and it is not on this profile.
 
 `make down`, `make clean`, `make logs` and `make ps` work the same either way.
 
 ### Buying credential bundles without the permaweb (the `credentials` profile)
 
-**Parked until infra#42.** This profile existed for a TOON client that buys
-Anyone credentials across the **denomination boundary**: uUSDC in at the hub,
-ANYONE out to `anytoon-connector`, converted at a live Uniswap v3 TWAP. The
-x402-only connector (infra#39) holds one token per chain per node and the hub
-settles USDC on EVM now, so the hub can no longer deal ANYONE; infra#42 moves
-the flip into a **Dealer** node (`docs/adr/0003-the-anyone-flip-lives-in-a-dealer-node.md`)
-and brings `anytoon-connector` back. Until then that connector carries the
-compose profile `anytoon`, which no Makefile target selects.
+For a TOON client that buys Anyone credentials across the **denomination
+boundary**: µUSDC in at the hub, ANYONE out to `anytoon-connector`, converted
+by the **Dealer** at a live Uniswap v3 TWAP (§6.7).
 
 ```bash
-make up-credentials    # chains, the hub, the issuer path and the swap driver
-make smoke-credentials # says it is parked and exits 2
+make up-credentials    # chains, the hub, the Dealer, the issuer path and the swap driver
+make smoke-credentials # the purchase end to end, then smoke-x402
 ```
 
-What still starts: the chains and their seed jobs, the hub, the relay, the
-Onboarder and the `open-peerings` job (which finds no peering to open here),
-plus the issuer path (`issuer-keys`, `issuer-migrate`, `issuer`,
-`issuer-postgres`, `issuer-redis`, `claim-minter`, §6.5) and `swap-driver`,
-which keeps the ANYONE pools trading so #42 starts from a live market. It
-still needs the **anytoon** sibling checkout (`claim-minter` builds from it)
-and not the store one.
+What starts: the chains and their seed jobs, the hub, the relay, the
+Onboarder, `dealer-connector`, `anytoon-connector`, the issuer path
+(`issuer-keys`, `issuer-migrate`, `issuer`, `issuer-postgres`,
+`issuer-redis`, `claim-minter`, §6.5), `swap-driver`, which keeps the ANYONE
+TWAP the Dealer converts at live, and the `open-peerings` job, which
+establishes `relay-dealer` and `dealer-anytoon` and skips the rest by name.
+It needs the **anytoon** sibling checkout (`claim-minter` builds from it) and
+not the store one.
+
+`make smoke-credentials` checks the price triple against what anytoon
+advertises, the hub's and the Dealer's prices against `scripts/peerings.mjs`,
+both of the Dealer's inequalities against its own `GET /rates`, the free key
+document at anytoon and through the hub (210), every escape off the free
+route refused before the issuer, an unpaid request refused, and one paid
+bundle: 11000 µUSDC from the client, the Dealer's payment landing in
+anytoon's CLIENT book in ANYONE, keyed `evm:<the Dealer's channel id>`, and
+the ANYONE rate having moved during the run.
 
 ### Hidden-service ingress (the `hs` profile) — opt-in, and it dials a real network
 
@@ -574,12 +589,8 @@ service is the only way in. The `hs` profile rehearses exactly that, and
 ```bash
 make up-hs      # = --profile full --profile hs; expect 2-5 min of bootstrapping
 make smoke-m4   # Milestone 4: buy a lease from the HIDDEN PROVIDER over the circuit
-make smoke-hs   # PARKED until infra#42 (it buys from the anytoon node); exits 2
+make smoke-hs   # buy a credentials bundle from the anytoon node over ITS circuit
 ```
-
-The anytoon ingress below still starts, but the `anytoon-connector` it
-fronts is parked (§2, the `credentials` profile), so nothing answers behind
-it until infra#42.
 
 > **This is the one target that takes a third-party dependency.** `anon`
 > bootstraps against the **real Anyone Protocol network** — there is no local
@@ -637,8 +648,8 @@ channel deposit's gas from its own anvil ETH (`depositGas: 'self'`): the
 Onboarder the hidden connector names is a private compose service no circuit
 reaches.
 
-What `make smoke-hs` proved, in one paid purchase, before it was parked with
-the anytoon node until infra#42:
+What `make smoke-hs` proves, in one paid purchase from the anytoon node — no
+hub and no Dealer in the path, so it pays anytoon's own price in ANYONE:
 
 - the address is dialled through **`socks5h://`**, so the hostname is resolved
   by the daemon and never leaks into a local DNS query;
@@ -649,6 +660,11 @@ the anytoon node until infra#42:
   possible: reaching the connector inside the overlay while reading chain state
   on clearnet would broadcast the payer's settlement address, from the payer's
   own IP, either side of every paid request;
+- the channel is an x402 channel in **ANYONE by Permit2**: ANYONE has no
+  ERC-3009, so the buyer (account index 5, sent 1 ANYONE by anvil account 0
+  over the circuit) approves Permit2 once and deposits through
+  `Permit2DepositCollector`, both from its own anvil ETH
+  (`depositGas: 'self'`) — the Onboarder pays for no Permit2 approval;
 - the issuer really blind-signs a bundle, and the payee's own claim book agrees
   it was paid.
 
@@ -733,9 +749,13 @@ proxy** (`anon-client`): a buyer that fetched the provider's descriptor before
 `anon-hs` was last recreated keeps a stale one and waits 120 s for a circuit
 that cannot build — see *Troubleshooting*.
 
-`make up-hs` still renders the parked anytoon connector's config with its
-`.anyone` address (`scripts/hs-address.sh`) — **a client dials what a node
-publishes** — but nothing starts that connector until infra#42.
+`make up-hs` renders the anytoon connector's config with its `.anyone`
+address (`scripts/hs-address.sh`) — **a client dials what a node publishes**
+— and recreates `anytoon-connector` against it only after the `open-peerings`
+job has finished, because the Dealer's peering is a `POST /peers`, which dials
+what anytoon publishes, and the Dealer cannot dial a `.anyone` address. The
+runtime peering keeps the compose name, so hub-routed purchases work on
+`up-hs` too, and a later run of the job leaves that peering be.
 
 **The address is disposable here.** It lives in the `anon-data` named volume:
 `make down` keeps it (same address next `make up-hs`), `make clean` wipes it and
@@ -1059,15 +1079,16 @@ The admission round itself does not cross the circuit — the hidden provider's
 | service | what | host port |
 |---|---|---|
 | `solana-validator` | agave test validator with AR.IO's five Anchor programs + Metaplex Core + solana-foundation's **payment-channels** (`CHNLx…`, every Solana channel here, §6.10) + mainnet's **p-token** at the SPL Token id preloaded at genesis, 2MB NameRegistry account preloaded | 8899 (RPC), 8900 (WS) |
-| `anvil` | local EVM chain (chain-id 31337), seeded by its own entrypoint from the sandbox's own Foundry project (`./contracts`): the sandbox's ERC-2771 extras, **the x402 layer** — x402's batch-settlement contracts, Permit2 and Multicall3 at their production addresses, and Circle's FiatToken as an ERC-3009 USDC, the one USDC every EVM node settles in (§6.10) — **the ANYONE asset layer** (real mainnet ANYONE + WETH9 bytecode, real Uniswap v3, two seeded pools with primed oracles; nothing prices off it until infra#42, §6.7), and every connector's EVM key funded in ETH and FiatToken | 8545 |
+| `anvil` | local EVM chain (chain-id 31337), seeded by its own entrypoint from the sandbox's own Foundry project (`./contracts`): the sandbox's ERC-2771 extras, **the x402 layer** — x402's batch-settlement contracts, Permit2 and Multicall3 at their production addresses, and Circle's FiatToken as an ERC-3009 USDC, the one USDC every EVM node settles in (§6.10) — **the ANYONE asset layer** (real mainnet ANYONE + WETH9 bytecode, real Uniswap v3, two seeded pools with primed oracles, which the Dealer quotes ANYONE off, §6.7), and every connector's EVM key funded in ETH and FiatToken (the Dealer's in ANYONE, anytoon's in ETH alone) | 8545 |
 | `arlocal` | fake Arweave node (the gateway's "trusted node") | 1984 |
 | `envoy` + `core` + `redis` | AR.IO gateway (ar-io-node r83; service definitions vendored, images pinned to r83's SHAs — no ar-io-node checkout needed) | 3000 (gateway), 3004 (core direct) |
 | `upload-service` + `fulfillment-service` + `upload-service-pg` + `localstack` | Turbo bundler stack | 5100 (upload), 4566 (localstack) |
 | `onboarder` | the **Onboarder**: a stock x402 facilitator (the published `@x402/core` + `@x402/evm`), built from `../onboarder`: `batch-settlement` on `eip155:31337`, relays a client's gasless deposit and pays the gas; offers no `receiverAuthorizer` (§6.10). `make smoke-x402` | 4022 (`/supported`, `/verify`, `/settle`, `/health`) |
-| `relay-connector` | TOON ILP connector — the HUB (`g.toon.relay`, forwards `g.toon.store` / `g.toon.gastation` / `g.toon.provider*` over runtime peerings) | 3200 (client edge) |
+| `relay-connector` | TOON ILP connector — the HUB (`g.toon.relay`, forwards `g.toon.store` / `g.toon.gastation` / `g.toon.provider*` / `g.anyone.credentials*` over runtime peerings) | 3200 (client edge) |
 | `store-connector` | TOON connector terminating `g.toon.store` | 3210 (client edge) |
 | `gas-connector` | TOON connector terminating `g.toon.gastation` | 3220 (client edge) |
-| `anytoon-connector` | **parked until infra#42** (compose profile `anytoon`, which no target selects): it terminated `g.anyone.credentials` in ANYONE | (3230) |
+| `anytoon-connector` | TOON connector terminating `g.anyone.credentials` (0.04 ANYONE, through the claim minter) and `.keys` (free, scoped to the issuer's `/v1/keys/`), paid in ANYONE on anvil by Permit2 deposits. Binds nothing for the Dealer, which pays it as a client (§6.7) | 3230 (client edge) |
+| `dealer-connector` | **the Dealer** (`g.toon.dealer`, no app): paid µUSDC by the hub over Solana at par, pays anytoon ANYONE from its own x402 channel on anvil at the live TWAP, and carries the FX risk (§6.7). `full` + `credentials` | 3270 (client edge, `GET /rates`) |
 | `provider-connector` | TOON connector terminating `g.toon.provider.*` — spawn/extend per listing version (paid), availability/status/terminate (free) | 3240 (client edge) |
 | `provider` | the TOON_Network compute provider (`toon-provider`, built from the provider sibling checkout); runs workloads on the HOST daemon through the mounted socket, as `toon-<id>` containers with SSH published at 40000+ (handler 8080 unpublished). Sells `basic` (180 s Lease Interval), the sandbox-only `smoke` (30 s), `warm` (600 s, `standby_price = 400` — the tier that sells Warm Standbys, spec §7) and spec Appendix A.1's `ci` (600 s, `capabilities = ["docker"]`: each lease of it also gets a privileged `toon-<id>-dind` sidecar, a `toon-<id>-run` / `toon-<id>-docker` volume pair, a `toon-<id>-net` network and a `toon.slice/toon-<id>.slice` cgroup on the host, all removed with the lease) — `make smoke-m1`, `make smoke-m2`, `make smoke-m3` (with `provider2`) and `make smoke-ci` are the acceptance tests. Reads TOON-store parts from the gateway (`gateway_url_pattern` in `conf/provider.toml`) and keeps verified blobs on its volume | — |
 | `directory-publisher` | the compute provider's payer for RELAY WRITES (`provider/tools/publisher`): the Profile, Listings and Liveness are paid `g.toon.relay` packets (TOON_Network ADR 0007), and this sidecar holds the x402 channel that buys them, so the provider's Nostr key never shares a process with money (8081 unpublished) | — |
@@ -1080,7 +1101,7 @@ The admission round itself does not cross the circuit — the hidden provider's
 | `issuer` | the **upstream** `anyone-protocol/credentials-issuer`, unmodified — blind-signs credential bundles, refuses without a signed `X-Payment-Claim` | none (unpublished) |
 | `claim-minter` | turns the connector's `X-TOON-Payer` attribution into that signed claim; proxies `POST /v1/bundles` and nothing else. Built from the anytoon sibling checkout | none (unpublished) |
 | `issuer-postgres`, `issuer-redis` | the issuer's own datastores (issuance records, idempotency, rate limits) | none (unpublished) |
-| `swap-driver` | trades both Uniswap pools every 15s so the ANYONE TWAP stays live and bounded for infra#42's Dealer (§6.7). `full` + `credentials`, never `payments` | none |
+| `swap-driver` | trades both Uniswap pools every 15s so the ANYONE TWAP the Dealer converts at stays live and bounded (§6.7). `full` + `credentials`, never `payments` | none |
 | `seed-solana`, `seed-gateway-block`, `seed-toon-solana`, `open-peerings`, `issuer-keys`, `issuer-migrate` | one-shot idempotent init jobs | — |
 
 ### Payment topology
@@ -1099,12 +1120,16 @@ relay-connector :3200  ── g.toon.relay ──▶ relay:3100/write ──▶ 
    │                                            └─▶ gas-station:3300/gas (kind:5096 + 5098)
    ├─ g.toon.provider.* ──[peering relay-provider]──▶ provider-connector :3240
    │                                               └─▶ provider:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
-   └─ g.toon.provider2.* ─[peering relay-provider2]─▶ provider2-connector :3250
-                                                   └─▶ provider2:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
+   ├─ g.toon.provider2.* ─[peering relay-provider2]─▶ provider2-connector :3250
+   │                                               └─▶ provider2:8080/listings/<l>/v<n>/spawn … ──▶ toon-<id> on the host
+   └─ g.anyone.credentials* ─[peering relay-dealer]─▶ dealer-connector :3270  (µUSDC in)
+                  ANYONE out, at the live TWAP ─[dealer-anytoon, as a CLIENT]─▶ anytoon-connector :3230
+                                                   └─▶ claim-minter:8080 ──▶ issuer:3000 (keys: issuer:3000/v1/keys/)
 ```
 
 **Every channel is an x402 `batch-settlement` channel** (connector ADR 0075),
-and every leg holds 6-decimal USDC, so nothing converts anywhere:
+and every leg the hub is on holds 6-decimal USDC, so nothing converts there;
+the one leg that converts is the Dealer's (§6.7):
 
 - the **client leg** is the buyer's own channel toward the hub — on the
   validator a `payment-channels` account it opens by posting a payer-signed
@@ -1116,14 +1141,18 @@ and every leg holds 6-decimal USDC, so nothing converts anywhere:
   carries every forwarded packet's voucher, the payee's small channel back is
   the other half and carries nothing. A payee is paid exactly what the hub
   was paid for the packet less its flat 100 fee.
+- **the Dealer's leg to anytoon** is ONE channel, in ANYONE on anvil, opened
+  by the Dealer's `POST /peers` alone (a Permit2 deposit): anytoon binds
+  nothing, so the Dealer's vouchers arrive there as a client's and the claim
+  minter is told who paid (infra ADR 0003).
 
 A voucher never says what it is denominated in and never had to: it is
 denominated by the channel it is written against.
 
 - Connector client edges: hub **3200**, store **3210**, gas **3220**,
-  provider **3240**, provider2 **3250** (all `GET /ilp` self-describing; the
-  operator surface rides the same port). **The five peered connectors publish
-  their compose-network names** (`http://relay-connector:3000/ilp` …) at
+  anytoon **3230**, provider **3240**, provider2 **3250**, Dealer **3270**
+  (all `GET /ilp` self-describing; the operator surface rides the same port).
+  **The seven peered connectors publish their compose-network names** (`http://relay-connector:3000/ilp` …) at
   `GET /ilp`, because a peer dials the endpoint a node publishes and every
   container can reach that name. A client on the host cannot, so host-run
   clients are handed `hostFetch()` from `scripts/lib/sandbox-endpoints.mjs`,
@@ -1244,8 +1273,23 @@ station) lists its kinds, phases, chains, and per-phase params; `/health`
 answers liveness. This self-describing pattern is worth copying in your own
 app.
 
-**Buy Anyone credentials** — parked until infra#42, with the anytoon node
-(§6.7).
+**Buy Anyone credentials** — through the hub, from the same client that pays
+the relay. The key document first (210 µUSDC through the hub; free at
+anytoon's own edge, `http://localhost:3230`), then a bundle (11000), both
+sealed to anytoon, which terminates them:
+
+```js
+const anytoon = 'http://localhost:3230';
+const keys = await client.send('g.anyone.credentials.keys', { method: 'GET', target: 'current' }, { sealTo: anytoon });
+const { epoch_id } = keys.json();
+const bundle = await client.send('g.anyone.credentials', {
+  method: 'POST', target: 'v1/bundles', headers: { 'idempotency-key': crypto.randomUUID() },
+  body: { epoch: epoch_id, blinded_blanks /* 10 × 256-byte RSABSSA blinded messages, base64 */ },
+}, { sealTo: anytoon });
+```
+
+`smoke-toon.mjs` step 4c is the working version, including what it asserts on
+each node's book (§6.7).
 
 ## 5. Build your own TOON app
 
@@ -1393,8 +1437,10 @@ node's own signed `POST /peers` (§6.2). `store-connector` is the template:
 > **If your app needs to know WHO PAID** (`X-TOON-Payer`): a peer-role
 > arrival carries no payer, by design (connector ADR 0040), and a voucher
 > whose signer your node has bound to a peering is a peer's. A node that must
-> attribute pays its upstream as a CLIENT instead — the shape infra#42 gives
-> the Dealer and anytoon (`docs/adr/0003-the-anyone-flip-lives-in-a-dealer-node.md`).
+> attribute is paid by its upstream as a CLIENT instead: it binds nothing, and
+> only the upstream writes `POST /peers` — the shape the Dealer and anytoon
+> have (`payeeBinds: false` in `scripts/peerings.mjs`,
+> `docs/adr/0003-the-anyone-flip-lives-in-a-dealer-node.md`).
 > Most apps do not need this: if yours never reads the header, take the peer
 > role.
 
@@ -1436,9 +1482,10 @@ identical, only keys, domains and chain endpoints change.
   FiatToken, §6.10), `scripts/seed-toon-evm-amm.sh` (the ANYONE asset layer:
   mainnet ANYONE and WETH9 bytecode, the official Uniswap v3 factory, two
   pools with full-range liquidity and 900 seconds of primed oracle history,
-  §6.7) and `scripts/seed-evm-nodes.sh` (every connector's EVM settlement key
-  funded with 100 ETH + 1000 FiatToken USDC, and the gas station's kind:5098
-  relayer with ETH). The healthcheck gates on the last write of each stage,
+  §6.7) and `scripts/seed-evm-nodes.sh` (every USDC connector's EVM
+  settlement key funded with 100 ETH + 1000 FiatToken USDC, anytoon's with
+  100 ETH, the Dealer's with 100 ETH + 100 ANYONE from anvil account 0, and
+  the gas station's kind:5098 relayer with ETH). The healthcheck gates on the last write of each stage,
   ending on the relayer's balance, so a healthy anvil is a funded one.
 - **`open-peerings`** — after the hub is healthy, every peering in
   `scripts/peerings.mjs` that this profile runs, the way an operator would,
@@ -1453,7 +1500,10 @@ identical, only keys, domains and chain endpoints change.
   each forwarding row (§6.2). Re-run on a healthy stack it finds every
   channel (`"status":"found"`), opens nothing, refills each channel's
   headroom by what has been spent from it since, and upserts the same routes;
-  a peering whose far side the profile does not run is skipped by name.
+  a peering whose far side the profile does not run is skipped by name. The
+  Dealer's peering to anytoon is **one-sided** (`payeeBinds: false`): only
+  the Dealer writes `POST /peers`, its channel is on anvil in ANYONE with a
+  10 ANYONE target, and it is read back off `x402BatchSettlement` (§6.7).
 - **`issuer-keys`** — generates the credentials issuer's signed epoch
   keyring and the minter/issuer Ed25519 proxy pair into the `anytoon-keys`
   volume, by running the **upstream issuer image's own** dev-key generator
@@ -1492,17 +1542,20 @@ writes from one table, `scripts/peerings.mjs`; `GET /peers`, `GET /channels`
 and `GET /routes/peers` on the hub show them live.
 
 The payee goes first, so the hub's very first voucher already arrives in the
-**peer** role. Every peering here settles on Solana, in the mock USDC mint:
-the hub's channel toward each payee holds 100 USDC and carries every
+**peer** role. Every peering of the hub's settles on Solana, in the mock USDC
+mint: the hub's channel toward each payee holds 100 USDC and carries every
 forwarded packet's voucher; the payee's channel back holds 1 USDC (every
-node's `min_sponsored_deposit`) and carries nothing.
+node's `min_sponsored_deposit`) and carries nothing. The exception is the
+Dealer's to anytoon, which is one channel that only the Dealer opens, so that
+its vouchers arrive as a **client**'s (§6.7).
 
 **Every node that peers publishes its compose-network name** at `GET /ilp`
 (`http://store-connector:3000/ilp`, …): `POST /peers` dials exactly the
 endpoints the other node publishes, BTP first where one is published — which
 is why none of them publishes a `btp_endpoint` — and a host loopback URL
-would be unreachable from the other container. All five set `peer_expose =
-"http"` and `peer_allow_plaintext_endpoints = true`. The cost falls on
+would be unreachable from the other container. All six that are dialled as
+peers set `peer_expose = "http"` and `peer_allow_plaintext_endpoints = true`;
+anytoon, which is only ever paid as a client, sets neither. The cost falls on
 host-run clients, which get `hostFetch()` (§3).
 
 Fee arithmetic: the hub collects `price`, retains the peering's `fee`, and
@@ -1511,10 +1564,13 @@ store `{base=1000, per_kib=10}` behind hub `{base=1100, per_kib=10}`, gas
 `1000` behind `1100`, each provider route at its listing price behind listing
 price + 100, and the free provider routes at 0 behind **100** (a hub row at 0
 would still subtract its fee from what the packet carries and refuse every
-honest request `R01`). Nothing in the connector checks this; `npm test` does
+honest request `R01`), and the two credentials rows at the Dealer's 10900 and
+110 behind 11000 and 210. Nothing in the connector checks this; `npm test` does
 (`scripts/lib/peering-plan.test.mjs` holds every row in `scripts/peerings.mjs`
-to the payee's committed `[[routes]]`, and fails on a payee route the hub
-does not forward).
+to the payee's committed `[[routes]]` — or, for the Dealer, to its own rows
+in the table — and fails on a payee route its payer does not forward; the
+Dealer's rows, which convert, are held to anytoon's prices at the worst rate
+instead, §6.7).
 
 A voucher is journaled in ONE book whichever role it arrived in, so a payee's
 `GET /claims` cannot say whether a crossing came from the peering or from a
@@ -1538,11 +1594,12 @@ the sandbox works from a fresh clone:
   `conf/bundler.conf` and its address in the gateway's
   `ANS104_UNBUNDLE_FILTER`.
 - `keys/toon/` — per-connector `signer.key`, `settlement.key` /
-  `settlement-solana.key` (anvil public-mnemonic indices 24-26 + 28-31 /
-  34-41 — derived so they are the same on every machine: 24/34 the hub,
-  25/35 the store, 26/36 the gas station, 28/37 anytoon, 29/38 the provider
-  connector, 30/39 the second provider's, 31/40 the hidden provider's, 41
-  the Workload Gateway connector's Solana key), the kind:5098
+  `settlement-solana.key` (anvil public-mnemonic indices 24-26 + 28-32 /
+  34-42 — derived so they are the same on every machine: 24/34 the hub,
+  25/35 the store, 26/36 the gas station, 28/37 anytoon (whose Solana key
+  nothing reads), 29/38 the provider connector, 30/39 the second provider's,
+  31/40 the hidden provider's, 41 the Workload Gateway connector's Solana
+  key, 32/42 the Dealer's), the kind:5098
   relayer `gas-evm-relayer.key` (index 27, embedded in
   `conf/gas-station.conf`), operator credentials, the deterministic
   mock-USDC mint keypairs, and the app keypairs embedded in `conf/*.conf`
@@ -1613,10 +1670,9 @@ the local bundler skips balance checks anyway.
 
 The fourth app is the one that is **not** payment-oblivious. The upstream
 `anyone-protocol/credentials-issuer` image runs unmodified and blind-signs
-nothing without an Ed25519-signed `X-Payment-Claim`. **Its connector,
-`anytoon-connector`, is parked until infra#42** (§6.7): the issuer path below
-still starts on `credentials` and `full`, and nothing reaches it. The chain,
-as it runs once #42 brings the connector back:
+nothing without an Ed25519-signed `X-Payment-Claim`. Its connector,
+`anytoon-connector`, is paid in ANYONE, and its hub-routed customer is the
+Dealer (§6.7). The chain:
 
 ```
 anytoon-connector ──▶ claim-minter ──▶ issuer ──▶ issuer-postgres / issuer-redis
@@ -1661,22 +1717,23 @@ anytoon-connector ──▶ claim-minter ──▶ issuer ──▶ issuer-postg
 > 0.04 ANYONE is 0.01 USDC at the rate this sandbox deals at — the same money
 > the route always cost, said in the currency the node is actually paid in.
 >
-> The hub is not a fourth site: whoever pays anytoon in ANYONE quotes a
-> static µUSDC price with an FX buffer. That is infra#42's Dealer node now.
+> The Dealer is not a fourth site: it quotes a static µUSDC price with an FX
+> buffer, held to this price at the worst rate by `npm test` and at the live
+> rate by `make smoke` (§6.7).
 
 **Who paid.** The minter needs the connector to tell it who paid, and a
 connector only says that for a payment it admitted at its *own* client edge —
 connector ADR 0040 refuses to invent a payer from the previous hop on a
-forwarded packet. So whatever pays anytoon must pay it as a **client**, not
-a peer; infra#42 gives that role to the Dealer (infra ADR 0003).
-`conf/connector-anytoon.toml` still describes the pre-x402 shape (a
-`[[client_channels]]` row on a `TokenNetwork` channel), which this connector
-release refuses — it is #42's to rewrite.
+forwarded packet. So whatever pays anytoon pays it as a **client**, not a
+peer: anytoon binds nothing — no `[[peers]]`, no `[[peer_channels]]`, no
+`POST /peers` — and the Dealer's vouchers arrive at its client edge, where
+the minter is told `X-TOON-Payer = evm:0x<the Dealer's channel id>` (infra
+ADR 0003, §6.7).
 
 Key material for this subsystem is *not* committed (unlike everything else
 under `keys/`): the `issuer-keys` job generates it at bring-up with the
 issuer image's own generator (§6.1). The connector's own keys are committed
-like the other three nodes' — `keys/toon/anytoon-connector/`, mnemonic
+like every other node's — `keys/toon/anytoon-connector/`, mnemonic
 indices 28 (EVM) / 37 (Solana).
 
 ### 6.6 The hidden-service ingress (`hs` profile)
@@ -1727,46 +1784,99 @@ hidden service — §6.8.
 **The connector's config is rendered, and that is the load-bearing step.**
 `scripts/hs-address.sh` reads `hidden_service/hostname` out of the daemon and
 writes `conf/.rendered/connector-anytoon.toml` — the committed
-`conf/connector-anytoon.toml` with its two `[node]` endpoints repointed at
-`http://<addr>.anyone`. `make up-hs` then brings the stack up with
-`ANYTOON_CONNECTOR_CONF` naming that file (nothing else ever sets it, so every
-other target mounts the committed config unchanged). This matters because **a
-client dials the endpoint a node publishes, not the URL the caller typed**: a
-node behind a hidden service still advertising `http://127.0.0.1:3230/ilp` sends
-every buyer's packet at the buyer's own loopback, through the proxy. A relative
+`conf/connector-anytoon.toml` with its `[node]` endpoint repointed at
+`http://<addr>.anyone`. `make up-hs` brings the stack up on the committed
+config first, waits for the `open-peerings` job (the Dealer's `POST /peers`
+dials what anytoon publishes, and cannot dial a `.anyone` address), and then
+recreates `anytoon-connector` alone with `ANYTOON_CONNECTOR_CONF` naming the
+rendered file (nothing else ever sets it, so every other target mounts the
+committed config unchanged). This matters because **a client dials the
+endpoint a node publishes, not the URL the caller typed**: a node behind a
+hidden service still advertising its compose name sends every buyer's packet
+at a name nothing past the circuit resolves. A relative
 endpoint is not a way out — this connector refuses one at load
 (`[node] http_endpoint '/ilp' is not a URL: relative URL without a base`).
-`smoke-hs`'s preflight asserted the published endpoint before it dialled, so that
-particular mistake could never masquerade as a bad day on the network.
+`smoke-hs`'s preflight asserts the published endpoint before it dials, so that
+particular mistake can never masquerade as a bad day on the network.
 
-**Parked with anytoon until infra#42.** Everything above still renders and
-starts under `make up-hs` except the connector the ingress fronts, so the
-issuer path answers nothing over the circuit and `make smoke-hs` exits 2 by
-name. `smoke-hs` bought as its own party (`accountIndex 5`), funded in ANYONE
-by the sandbox's faucet account over the circuit; #42 moves it onto a Permit2
-x402 deposit. The hub and relay ports on this daemon (3200, 7100) are the
-hidden provider's and still carry (§6.8).
+`smoke-hs` buys as its own party (`accountIndex 5`), funded in ANYONE by the
+sandbox's faucet account over the circuit, from an x402 channel it opens with
+a Permit2 deposit, its approval and deposit paid from its own anvil ETH (§2).
+The hub and relay ports on this daemon (3200, 7100) are the hidden provider's
+(§6.8).
 
-### 6.7 The denomination boundary: ANYONE, Uniswap v3 and a live rate
+### 6.7 The Dealer: ANYONE, Uniswap v3 and a live rate
 
-**The ANYONE flip is out of the stack until infra#42.** Until the sandbox went
-x402-only (infra#39) the hub was a dealer: it took µUSDC on the client's
-Solana channel and paid `anytoon-connector` ANYONE on an anvil channel,
-converting at a live Uniswap v3 TWAP (connector ADR 0071), with `[[tokens]]`,
-`[[rates]]` and `[rate_guards]` in its config. A node holds **one token per
-chain**, and the hub settles FiatToken USDC on EVM now, so it can no longer
-pay ANYONE out: its config declares no tokens, rates or guards any more, and
-`GET /rates` on it lists nothing. infra#42 moves the flip into a **Dealer**
-node, `dealer-connector` at `g.toon.dealer` — USDC on Solana in from the hub,
-ANYONE on EVM out to anytoon as its paying *client*, the FX buffer on its own
-routes — and brings anytoon back
-(`docs/adr/0003-the-anyone-flip-lives-in-a-dealer-node.md`).
+Anytoon is paid in **ANYONE** on anvil; clients pay in **µUSDC**. The flip
+between them is the **Dealer**'s (`dealer-connector`, `g.toon.dealer`,
+`conf/connector-dealer.toml`; `CONTEXT.md` **Dealer**,
+`docs/adr/0003-the-anyone-flip-lives-in-a-dealer-node.md`), a node with no
+app behind it. Until infra#39 the hub dealt; a node holds **one token per
+chain**, and the hub settles FiatToken USDC on EVM, so it can no longer pay
+ANYONE out. It keeps no ANYONE and no quote, and forwards
+`g.anyone.credentials*` to the Dealer over Solana at par, like any peering.
 
-**The market is kept running so #42 starts from a live one.** `anvil` still
-builds the asset layer on every start (`scripts/seed-toon-evm-amm.sh`,
-numbers in `conf/amm-topology.conf`, bytecode and provenance in
-`artifacts/evm/`), and its healthcheck still gates on an `observe()` over the
-ANYONE pool's 300-second window. Nothing prices off it.
+```
+client ──11000 µUSDC──▶ hub ──10900 µUSDC, Solana, relay-dealer──▶ Dealer
+       ──floor(10900 × rate) − 0.0004 ANYONE, anvil, as a CLIENT──▶ anytoon (0.04 ANYONE)
+```
+
+**The Dealer holds USDC on Solana and ANYONE on EVM**, and deals between them
+at a live Uniswap v3 TWAP (connector ADR 0071): `[[tokens]]` names the
+FiatToken USDC as the **numeraire** (the USDC people pay in, which nothing
+on the Dealer settles in), ANYONE with a two-leg quote (ANYONE → WETH → USDC,
+the pools below) and the Solana mock USDC; one static `[[rates]]` row puts
+Solana µUSDC at par with the numeraire, and the pair the packets cross is
+composed from it and the quote read backwards; `[rate_guards]` sets a 0.3%
+spread, a 120 s ttl (a 40 s poll) and a 5% `max_move`. `GET /rates` on
+`:3270` (bearer) shows every declared pair.
+
+**It pays anytoon as a client, not a peer.** Anytoon's claim minter refuses a
+purchase it cannot attribute, and a forwarded, peer-role packet states no
+payer (connector ADR 0040). So anytoon binds nothing for the Dealer: the
+`open-peerings` job writes `POST /peers` on the Dealer alone
+(`payeeBinds: false`), which binds anytoon's voucher signer, opens the
+Dealer's own x402 channel toward anytoon in ANYONE (a **Permit2** deposit —
+ANYONE has no ERC-3009 — after a one-time `approve` the connector sends from
+its settlement key) and carries two routes. Anytoon sees the Dealer's
+vouchers at its client edge and tells the minter `X-TOON-Payer =
+evm:0x<the Dealer's channel id>`; the payment lands in anytoon's **client**
+book under that key, which `make smoke` asserts. The peering is runtime, not
+config, because a `[[pay_channels]]` row must name a channel the node's own
+journal already holds, and an x402 channel's id is a fact of the run.
+
+**The prices** (all in `scripts/peerings.mjs`):
+
+| route | client pays the hub | hub pays the Dealer | Dealer's floor at the worst rate |
+|---|---|---|---|
+| `g.anyone.credentials` | 11000 | 10900 | 10338 |
+| `g.anyone.credentials.keys` | **210** | 110 | 103 |
+
+A route price is static and in the incoming unit, while the rate floats, so
+the Dealer carries the FX risk and its prices carry the buffer the hub's used
+to. The worst rate is the mid (4e12 ANYONE base units per µUSDC, ANYONE =
+0.25 USDC) less the spread (×0.997) and the swap driver's band (200 ticks,
+×0.98): about 3.908e12. At that rate 10900 µUSDC still forwards more than
+anytoon's 0.04 ANYONE plus the 0.0004 ANYONE fee, and 110 still clears the fee
+on the free key document. The key document costs **210**, not the 110 it
+cost when the hub dealt: at 110 the Dealer would get 10 µUSDC, which at the
+worst rate does not buy the fee. `npm test` re-derives both inequalities from
+the committed topology and the Dealer's spread; `make smoke` re-derives them
+from the Dealer's live `GET /rates`, and requires the rate to have **moved**
+during the run.
+
+> **⚠ The u64 ceiling.** A voucher's amount is a `u64` in the connector (the
+> contract's is `uint128`), so the Dealer's channel to anytoon carries at most
+> about **18.45 ANYONE over its whole life — some 460 bundles**. The job keeps
+> 10 ANYONE of headroom behind it and tops it up from the Dealer's 100, but a
+> sandbox that has sold ~460 bundles needs `make clean`.
+> toon-protocol/connector#1429 tracks widening it.
+
+**The market.** `anvil` builds the asset layer on every start
+(`scripts/seed-toon-evm-amm.sh`, numbers in `conf/amm-topology.conf`, bytecode
+and provenance in `artifacts/evm/`), and its healthcheck gates on an
+`observe()` over the ANYONE pool's 300-second window. No MockERC20 is left:
+the WETH/USDC pool and the numeraire are the FiatToken.
 
 | on chain | what | how |
 |---|---|---|
@@ -1776,7 +1886,7 @@ ANYONE pool's 300-second window. Nothing prices off it.
 | `0x8983f136…` | ANYONE/WETH pool, fee 1% | `factory.createPool` — genuine v3-core |
 | `0x9668CFaD…` | WETH/USDC pool, fee 0.05% | same — **in the FiatToken USDC**, whose float the FiatToken's minter mints; it replaced the retired MockERC20 pool, and since both sort below WETH the price is unchanged and only the address moved |
 
-A few facts that stay true for #42:
+A few facts about the market:
 
 - **`setCode` copies code, not storage.** The constructor's words are written
   by hand afterwards; for ANYONE one of them is a `launched` flag, without
@@ -2465,10 +2575,9 @@ package bump changes it. Last, it checks `payment-channels` is loaded and execut
   after a non-holder buy fails benignly (locally AnchorError 2006
   `ConstraintSeeds` on `ant_authority`; receipt carries
   `syncAttributesTxId: null`, logged non-fatal by the store).
-- **The ANYONE denomination boundary is out of the stack until infra#42**
-  (§6.7): no credentials purchase, and `make smoke-credentials` / `make
-  smoke-hs` exit 2 by name. The pools and the swap driver keep running for
-  #42.
+- **The Dealer's channel to anytoon has a lifetime ceiling** (§6.7): a
+  voucher amount is a `u64` in the connector, so it carries at most ~18.45
+  ANYONE, some 460 bundles, before `make clean` (connector#1429).
 - **Every Solana peering channel's rent is the payee's, and the hub's.**
   A sponsored open costs the receiving node ~0.0047 SOL of rent until the
   channel is reclaimed; the sandbox airdrops 100 SOL per key, far beyond any

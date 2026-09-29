@@ -14,9 +14,11 @@
 #   ADDRESSES are committed in scripts/lib/provider-smoke.mjs and the smokes,
 #   which find the runtime peering channels by them, so they must be
 #   identical everywhere):
-#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30/31
-#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-41
-#       (28/37 are the anytoon-connector's — parked until infra#42 — 29/38 the provider-connector's,
+#     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30/31/32
+#     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-42
+#       (28/37 are the anytoon-connector's — its Solana key is funded and
+#        read by nothing, it settles on EVM only — 32/42 the DEALER's,
+#        dealer-connector (infra#42), 29/38 the provider-connector's,
 #        30/39 the SECOND provider's, provider2-connector, and 31/40 the HIDDEN
 #        provider's, provider-hs-connector; 27 was already spent on the gas
 #        relayer below, which is why the EVM index skips it)
@@ -94,7 +96,8 @@ random_keys() {
 }
 
 for pair in relay-connector:24:34 store-connector:25:35 gas-connector:26:36 anytoon-connector:28:37 \
-           provider-connector:29:38 provider2-connector:30:39 provider-hs-connector:31:40; do
+           provider-connector:29:38 provider2-connector:30:39 provider-hs-connector:31:40 \
+           dealer-connector:32:42; do
   IFS=: read -r node ei si <<<"$pair"
   random_keys "$node"
   $CAST wallet private-key --mnemonic "$MN" --mnemonic-index "$ei" | sed 's/^0x//' >"$KEYS/$node/settlement.key"

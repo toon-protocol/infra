@@ -1,138 +1,96 @@
 # =============================================================================
-# PARKED UNTIL infra#42 — NOTHING STARTS THIS NODE.
-# =============================================================================
-# This file is the TokenNetwork-era shape (a `[[client_channels]]` row,
-# `contract_address`, a hub that pays in ANYONE), and the connector the
-# sandbox pins since infra#39 is x402-only: it refuses every one of those by
-# name. It is kept, unmigrated, because #42 rewrites it for the Dealer node
-# that takes the ANYONE flip over (docs/adr/0003-the-anyone-flip-lives-in-a-
-# dealer-node.md): `[settlement.evm]` in ANYONE with
-# `asset_transfer_method = "permit2"`, paid by the Dealer as a client.
-# docker-compose.yml gives anytoon-connector the profile `anytoon`, which no
-# Makefile target selects. Everything below describes the parked shape.
-#
-# =============================================================================
 # anytoon-connector — terminates g.anyone.credentials in front of the Anyone
-# Protocol credentials issuer (through the claim minter), and takes the hub's
-# forwarded traffic as a PAYING CLIENT rather than as a peer. Read the next
-# block before changing that; it is the one thing here that differs from
-# conf/connector-store.toml and conf/connector-gas.toml, and it is forced.
+# Protocol credentials issuer (through the claim minter), paid in ANYONE on
+# anvil. Its paying customer for hub-routed purchases is the DEALER
+# (conf/connector-dealer.toml, infra ADR 0003), and it takes the dealer as a
+# CLIENT, not a peer. Read the next block before changing that.
 # =============================================================================
 # Shape lifted from the anytoon repo's own config/connector.local.toml (the
-# sibling checkout at ../../anytoon), which is the upstream-proven config for
-# this exact app pair. That file's own header warns: "this node terminates its
-# own routes and does not peer... Because nobody forwards to us, we always
-# collect, so X-TOON-Payer is always present on a delivery and the minter's
-# fail-closed path is an assertion rather than a routine outcome. ADDING A PEER
-# IS THE CHANGE THAT FORCES THAT DECISION TO BE REVISITED." This file is that
-# revisit.
+# sibling checkout at ../../anytoon). That file's header says this node
+# "terminates its own routes and does not peer... Because nobody forwards to us,
+# we always collect, so X-TOON-Payer is always present on a delivery... ADDING A
+# PEER IS THE CHANGE THAT FORCES THAT DECISION TO BE REVISITED."
 #
-# WHY THERE IS NO [[peers]] ROW HERE, unlike store/gas
-# ---------------------------------------------------
+# WHY THIS NODE BINDS NOTHING FOR THE DEALER
+# ------------------------------------------
 # The claim minter behind this node needs to know WHO PAID: it turns the
-# connector's X-TOON-Payer attribution into the signed X-Payment-Claim the
-# issuer demands, and 402s PAYER_UNATTRIBUTED without one. The store and the
-# gas station are payment-oblivious and never look.
+# connector's X-TOON-Payer into the signed X-Payment-Claim the issuer demands,
+# and 402s PAYER_UNATTRIBUTED without one.
 #
-# A connector states a payer ONLY for a client claim it admitted at its OWN
-# client edge. A PEER-ROLE arrival states nothing — deliberately, and it is
-# protocol law rather than a gap: connector ADR 0040 ("a verified payment is
-# stated to the app") says a forwarded packet "cannot state a payer... there is
-# no fallback to interrogate the previous hop with, because the previous hop
-# was never an input", and forbids any implementation from falling back to the
-# previous hop's identity (that was ADR 0017's defect, and it "puts a wrong
-# payer in an app's own permanent records"). So had this node held the channel
-# as [[peer_channels]] like store/gas do, every paid bundle purchase routed
-# through the hub would reach the minter unattributed and be refused — after
-# the client had already paid for it.
+# A connector states a payer only for a voucher it admitted in the CLIENT role.
+# A peer-role arrival states nothing, and that is protocol law, not a gap:
+# connector ADR 0040 says a forwarded packet "cannot state a payer", and forbids
+# falling back to the previous hop's identity (ADR 0017's defect, which "puts a
+# wrong payer in an app's own permanent records"). An arrival takes the peer
+# role when its voucher is signed by a key this node has bound to a peering —
+# a `[[peer_channels]]` row, or a `POST /peers` naming the sender. So if this
+# node bound the dealer, every bundle it forwarded would reach the minter
+# unattributed and be refused, after the client had paid.
 #
-# The resolution is to state the truth rather than to invent one: on this
-# channel the HUB IS A PAYING CLIENT of this node. It signs a client-role
-# cover-forward claim before every forwarded PREPARE leaves (ADR 0042 item 2),
-# so declaring the channel in [[client_channels]] makes this node's own client
-# edge admit that claim — and the delivery then carries a payer that is exactly
-# who paid THIS node: `evm:<channel_id>`, the hub. Per-hub rather than
-# per-end-client bucketing is also the right shape for a wholesale hop, and it
-# is the only shape the end client's anonymity permits.
+# So it binds nothing: no `[[peers]]`, no `[[peer_channels]]`, no POST /peers,
+# no `peer_expose`. The dealer's own POST /peers opens an x402 channel toward
+# this node's settlement key and pays each forward with a voucher on it, which
+# arrives here as a client's; the delivery then names the payer that is exactly
+# who paid THIS node — `evm:0x<the dealer's channel id>`. Per-dealer rather than
+# per-end-client is the right shape for a wholesale hop, and the only one the
+# end client's anonymity permits. The dealer's payments land in this node's
+# CLIENT book under that key, which is what scripts/smoke-toon.mjs asserts.
 #
-# The trade, stated plainly: this node can no longer take the peer role with
-# the hub on this channel ([[peers]] without a matching [[peer_channels]] row
-# is a load-time refusal, and a channel may not sit in both namespaces), so the
-# peer-book claim ack, the peer F03 price gate and forwarded_claim_enforcement
-# are replaced by their client-edge equivalents rather than kept. The HUB is
-# untouched — it keeps [[peers]], the forwarded [[routes]] row, and the
-# [[peer_channels]] + [[pay_channels]] pair, and that asymmetry is legal
-# (the both-namespaces check is per-file). The hub MUST keep its
-# [[peer_channels]] row: it is what binds this peering's claims to the ANYONE
-# TokenNetwork's EIP-712 domain on the hub's side.
+# Two things this costs, both checked by the connector release the sandbox
+# pins (2026.09.29.1):
+#   * the routes below must stay UNPINNED (no `transport`), or pinned to the
+#     carriage the dealer actually dials (connector ADR 0072): a client is
+#     refused a route pinned to another carriage;
+#   * a ZERO-value forward is sent as a peer-role claim-state challenge rather
+#     than a voucher, and arrives here as a client packet with no voucher. That
+#     is fine only because the one route that can see one, the key document, is
+#     free here.
 #
-# Both ends must agree on the channel's settlement contract — the hub binds the
-# TokenNetwork's EIP-712 domain into the signed balance proof (ADR 0024) and
-# this node verifies against the one its own [[client_channels]] row names.
-# They do, below.
-#
-# WHAT CHANGED WHEN THE HUB BECAME A DEALER
-# -----------------------------------------
-# This node's money is now ANYONE, settled on anvil, and that is the whole of
-# the difference from the Phase 1 shape this file used to describe. The hub's
-# client leg stays mock USDC on Solana; the hub converts between them at a live
-# Uniswap v3 TWAP (see conf/connector-relay.toml). Consequences here, in order
-# of how surprising they are:
-#
-#   * `[settlement.solana]` IS GONE. Not tidying: one token per chain per node
-#     is the rule, and a node holding BOTH tables would denominate an arriving
-#     claim by the chain its channel is on — so a client that opened a Solana
-#     channel here would be charged this file's `price` in uUSDC instead of in
-#     ANYONE base units, which is off by a factor of 10^12 in the client's
-#     favour. There is no per-route unit and there should not be one. The
-#     store and gas connectors still hold their Solana tables and still prove
-#     the payment_channel program loads.
-#   * `price` below is in ANYONE BASE UNITS, 18 decimals.
-#   * this node declares NO `[[tokens]]`, because it crosses no boundary: it
-#     terminates everything it is asked for, in the one token it holds. The
-#     dealing happens one hop upstream, which is the right place for it.
+# ONE TOKEN, ONE CHAIN. This node is paid ANYONE on anvil and has NO
+# `[settlement.solana]`: an arriving voucher is denominated by the chain its
+# channel is on, and a route has one price, so a Solana channel here would be
+# charged this file's ANYONE price as µUSDC — off by 10^12. It deals nothing
+# either (no `[[tokens]]`): the conversion happens one hop upstream, in the
+# dealer, which is the right place for it.
 
 client_edge_addr = "0.0.0.0:3000"
 state_dir = "/app/state"
 
-# NO peer_expose: this node never takes the peer role (see above). The hub
-# dials this same client_edge_addr and its claim is admitted as a client's.
-
 [signer]
 key_file = "/app/data/signer.key"
 
+# The compose-network name, which is what the dealer's POST /peers reads and
+# dials: a node dials the endpoints another PUBLISHES. No `btp_endpoint`, for
+# the same reason: POST /peers prefers BTP wherever a node publishes it.
+#
+# `make up-hs` mounts conf/.rendered/connector-anytoon.toml instead, with this
+# line pointed at the `.anyone` address (scripts/hs-address.sh), because a
+# buyer over the circuit dials what this node publishes too. It does that only
+# AFTER the open-peerings job has run against this committed file, so the
+# dealer's runtime peering keeps the compose name (see the Makefile's up-hs).
 [node]
 addresses = ["g.anyone.credentials"]
-http_endpoint = "http://127.0.0.1:3230/ilp"
-btp_endpoint = "ws://127.0.0.1:3230/ilp/btp"
+http_endpoint = "http://anytoon-connector:3000/ilp"
 
 # ── The terminated routes ────────────────────────────────────────────────────
 #
-# PRICE COUPLING — the hazard this whole subsystem turns on. Three numbers must
-# agree or every paid bundle purchase answers 402 CLAIM_INVALID:
+# THE PRICE TRIPLE. Three numbers must agree or every paid bundle purchase
+# answers 402 CLAIM_INVALID:
 #
-#   1. `price` below, in BASE UNITS
+#   1. `price` below, in ANYONE BASE UNITS (18 decimals)
 #   2. the claim minter's BUNDLE_PRICE (the decimal it signs into the claim)
 #   3. the issuer's BUNDLE_PRICE (the decimal it checks the claim against)
 #
-# (2) and (3) are ONE place — conf/anytoon.conf, the `env_file` of both
-# services, so they cannot drift from each other. (1) cannot be an env var (the
-# connector has no environment layer) and is therefore the derivation:
+# (2) and (3) are one place — conf/anytoon.conf, the `env_file` of both
+# services. (1) cannot read an env var, so it is the derivation:
 #
-#   40000000000000000 base units / 10^18 (ANYONE decimals) = 0.04
+#   40000000000000000 base units / 10^18 = 0.04 ANYONE
 #
-# THE PRICE IS IN ANYONE NOW, and 0.04 ANYONE is 0.01 USDC at the rate this
-# sandbox deals at — the same money the route has always cost, said in the
-# currency this node is actually paid in. What does NOT follow it is the hub's
-# forwarded price: that is quoted in the CLIENT's money and has to carry an FX
-# buffer, so it is no longer this figure plus a fee and is not derivable from
-# this file at all. conf/connector-relay.toml owns that arithmetic.
-#
-# This node's own price stays EXACT, which is the point of putting the boundary
-# upstream: the app layer's three numbers are still one number, still checkable
-# by multiplication, and nothing here has to know a rate exists.
-# scripts/smoke-toon.mjs re-derives it from conf/anytoon.conf on every run and
-# asserts it against what this node ADVERTISES at GET /ilp.
+# 0.04 ANYONE is 0.01 USDC at the sandbox's mid rate. The dealer's µUSDC price
+# for the same route is NOT this figure plus a fee: it is quoted in the
+# client's money and carries an FX buffer, and conf/connector-dealer.toml owns
+# that arithmetic. scripts/smoke-toon.mjs re-derives this one from
+# conf/anytoon.conf and asserts it against what this node advertises.
 [[routes]]
 prefix = "g.anyone.credentials"
 handler_url = "http://claim-minter:8080/"
@@ -142,81 +100,50 @@ price = 40000000000000000
 # anything, and charging for it makes the protocol undiscoverable.
 #
 # handler_url IS SCOPED TO /v1/keys/ ON PURPOSE, and this is the security
-# property of the pair. An envelope's `target` resolves BENEATH the handler
-# path (connector-runtime/src/app_client.rs resolve_target_under_handler), so
-# pointing this row at the issuer ROOT would put POST /v1/bundles behind a
-# price-0 route — free credentials, and the issuer's invariant I6 ("no free
-# class exists anywhere in this service") broken from outside. Scoped here,
-# `current` is the only reachable target and an escape attempt (`..`, `%2e%2e`,
-# a leading `/`, a `\`, a scheme) is refused F00 by the connector before the
-# issuer is touched. scripts/smoke-toon.mjs asserts BOTH halves: `current`
-# serves free, and `../bundles` off this same free route does not reach the
-# issuer.
-#
-# Longest-prefix wins (connector-domain/src/route.rs select_route), so a packet
-# to g.anyone.credentials.keys takes THIS row and not the priced one above,
-# whatever order they appear in.
+# property of the pair. A target resolves BENEATH the handler path, so pointing
+# this row at the issuer ROOT would put POST /v1/bundles behind a price-0 route
+# — free credentials, and the issuer's invariant I6 ("no free class exists
+# anywhere in this service") broken from outside. Scoped here, `current` is the
+# only reachable target and an escape (`..`, `%2e%2e`, a leading `/`) is refused
+# F00 by the connector before the issuer is touched. scripts/smoke-toon.mjs
+# asserts both halves. Longest prefix wins, so g.anyone.credentials.keys takes
+# this row whatever the order.
 [[routes]]
 prefix = "g.anyone.credentials.keys"
 handler_url = "http://issuer:3000/v1/keys/"
 price = 0
 
-# The issuer's /healthz and its /v1/entitlements (the fiat rail) are
-# deliberately NOT routed. The connector's own free, unauthenticated
-# /ilp/identity is the public liveness signal; the issuer's health stays inside.
+# The issuer's /healthz and /v1/entitlements (the fiat rail) are deliberately
+# NOT routed.
 
-# ── The hub, as a client ─────────────────────────────────────────────────────
-# The same on-chain channel the hub names in its [[peer_channels]] and
-# [[pay_channels]] rows — opened and collateralised by the seed-toon-evm init
-# job with two ordinary contract calls from the hub's own settlement key (the
-# payer side opens and deposits). Declared HERE as a client channel, for the
-# reason set out at the top of this file.
+# ── Settlement ───────────────────────────────────────────────────────────────
+# ANYONE, the real mainnet ERC-20 at its own address (scripts/
+# seed-toon-evm-amm.sh). `decimals = 18` is checked against its `decimals()`.
 #
-# `counterparty` (singular) is the hub's EVM settlement address — the key whose
-# signature this node accepts on the claim, and the channel's on-chain
-# participant, never the signer address a claim declares about itself. The EVM
-# client-channel shape is `channel_id` + `counterparty` + `chain_id` +
-# `token_network_address`; note that last spelling, which is NOT the
-# `token_network` a `[[peer_channels]]` row uses (these tables are untagged
-# unions with deny_unknown_fields, so a near-miss is "matched no variant"
-# rather than a named error). A config-declared client channel carries no
-# deposit floor, so nothing on the packet path reads the chain for it.
+# `asset_transfer_method = "permit2"`: the default is eip3009, which boot
+# refuses on a token without ERC-3009, and ANYONE has none. A payer deposits
+# through `Permit2DepositCollector` after a one-time `approve` of Permit2 — the
+# dealer's connector sends its own; smoke-hs's buyer pays its own from anvil
+# ETH. The EIP-712 name and version are required and published, and not
+# checked under permit2 (a Permit2 deposit is signed under Permit2's domain).
 #
-# THIS HOP NOW SETTLES ANYONE ON ANVIL. The channel is the ANYONE TokenNetwork's
-# (registry nonce 2), opened and collateralised by scripts/seed-toon-evm.sh with
-# `cast send` from the hub's own settlement key — the hub is the payer of this
-# peering, as it is of the other two.
-[[client_channels]]
-channel_id = "0x94ab42f98c210488becb8fab3ccb790d8572fe91d1b50f93d70a30f02321f02f"
-counterparty = "0x61097BA76cD906d2ba4FD106E757f7Eb455fc295" # relay-connector EVM settlement
-chain_id = 31337
-token_network_address = "0x9f1ac54BEF0DD2f6f3462EA0fa94fC62300d3a8e"
-
-# The REAL mainnet ANYONE ERC-20 at its own mainnet address, its runtime
-# bytecode placed on anvil by scripts/seed-toon-evm-amm.sh. `decimals = 18` is
-# checked against the token's own `decimals()` at startup, and the registry
-# must resolve a TokenNetwork for it or this node refuses to start — so a green
-# boot here is itself the proof that the asset layer landed.
+# NO facilitator_url: the Onboarder pays for no Permit2 approval
+# (`erc20ApprovalGasSponsoring` is out of scope for the sandbox), so a payer
+# here pays its own gas.
 [settlement.evm]
 rpc_url = "http://anvil:8545"
-contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 token_address = "0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
 decimals = 18
+asset_eip712_name = "ANyONe Protocol"
+asset_eip712_version = "1"
+asset_transfer_method = "permit2"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
-# NO [settlement.solana]. See the header: a second settlement table would give
-# this node a second unit, and an arriving claim is denominated by the chain
-# its channel is on — so a Solana client channel here would be charged this
-# file's ANYONE price as if it were uUSDC. The key file is still mounted and
-# still funded; nothing reads it.
-
-# Kept ON so the smoke test can read this payee's /claims and prove the
-# hub -> anytoon leg was actually paid, from the payee's own book. Because the
-# hub is a client here, its payments land in the CLIENT book, keyed
-# `evm:<channel_id>` (the client book chain-namespaces its channel ids; the
-# peer book does not) — which is what the smoke asserts, in ANYONE base units.
+# Kept ON so the smokes can read this payee's /claims and prove the
+# dealer -> anytoon leg was paid, from the payee's own book, in ANYONE base
+# units, keyed `evm:0x<the dealer's channel id>`.
 [operator]
 bearer_token_file = "/app/data/operator-bearer.token"
 write_keys_file = "/app/data/operator-write.keys"

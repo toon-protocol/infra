@@ -7,13 +7,14 @@ Infrastructure for the TOON Protocol.
 **[`sandbox/`](sandbox/README.md)** is a complete TOON Protocol network on
 your machine: one `docker compose` project with local chains (Solana, EVM,
 Arweave-sim), a local AR.IO permaweb stack (gateway + Turbo bundler + ArNS),
-the TOON payment layer (a hub and four peered ILP connectors on the
+the TOON payment layer (a hub and five peered ILP connectors on the
 x402-only connector release: every channel an x402 `batch-settlement`
 channel — FiatToken USDC on the EVM chain, deposited gaslessly through a local
 **Onboarder**, and mock USDC on Solana, sponsored by the receiving node — and
-every payment a voucher), and the first-party TOON apps (relay, store, gas
-station, two compute providers; the Anyone credentials issuer's connector is
-parked until infra#42). Nothing touches mainnet; every key is a valueless
+every payment a voucher; one of them is the **Dealer**, which pays the Anyone
+credentials issuer's connector in ANYONE at a live Uniswap v3 TWAP), and the
+first-party TOON apps (relay, store, gas station, two compute providers, the
+Anyone credentials issuer). Nothing touches mainnet; every key is a valueless
 committed throwaway.
 
 ```bash
