@@ -93,24 +93,32 @@ price = 0
 
 # ── Settlement ───────────────────────────────────────────────────────────────
 # The sandbox's own chains, by the names the private compose network reaches
-# them on. A tenant's client channel is opened against one of them; `anvil` is
+# them on. A tenant's x402 channel is opened against one of them; `anvil` is
 # also what a buyer reaches over this node's OWN address at
 # `http://<addr>.anyone:8545` (conf/anonrc-hs), so a purchase and the chain
 # reads that back it ride the same circuit.
 [settlement.evm]
 rpc_url = "http://anvil:8545"
-contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
-token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+token_address = "0x0A867CA0442383c2A89951244B955AA19b615b58"
 decimals = 6
+asset_eip712_name = "USDC"
+asset_eip712_version = "2"
+asset_transfer_method = "eip3009"
+# The sandbox's Onboarder, as every EVM node here names it — and a name no
+# circuit reaches: it is a private compose service. A hidden buyer pays its
+# own deposit gas instead, from its anvil ETH (scripts/smoke-milestone4.mjs,
+# `depositGas: 'self'`), which is the honest shape for a payer that must not
+# be seen talking to anything but this node.
+facilitator_url = "http://onboarder:4022"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
 rpc_url = "http://solana-validator:8899"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
 decimals = 6
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"

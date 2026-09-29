@@ -64,6 +64,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { HUB, MNEMONIC, PROVIDERS, ROOT, RPC_URL, usageFromHeader } from './lib/provider-smoke.mjs';
+import { HOST_REWRITE } from './lib/sandbox-endpoints.mjs';
 
 const PROVIDER_CONTEXT = process.env.PROVIDER_CONTEXT ?? join(ROOT, '..', '..', 'provider');
 const TOOL_DIR = join(PROVIDER_CONTEXT, 'tools', 'grant');
@@ -150,6 +151,10 @@ const hasHidden = lease.standby_set.includes('provider-hs');
 const args = [join(TOOL_DIR, 'seal.mjs'), 'rotate', '--lease', leaseFile, ...members.flatMap((m) => ['--member', m])];
 const env = {
   TOON_CONNECTOR_URL: HUB,
+  // The hub publishes its compose-network name (a peer dials what a node
+  // publishes, infra#39) and the tool dials what it publishes; this moves it
+  // back onto the host (scripts/lib/sandbox-endpoints.mjs).
+  TOON_ENDPOINT_REWRITE: HOST_REWRITE,
   TOON_CHAIN: 'solana',
   TOON_RPC_URL: RPC_URL,
   TOON_MNEMONIC: MNEMONIC,

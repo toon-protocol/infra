@@ -3,12 +3,15 @@
 # THE EVM ASSET LAYER: real ANYONE, real WETH9, real Uniswap v3, real TWAP.
 # =============================================================================
 # Runs INSIDE the anvil container (foundry image), from the anvil entrypoint,
-# after the connector's DeployLocal.s.sol and the sandbox's
-# DeploySandboxExtras.s.sol — and BEFORE the anvil healthcheck can pass, which
-# is deliberate: the hub refuses to start unless its `[settlement.evm]` token
-# resolves a TokenNetwork, and its ANYONE rate poller refuses at startup unless
-# both quote pools exist. Everything below has to be on the chain before any
-# connector dials it.
+# after the sandbox's DeploySandboxExtras.s.sol and seed-x402.sh (the USDC
+# leg's token is seed-x402.sh's FiatToken) — and BEFORE the anvil healthcheck
+# can pass, which gates on an `observe()` over the ANYONE pool.
+#
+# NOTHING PRICES OFF THIS LAYER UNTIL infra#42. The hub dealt ANYONE at this
+# market's TWAP until the sandbox went x402-only (infra#39); a node holds one
+# token per chain, and the hub settles USDC on EVM now, so the flip moves to a
+# Dealer node in #42 (infra ADR 0003). The layer keeps building and the swap
+# driver keeps trading so that #42 starts from a live market, not a rebuild.
 #
 # WHAT IT BUILDS, AND WHY EACH PIECE IS THE REAL THING
 # ----------------------------------------------------
@@ -47,15 +50,15 @@
 # a chain running early would make every rate look permanently fresh, and one
 # running late would make every rate look permanently stale.
 #
-# IDEMPOTENT on a live chain in the useful direction: the TokenNetwork and the
-# pools are created only if absent, and re-running re-primes rather than
+# IDEMPOTENT on a live chain in the useful direction: the pools are created
+# only if absent, and re-running re-primes rather than
 # breaking. It is NOT idempotent about liquidity (a second run mints a second
 # position) — nothing calls it twice, and `make clean` is the reset.
 set -eu
 
 RPC="${RPC_URL:-http://localhost:8545}"
 ART="${ARTIFACTS_DIR:-/sandbox-artifacts}"
-EXTRAS="${EXTRAS_DIR:-/sandbox-extras}"
+EXTRAS="${EXTRAS_DIR:-/contracts}"
 TOPOLOGY="${AMM_TOPOLOGY:-/sandbox-conf/amm-topology.conf}"
 
 # Every address and figure below the `.` comes from the one file all three
@@ -65,7 +68,6 @@ TOPOLOGY="${AMM_TOPOLOGY:-/sandbox-conf/amm-topology.conf}"
 ANYONE="$ANYONE_TOKEN"
 WETH="$WETH_TOKEN"
 USDC="$USDC_TOKEN"
-REGISTRY=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 # TokenNetworkRegistry (DeployLocal)
 
 # anvil account 0 — the deployer everything else in this sandbox funds from.
 FUNDER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
@@ -137,21 +139,7 @@ rpc anvil_setStorageAt "$WETH" "$(cast to-uint256 2)" "$(cast to-uint256 18)"
   || die "WETH9 decimals() is not 18"
 say "WETH9: $(cast call "$WETH" 'symbol()(string)' --rpc-url "$RPC"), decimals 18"
 
-# ── 3. a TokenNetwork for ANYONE ────────────────────────────────────────────
-# The hub and the anytoon node both point `[settlement.evm]` at ANYONE, and a
-# connector resolves `getTokenNetwork(token)` through the registry at startup,
-# refusing to start on a zero answer. `createTokenNetwork` is permissionless on
-# this registry (the whitelist is off on the local deploy).
-TN="$(cast call "$REGISTRY" 'getTokenNetwork(address)(address)' "$ANYONE" --rpc-url "$RPC")"
-if [ "$TN" = "0x0000000000000000000000000000000000000000" ]; then
-  send --private-key "$FUNDER_KEY" "$REGISTRY" 'createTokenNetwork(address)(address)' "$ANYONE"
-  TN="$(cast call "$REGISTRY" 'getTokenNetwork(address)(address)' "$ANYONE" --rpc-url "$RPC")"
-fi
-same "$TN" "$ANYONE_TOKEN_NETWORK" \
-  || die "ANYONE TokenNetwork is $TN, but the committed configs name $ANYONE_TOKEN_NETWORK"
-say "ANYONE TokenNetwork: $TN"
-
-# ── 4. Uniswap v3 factory + the sandbox's own liquidity contract ────────────
+# ── 3. Uniswap v3 factory + the sandbox's own liquidity contract ────────────
 if [ "$(cast code "$UNISWAP_V3_FACTORY" --rpc-url "$RPC")" = "0x" ]; then
   say "deploying the official UniswapV3Factory creation bytecode"
   send --private-key "$AMM_DEPLOYER_KEY" --create "$(cat "$ART/UniswapV3Factory.creation.hex")"
@@ -168,16 +156,16 @@ fi
   || die "no code at the committed SandboxAmm address $SANDBOX_AMM"
 say "UniswapV3Factory $UNISWAP_V3_FACTORY, SandboxAmm $SANDBOX_AMM"
 
-# ── 5. fund the liquidity contract ──────────────────────────────────────────
+# ── 4. fund the liquidity contract ──────────────────────────────────────────
 # It pays its own `mint`/`swap` callbacks out of its own balance, so it has to
 # hold all three tokens before anything is minted. WETH comes from real ETH.
 send --private-key "$AMM_DEPLOYER_KEY" --value "${WETH_FLOAT}" "$WETH" 'deposit()'
 send --private-key "$AMM_DEPLOYER_KEY" "$WETH" 'transfer(address,uint256)' "$SANDBOX_AMM" "$WETH_FLOAT"
 send --private-key "$FUNDER_KEY" "$ANYONE" 'transfer(address,uint256)' "$SANDBOX_AMM" "$ANYONE_FLOAT"
-send --private-key "$FUNDER_KEY" "$USDC" 'mint(address,uint256)' "$SANDBOX_AMM" "$USDC_FLOAT"
+send --private-key "$USDC_MINTER_KEY" "$USDC" 'mint(address,uint256)' "$SANDBOX_AMM" "$USDC_FLOAT"
 say "SandboxAmm float: $(cast call "$WETH" 'balanceOf(address)(uint256)' "$SANDBOX_AMM" --rpc-url "$RPC") WETH, $(cast call "$ANYONE" 'balanceOf(address)(uint256)' "$SANDBOX_AMM" --rpc-url "$RPC") ANYONE, $(cast call "$USDC" 'balanceOf(address)(uint256)' "$SANDBOX_AMM" --rpc-url "$RPC") USDC (base units)"
 
-# ── 6. the two pools ────────────────────────────────────────────────────────
+# ── 5. the two pools ────────────────────────────────────────────────────────
 # create <label> <tokenA> <tokenB> <fee> <expected> <sqrtPriceX96> <tickLower> <tickUpper> <liquidity>
 create_pool() {
   label=$1 a=$2 b=$3 fee=$4 expect=$5 sqrtp=$6 lo=$7 hi=$8 liq=$9
@@ -189,7 +177,7 @@ create_pool() {
     send --private-key "$AMM_DEPLOYER_KEY" "$got" 'increaseObservationCardinalityNext(uint16)' "$OBSERVATION_CARDINALITY"
     send --private-key "$AMM_DEPLOYER_KEY" "$SANDBOX_AMM" 'provide(address,int24,int24,uint128)' "$got" "$lo" "$hi" "$liq"
   fi
-  same "$got" "$expect" || die "$label pool is $got, but the committed connector config names $expect"
+  same "$got" "$expect" || die "$label pool is $got, but conf/amm-topology.conf names $expect"
   say "$label pool $got: tick $(cast call "$SANDBOX_AMM" 'state(address)(uint160,int24,uint16,uint16)' "$got" --rpc-url "$RPC" | tr '\n' ' ')"
 }
 create_pool "ANYONE/WETH 1%" "$ANYONE" "$WETH" 10000 "$POOL_ANYONE_WETH" \
@@ -197,7 +185,7 @@ create_pool "ANYONE/WETH 1%" "$ANYONE" "$WETH" 10000 "$POOL_ANYONE_WETH" \
 create_pool "WETH/USDC 0.05%" "$WETH" "$USDC" 500 "$POOL_WETH_USDC" \
   "$POOL_WETH_USDC_SQRTP" "$FULL_RANGE_LO_10" "$FULL_RANGE_HI_10" "$POOL_WETH_USDC_LIQUIDITY"
 
-# ── 7. prime the oracles ────────────────────────────────────────────────────
+# ── 6. prime the oracles ────────────────────────────────────────────────────
 # A grown cardinality is an EMPTY ring until swaps fill it, and swaps only
 # write an observation when the block timestamp moves. So: step the clock,
 # trade a dust amount on each pool, repeat — until the oldest observation is
@@ -215,7 +203,7 @@ while [ "$i" -lt "$PRIME_STEPS" ]; do
   i=$((i + 1))
 done
 
-# ── 8. the assertion the whole script exists for ────────────────────────────
+# ── 7. the assertion the whole script exists for ────────────────────────────
 # If this reverts, the connector's rate poller would have answered
 # `WindowNotServed` for ever and the ANYONE pair would have priced NOTHING,
 # with a green boot and an `F02` on every crossing. Fail here instead.

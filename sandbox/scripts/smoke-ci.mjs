@@ -36,10 +36,10 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import {
-  HUB, PROVIDER_EDGE, PROVIDER_CHANNEL, HUB_FEE, BUYER_SOL,
+  HUB, PROVIDER_EDGE, HUB_FEE, BUYER_SOL,
   K_LISTING, TOON_LABEL, TERMINATE_ROUTE, spawnRoute, extendRoute, SSH_USER,
   listing, reporter, jstr, nowSec, waitFor,
-  claims, clientBookTotal, peerBookTotal,
+  claims, clientBookTotal, peerBookTotal, peeringChannel,
   relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
   newTenant, newRootSecret, tokenRequest, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshRun,
@@ -109,6 +109,9 @@ const { client, opened } = await openChannel(HUB);
 assert(client.identity?.solanaPublicKey === BUYER_SOL, `the payer is ${client.identity?.solanaPublicKey}`);
 ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
 const hubBefore = clientBookTotal(await claims('relay-connector'));
+// The hub's peering channel toward the provider: where the provider books
+// what the peering paid it (a fact of the run, off the hub's GET /channels).
+const PROVIDER_CHANNEL = await peeringChannel('provider-connector');
 const providerBefore = peerBookTotal(await claims('provider-connector'), PROVIDER_CHANNEL);
 const send = (route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: PROVIDER_EDGE, timeoutMs: 180_000 });
 

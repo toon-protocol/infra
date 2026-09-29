@@ -14,10 +14,12 @@
 //       connector terminates g.toon.provider.basic.v1.spawn at the listing
 //       price, the hub forwards it at listing price + its 100 uUSDC fee, and
 //       the three free provider routes are 0 at the provider
-//   0b. the relay-provider Solana channel is open and collateralised on chain
-//   1.  a real client (@toon-protocol/client) opens a SOLANA mock-USDC channel
-//       against the hub — the same payer, mnemonic and channel store as
-//       scripts/smoke-toon.mjs, so both smokes share one channel
+//   0b. the hub's x402 channel toward the provider — its half of the peering,
+//       opened by the open-peerings job — is open and collateralised on chain
+//   1.  a real client (@toon-protocol/client) opens an x402 channel in mock
+//       USDC ON SOLANA against the hub, through the hub's sponsor endpoint —
+//       the same payer, mnemonic and channel store as scripts/smoke-toon.mjs,
+//       so both smokes share one channel
 //   2.  a TENANT mints a lease's ROOT SECRET and builds a Lease Request from
 //       it: a plain JSON object (spec §6.1) with a fresh request_id, op =
 //       spawn, provider = this provider's pubkey, an expiration, and the
@@ -32,9 +34,9 @@
 //   4.  a container is RUNNING on the host daemon, publishing that ssh_port
 //   5.  `ssh -i <tenant key> -p <ssh_port> tenant@127.0.0.1` works — the
 //       tenant's key, and only that, opens the workload
-//   6.  the money, from the connectors' own books: the hub's client book
-//       grew by price + fee, the provider connector's peer-book watermark on
-//       the committed channel account grew by the price
+//   6.  the money, from the connectors' own books: the hub's book grew by
+//       price + fee, the provider connector's watermark on the hub's peering
+//       channel toward it grew by the price
 //   7.  the SAME Lease Request sent again is refused stale_request — and the
 //       refusal is BILLED (one route, one price, no refunds: ADR 0003), which
 //       the books show as a second increment
@@ -50,11 +52,11 @@
 //       no_capacity — which is the provider being right, not the smoke.
 import {
   HUB, HUB_SOL, BUYER_SOL, USDC_MINT,
-  PAYMENT_CHANNEL_PROGRAM, HUB_CHANNEL_DEPOSIT, HUB_FEE,
+  PAYMENT_CHANNELS_PROGRAM, HUB_CHANNEL_DEPOSIT, HUB_FEE,
   IMAGE, SSH_USER, providerOf,
   checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
-  claims, clientBookTotal, peerBookTotal, readSolanaChannel,
+  claims, clientBookTotal, peerBookTotal, peeringChannel, readSolanaChannel,
   docker, findWorkload, workloadGone,
   newTenant, newRootSecret, tokenRequest, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
@@ -72,12 +74,17 @@ const L = P.listing('basic');
 const SPAWN_ROUTE = P.spawnRoute(L.name, L.version);
 const TERMINATE_ROUTE = P.terminateRoute;
 const HUB_PRICE = L.price + HUB_FEE;
+// The hub's channel toward this provider, `solana:<account>`: where the
+// provider's book records what the peering paid it (a fact of the run, found
+// on the hub's own GET /channels).
+const PEERING = await peeringChannel(P.connectorNode).catch((e) => fatal(e.message));
+const PEERING_ACCOUNT = PEERING.slice('solana:'.length);
 
 async function booksAdvanceTo(hubBefore, providerBefore, hubDelta, providerDelta) {
   let hubNow = hubBefore, providerNow = providerBefore;
   await waitFor(async () => {
     hubNow = clientBookTotal(await claims('relay-connector'));
-    providerNow = peerBookTotal(await claims(P.connectorNode), P.channel);
+    providerNow = peerBookTotal(await claims(P.connectorNode), PEERING);
     return hubNow - hubBefore >= hubDelta && providerNow - providerBefore >= providerDelta;
   }, 10);
   return { hub: hubNow - hubBefore, provider: providerNow - providerBefore };
@@ -108,27 +115,26 @@ assert(advertised['relay-connector (hub)'][SPAWN_ROUTE] === HUB_PRICE,
 // ── 0b. the peering channel on chain ─────────────────────────────────────
 step(`0b. the hub's peering channel with ${P.connectorNode} is open and collateralised on SOLANA`);
 {
-  const ch = await waitFor(() => readSolanaChannel(P.channel), 90, 2000);
+  const ch = await waitFor(() => readSolanaChannel(PEERING_ACCOUNT), 90, 2000);
   if (!ch) {
-    bad(`channel account ${P.channel} never appeared on the validator (docker compose logs open-toon-solana-channels)`);
+    bad(`channel account ${PEERING_ACCOUNT} never appeared on the validator (docker compose logs open-peerings)`);
   } else {
-    assert(ch.owner === PAYMENT_CHANNEL_PROGRAM && ch.discriminator === 'pchannel', `${P.channel} is a payment_channel program account`);
-    const participants = [ch.participantA, ch.participantB].sort();
-    assert(participants.join() === [HUB_SOL, P.sol].sort().join(), `participants are the hub and ${P.connectorNode} (${participants.join(', ')})`);
+    assert(ch.owner === PAYMENT_CHANNELS_PROGRAM && ch.size === 256, `${PEERING_ACCOUNT} is a payment-channels Channel account`);
+    assert(ch.payer === HUB_SOL && ch.authorizedSigner === HUB_SOL, `the hub pays it and signs its vouchers (${ch.payer})`);
+    assert(ch.payee === P.sol, `${P.connectorNode} is its payee (${ch.payee})`);
     assert(ch.mint === USDC_MINT, 'settles in the Solana mock USDC mint');
-    assert(ch.status === 0, 'status Opened');
-    const hubDeposit = ch.participantA === HUB_SOL ? ch.depositA : ch.depositB;
-    assert(hubDeposit >= HUB_CHANNEL_DEPOSIT, `the hub's own side holds ${hubDeposit} base units of collateral (>= ${HUB_CHANNEL_DEPOSIT})`);
+    assert(ch.status === 0, 'status Open');
+    assert(ch.deposit >= HUB_CHANNEL_DEPOSIT, `the hub's deposit behind it is ${ch.deposit} base units (>= ${HUB_CHANNEL_DEPOSIT})`);
   }
 }
 
 // ── 1. a channel against the hub ─────────────────────────────────────────
-step('1. a mock-USDC payment channel ON SOLANA against the hub');
+step('1. an x402 channel in mock USDC ON SOLANA against the hub');
 const { client, opened } = await openChannel(HUB);
 assert(client.identity?.solanaPublicKey === BUYER_SOL, `the payer is ${client.identity?.solanaPublicKey} — the address seed-toon-solana funded`);
-ok(`channel ${opened.channelId ?? '(id unreported)'} status=${opened.status ?? 'open'}`);
+ok(`channel ${opened.channelId} holding ${opened.deposit}`);
 const hubBefore = clientBookTotal(await claims('relay-connector'));
-const providerBefore = peerBookTotal(await claims(P.connectorNode), P.channel);
+const providerBefore = peerBookTotal(await claims(P.connectorNode), PEERING);
 console.log(`  books before: hub client=${hubBefore}, provider peer=${providerBefore}`);
 // SEALED TO THIS PROVIDER'S OWN EDGE: the sealing key a tenant seals to is the
 // one its Profile publishes (ADR 0011), and the two providers publish two.
@@ -194,7 +200,7 @@ step("6. the connectors' own books say the spawn was PAID — hub client leg and
   const d = await booksAdvanceTo(hubBefore, providerBefore, HUB_PRICE, L.price);
   assert(d.hub >= HUB_PRICE, `hub client book advanced by ${d.hub} uUSDC (>= ${HUB_PRICE}: listing price + fee)`);
   assert(d.provider >= L.price,
-    `${P.connectorNode}'s peer-book watermark on channel ${P.channel} advanced by ${d.provider} uUSDC (>= ${L.price}, the listing price)`);
+    `${P.connectorNode}'s watermark on the hub's channel ${PEERING} advanced by ${d.provider} uUSDC (>= ${L.price}, the listing price)`);
 }
 
 // ── 7. a replay is refused, and billed ───────────────────────────────────

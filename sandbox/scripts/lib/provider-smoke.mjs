@@ -18,6 +18,9 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { hkdfSync, randomBytes } from 'node:crypto';
 import { ToonClient } from '@toon-protocol/client';
+import { hostFetch } from './sandbox-endpoints.mjs';
+import { PAYMENT_CHANNELS_PROGRAM, USDC_MINT, readSolanaChannel as readChannelAt } from './solana-channel.mjs';
+import { CHANNEL_TARGET, PEERINGS } from '../peerings.mjs';
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url)))); // sandbox/
@@ -48,27 +51,27 @@ export const RELAY_WS = process.env.RELAY_WS ?? 'ws://localhost:7100';
 // derivation at account index 0 (scripts/seed-toon-solana.mjs funds it).
 export const MNEMONIC = 'test test test test test test test test test test test junk';
 
-export const PAYMENT_CHANNEL_PROGRAM = 'HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR';
-export const USDC_MINT = 'H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H';
+// solana-foundation's payment-channels (every Solana channel here, ADR 0075)
+// and the mock USDC mint, from the one channel reader.
+export { PAYMENT_CHANNELS_PROGRAM, USDC_MINT };
 export const HUB_SOL = '9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx';
 export const BUYER_SOL = 'oeYf6KAJkLYhBuR8CiGc6L4D4Xtfepr85fuDgA9kq96';
-// The relay-provider peering channel: the PDA both committed tomls name,
-// opened by the open-toon-solana-channels job.
+// The payees' Solana settlement keys, derived from the committed test phrase
+// (scripts/gen-toon-keys.sh) and published by each node as its Solana
+// `payTo`. A peering channel is opened with a fresh salt, so its ACCOUNT is a
+// fact of the run (the open-peerings job's) and is found by these keys — see
+// `peeringChannel` below.
 export const PROVIDER_SOL = '6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA';
-export const PROVIDER_CHANNEL = '87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn';
-// The SECOND provider's peering (TOON_Network #34): its own settlement key and
-// its own PDA, named by conf/connector-provider2.toml and the hub's own toml.
+// The SECOND provider's (TOON_Network #34): its own key, its own peering.
 export const PROVIDER2_SOL = 'CUCCqWMWMhwcHrZnxouDdwgRuUCd4MoSXx11zkfpLN4a';
-export const PROVIDER2_CHANNEL = 'Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF';
-// The relay-store peering channel: the PDA conf/connector-store.toml's
-// [[peer_channels]] row names, where the store connector books what the hub
-// has paid it for g.toon.store uploads.
-export const STORE_CHANNEL = '4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7';
-export const HUB_CHANNEL_DEPOSIT = 100_000_000n;
-// conf/connector-relay.toml's relay-provider [[peers]] row: the hub's own cut
-// on top of the provider's price, charged on every route it forwards,
-// including the free ones (100 - 100 == 0 arrives at the provider).
-export const HUB_FEE = 100n;
+export const STORE_SOL = '8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe';
+export const GAS_SOL = '5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q';
+// What the hub keeps behind each peering channel (scripts/peerings.mjs).
+export const HUB_CHANNEL_DEPOSIT = CHANNEL_TARGET;
+// The relay-provider fee (scripts/peerings.mjs): the hub's own cut on top of
+// the provider's price, charged on every route it forwards, including the free
+// ones (100 - 100 == 0 arrives at the provider).
+export const HUB_FEE = BigInt(PEERINGS.find((p) => p.id === 'relay-provider').fee);
 // The provider's expiry sweep cadence (its cleanup.rs SWEEP_INTERVAL_SECS):
 // the longest a lease can outlive its expires_at before the workload is gone.
 export const SWEEP_S = 30;
@@ -129,7 +132,7 @@ export const HTTP_CONTAINER_PORT = 80;
 // ── the providers, each its own config file ───────────────────────────────
 // The sandbox runs TWO compute providers (TOON_Network #34): `provider` behind
 // provider-connector on :3240, and `provider2` behind provider2-connector on
-// :3250, each with its own Nostr identity, its own peering channel and its own
+// :3250, each with its own Nostr identity, its own peering with the hub and its own
 // directory publisher. So every lookup a smoke makes about "the provider" —
 // its client edge, its channel, its pubkey, its prices, its route names — is a
 // question about WHICH ONE, and every helper below takes a provider.
@@ -142,7 +145,7 @@ export const HTTP_CONTAINER_PORT = 80;
 const tomlScalar = (text, key) =>
   text.match(new RegExp(`^\\s*${key}\\s*=\\s*"?([^"\\s#]+)"?`, 'm'))?.[1] ?? null;
 
-function readProvider({ service, connectorNode, confFile, edge, sol, channel }) {
+function readProvider({ service, connectorNode, confFile, edge, sol }) {
   const conf = readFileSync(join(ROOT, 'conf', confFile), 'utf8');
   const confValue = (key) => {
     const value = tomlScalar(conf, key);
@@ -172,7 +175,7 @@ function readProvider({ service, connectorNode, confFile, edge, sol, channel }) 
     });
   const addr = confValue('ilp_address');
   return {
-    service, connectorNode, confFile, conf, edge, sol, channel,
+    service, connectorNode, confFile, conf, edge, sol,
     ilpAddress: addr,
     confValue,
     listings,
@@ -215,21 +218,21 @@ function readProvider({ service, connectorNode, confFile, edge, sol, channel }) 
 export const PROVIDERS = {
   provider: readProvider({
     service: 'provider', connectorNode: 'provider-connector', confFile: 'provider.toml',
-    edge: PROVIDER_EDGE, sol: PROVIDER_SOL, channel: PROVIDER_CHANNEL,
+    edge: PROVIDER_EDGE, sol: PROVIDER_SOL,
   }),
   provider2: readProvider({
     service: 'provider2', connectorNode: 'provider2-connector', confFile: 'provider2.toml',
-    edge: PROVIDER2_EDGE, sol: PROVIDER2_SOL, channel: PROVIDER2_CHANNEL,
+    edge: PROVIDER2_EDGE, sol: PROVIDER2_SOL,
   }),
   // The HIDDEN provider (TOON_Network Milestone 4, `hs` profile only): no
   // clearnet edge — its connector is reached at an `.anyone` address that
   // exists only once `anon-hs` has generated it (conf/.rendered/) — and no hub
-  // peering, so no committed channel. Its pubkey, prices, listings, ranges and
+  // peering. Its pubkey, prices, listings, ranges and
   // `[anon]` values are read from the committed template as for the other two;
   // scripts/smoke-milestone4.mjs reads the address from the rendered copy.
   'provider-hs': readProvider({
     service: 'provider-hs', connectorNode: 'provider-hs-connector', confFile: 'provider-hs.toml',
-    edge: null, sol: null, channel: null,
+    edge: null, sol: null,
   }),
 };
 /** The first provider: what every helper here means by "the provider" unless told otherwise. */
@@ -306,6 +309,14 @@ export async function waitFor(probe, seconds, everyMs = 500) {
 }
 
 // ── the connectors' own books (the same readers as scripts/smoke-toon.mjs) ─
+// Every row a node's `GET /claims` holds for what it was PAID is a voucher on
+// one x402 channel, `direction: "inbound"`, keyed `solana:<account>` or
+// `evm:0x<id>` (connector ADR 0075). There is ONE inbound book: a voucher is
+// journaled the same whichever role it arrived in, so the journal cannot say
+// whether a crossing came from a peering or a paying client — the CHANNEL
+// does. A payee's takings over its peering are its watermark on the hub's
+// channel toward it (`peeringChannel`); a publisher's relay writes are the
+// hub's watermark on the publisher's own channel (`publisherChannel`).
 export const bearer = (node) =>
   readFileSync(join(ROOT, 'keys', 'toon', node, 'operator-bearer.token'), 'utf8').trim();
 export const edgeOf = {
@@ -314,44 +325,75 @@ export const edgeOf = {
   'provider2-connector': PROVIDER2_EDGE,
   'store-connector': STORE_EDGE,
 };
-export async function claims(node) {
-  const res = await fetch(`${edgeOf[node]}/claims`, { headers: { authorization: `Bearer ${bearer(node)}` } });
-  if (!res.ok) throw new Error(`${node} GET /claims -> ${res.status}`);
+/** A bearer-gated operator read — `GET /claims`, `/channels`, `/peers`. */
+export async function operatorRead(node, path) {
+  const res = await fetch(`${edgeOf[node]}${path}`, { headers: { authorization: `Bearer ${bearer(node)}` } });
+  if (!res.ok) throw new Error(`${node} GET ${path} -> ${res.status}`);
   return res.json();
 }
-/** Inbound client-book takings, per channel — a connector is paid by its clients. */
+export const claims = (node) => operatorRead(node, '/claims');
+/** Inbound takings, per channel key — a connector is paid on channels opened toward it. */
 export function clientBookByChannel(rows) {
   const per = new Map();
   for (const r of rows) {
-    if (r.direction !== 'inbound' || r.book !== 'client') continue;
+    if (r.direction !== 'inbound') continue;
     const a = BigInt(r.cumulative_amount ?? 0);
     if (a > (per.get(r.channel_id) ?? 0n)) per.set(r.channel_id, a);
   }
   return per;
 }
-/** Client-book takings summed over every channel. */
+/** Inbound takings summed over every channel. */
 export const clientBookTotal = (rows) => [...clientBookByChannel(rows).values()].reduce((s, a) => s + a, 0n);
-/** Client-book watermark on ONE channel; the client book keys a Solana channel `solana:<account>`. */
+/** The inbound watermark on ONE channel key (`solana:<account>` or `evm:0x<id>`). */
 export function clientBookOnChannel(rows, channelKey) {
   let top = 0n;
   for (const r of rows) {
-    if (r.direction !== 'inbound' || r.book !== 'client') continue;
-    if (String(r.channel_id).toLowerCase() !== channelKey.toLowerCase()) continue;
+    if (r.direction !== 'inbound') continue;
+    if (String(r.channel_id).toLowerCase() !== String(channelKey).toLowerCase()) continue;
     const a = BigInt(r.cumulative_amount ?? 0);
     if (a > top) top = a;
   }
   return top;
 }
-/** Peer-book watermark on one channel account at a payee: what the peering has actually PAID it. */
-export function peerBookTotal(rows, onChannel) {
-  let top = 0n;
-  for (const r of rows) {
-    if (r.direction !== 'inbound' || r.book === 'client' || r.channel_id !== onChannel) continue;
-    const a = BigInt(r.cumulative_amount ?? 0);
-    if (a > top) top = a;
-  }
-  return top;
+/**
+ * What the peering has actually PAID a payee: its inbound watermark on
+ * `channelKey`, the hub's channel toward it (`await peeringChannel(node)`).
+ * The same reader as `clientBookOnChannel` — one book — under the name the
+ * smokes assert with.
+ */
+export const peerBookTotal = (rows, channelKey) => clientBookOnChannel(rows, channelKey);
+
+// The payees the hub peers with, by the Solana key each publishes.
+const PAYEE_SOL = {
+  'provider-connector': PROVIDER_SOL,
+  'provider2-connector': PROVIDER2_SOL,
+  'store-connector': STORE_SOL,
+  'gas-connector': GAS_SOL,
+};
+/**
+ * The hub's peering channel toward `payee` (a connector node), as the key the
+ * payee's `GET /claims` books it under: `solana:<account>`. Read off the hub's
+ * own `GET /channels` — its open OUTBOUND channel whose counterparty is the
+ * payee's Solana key — and waited for, since the open-peerings job runs just
+ * after `make up` returns.
+ */
+export async function peeringChannel(payee, seconds = 90) {
+  const sol = PAYEE_SOL[payee];
+  if (!sol) throw new Error(`the hub peers with no ${payee} — known: ${Object.keys(PAYEE_SOL).join(', ')}`);
+  const row = await waitFor(async () => (await operatorRead('relay-connector', '/channels'))
+    .find((r) => r.direction === 'outbound' && r.counterparty === sol && r.status === 'open'), seconds, 2000);
+  if (!row) throw new Error(`the hub holds no open channel toward ${payee} (${sol}) after ${seconds}s — the open-peerings job opens it: docker compose logs open-peerings`);
+  return `solana:${row.id}`;
 }
+
+// The directory publishers' Solana wallets: account indices 1, 2 and 3 of the
+// committed test phrase (docker-compose.yml; scripts/seed-toon-solana.mjs
+// funds them). Each pays the hub from its own channel.
+export const PUBLISHER_SOL = {
+  'directory-publisher': 'AqynRZwvVqUPRwRJXvm6odUb3t93fDjnWe3p6BeuUFxD',
+  'directory-publisher2': 'CqMbRgMuEhQi9BUS8xP44Wk5nENm48FqJnfjEi4eNb1k',
+  'directory-publisher-hs': '9Tj3srBSxH7RFRCm8uharreY7ZBS49XSfpwCeYa7Xaqp',
+};
 
 // ── the relay: one NIP-01 REQ, resolved at EOSE ───────────────────────────
 export function relayRead(filter, label = 'directory') {
@@ -412,37 +454,10 @@ export const directoryFilter = (kind, which) =>
 export const takeoverFilter = (workloadId, claimants) =>
   ({ kinds: [K_TAKEOVER], '#d': [workloadId], authors: claimants.map((c) => providerOf(c).pubkey) });
 
-// ── Solana payment-channel account layout ─────────────────────────────────
-// Offsets from the connector's packages/solana-program/src/state.rs (see the
-// vendored scripts/open-solana-channel.py, which names the source of each).
-const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-export function b58enc(buf) {
-  let v = 0n;
-  for (const b of buf) v = v * 256n + BigInt(b);
-  let out = '';
-  while (v > 0n) { out = B58[Number(v % 58n)] + out; v /= 58n; }
-  for (const b of buf) { if (b === 0) out = '1' + out; else break; }
-  return out;
-}
-export async function readSolanaChannel(account) {
-  const res = await fetch(RPC_URL, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [account, { encoding: 'base64', commitment: 'confirmed' }] }),
-  });
-  const { result } = await res.json();
-  if (!result?.value) return null;
-  const data = Buffer.from(result.value.data[0], 'base64');
-  return {
-    owner: result.value.owner,
-    discriminator: data.subarray(0, 8).toString('latin1'),
-    participantA: b58enc(data.subarray(8, 40)),
-    participantB: b58enc(data.subarray(40, 72)),
-    mint: b58enc(data.subarray(72, 104)),
-    depositA: data.readBigUInt64LE(104),
-    depositB: data.readBigUInt64LE(112),
-    status: data[160], // 0 = Opened
-  };
-}
+// ── a payment-channels account, off the validator ─────────────────────────
+export { b58enc } from './solana-channel.mjs';
+/** A payment-channels Channel account (lib/solana-channel.mjs), on this sandbox's validator. */
+export const readSolanaChannel = (account) => readChannelAt(RPC_URL, account);
 
 // ── docker: the host daemon the provider's workloads run on ───────────────
 export const docker = (...args) => execFileSync('docker', args, { cwd: ROOT, encoding: 'utf8' });
@@ -485,96 +500,23 @@ export async function composeHealthy(service, seconds = 90) {
   return healthy === true;
 }
 /**
- * The hub client-book channel key (`solana:<account>`) a directory publisher
- * pays its relay writes on, AND its local store's own cumulativeAmount for it
- * — read from the channel store on its own volume (`channels.json`, the same
- * file `@toon-protocol/client`'s `JsonFileChannelStore` writes: one entry per
- * channel id, `{ nonce, cumulativeAmount, ... }`). Three publishers hold three
- * channels (docker-compose.yml says why; `directory-publisher-hs` needs the
- * `hs` profile to be reached), so the one relay write a smoke is looking for
- * has to be counted on the right one — and so does the preflight below.
+ * The hub's channel key (`solana:<account>`) a directory publisher pays its
+ * relay writes on: the hub's INBOUND channel whose counterparty is that
+ * publisher's wallet, read off the hub's own `GET /channels`. Three publishers
+ * hold three channels (docker-compose.yml says why), so the one relay write a
+ * smoke is looking for has to be counted on the right one. The newest open
+ * one, should a publisher ever have replaced an exhausted channel.
  */
-export function publisherChannelState(service, profiles = ['full']) {
-  const profileArgs = profiles.flatMap((p) => ['--profile', p]);
-  const store = JSON.parse(docker('compose', ...profileArgs, 'exec', '-T', service, 'cat', '/var/lib/toon-publisher/channels.json'));
-  const ids = Object.keys(store);
-  if (ids.length !== 1) throw new Error(`${service} holds ${ids.length} channels, expected exactly one`);
-  return { channelKey: `solana:${ids[0]}`, cumulativeAmount: BigInt(store[ids[0]].cumulativeAmount ?? 0) };
-}
-/** Just the channel key `publisherChannelState` reads — what every smoke before #74 asked for. */
-export function publisherChannel(service, profiles) {
-  return publisherChannelState(service, profiles).channelKey;
-}
-
-// ── channel-state preflight (TOON_Network #74, M7-6) ───────────────────────
-// A directory publisher's LOCAL channel store can fall behind relay-connector's
-// own claim journal — a store carried over from an older snapshot, or a
-// `make down` that lands between a signed claim and the connector's ack. Once
-// that happens every claim the publisher signs advances value by ZERO (F03:
-// "advances value by 0, less than this route's price of N") and the relay
-// refuses every write from it — its Profile, Listings and Liveness all go
-// stale, and a smoke that reads them off the relay used to fail refused,
-// hundreds of seconds and one purchase later, on a symptom that named nothing
-// (seen on `directory-publisher-hs` at the end of Milestone 6; README §8 has
-// the whole diagnosis). This compares both sides before a smoke buys anything.
-export const DIRECTORY_PUBLISHERS = [
-  { service: 'directory-publisher', profiles: ['full'] },
-  { service: 'directory-publisher2', profiles: ['full'] },
-  { service: 'directory-publisher-hs', profiles: ['full', 'hs'] },
-];
-const ALL_COMPOSE_PROFILES = ['full', 'payments', 'credentials', 'hs', 'gateway'];
-/** `docker compose ps` across every profile this sandbox knows, so a publisher already running under ANY of them is seen. */
-const composePsAllProfiles = () =>
-  docker('compose', ...ALL_COMPOSE_PROFILES.flatMap((p) => ['--profile', p]), 'ps', '--format', '{{.Service}} {{.State}}');
-/**
- * Every directory publisher that is RUNNING right now, each with its channel
- * key, its local store's cumulativeAmount, and the SAME channel's watermark on
- * relay-connector's own claim journal. A publisher that is not running, or
- * holds no channel yet (nothing opened on a fresh `make up`/`make up-hs`), is
- * left out entirely — there is nothing to compare.
- */
-export async function channelStateReport() {
-  const running = composePsAllProfiles();
-  const live = DIRECTORY_PUBLISHERS.filter((pub) => new RegExp(`^${pub.service} running`, 'm').test(running));
-  if (live.length === 0) return []; // nothing running to compare — do not even ask relay-connector for its journal
-  const rows = await claims('relay-connector');
-  const report = [];
-  for (const pub of live) {
-    let state;
-    try {
-      state = publisherChannelState(pub.service, pub.profiles);
-    } catch {
-      continue; // running, but no channel opened on it yet — nothing to compare
-    }
-    const journal = clientBookOnChannel(rows, state.channelKey);
-    report.push({ service: pub.service, channelKey: state.channelKey, store: state.cumulativeAmount, journal });
-  }
-  return report;
-}
-/** README §8's remedy for one publisher's channel-state drift, verbatim in shape. */
-export const channelStateRemedy = (service) =>
-  '`make clean` (it takes the claim journals AND the stores together, which is exactly why `-v` is there) '
-  + `followed by a cold start; or, to keep the rest of the stack, stop ${service} and raise its stored `
-  + 'cumulativeAmount past the connector\'s before starting it again.';
-/**
- * The first RUNNING publisher whose local store has fallen STRICTLY BEHIND
- * relay-connector's own watermark on its channel — the channel-state drift
- * condition README §8 names — or null when every one running is level with or
- * ahead of its journal.
- *
- * STRICTLY behind, not "at or below": `@toon-protocol/client`'s
- * `signBalanceProof` persists a claim's advance to the store BEFORE the claim
- * is even sent (ChannelManager.js — "the advance is persisted before the
- * signature is returned"), so the resting state right after any successful
- * write is `store === journal`, not `store > journal`. Only a store that
- * dropped BELOW what the connector already booked — the M6 incident was 70
- * against 71 — means the next claim it signs (store + the route's price, and
- * g.toon.relay prices every directory write at 1) cannot get past the
- * journal's own watermark: advance 0, F03. Flagging equality too would fail
- * this preflight on every healthy publisher caught between two writes.
- */
-export async function channelStateMismatch() {
-  return (await channelStateReport()).find((r) => r.store < r.journal) ?? null;
+export async function publisherChannel(service, seconds = 90) {
+  const sol = PUBLISHER_SOL[service];
+  if (!sol) throw new Error(`no directory publisher ${service} — known: ${Object.keys(PUBLISHER_SOL).join(', ')}`);
+  const rows = await waitFor(async () => {
+    const found = (await operatorRead('relay-connector', '/channels'))
+      .filter((r) => r.direction === 'inbound' && r.counterparty === sol && r.status === 'open');
+    return found.length > 0 ? found : null;
+  }, seconds, 2000);
+  if (!rows) throw new Error(`the hub holds no open channel from ${service} (${sol}) after ${seconds}s — has it written anything yet? docker compose logs ${service}`);
+  return `solana:${rows[rows.length - 1].id}`;
 }
 /** True once no container of that exact name exists on the daemon (running or not) — the workload is gone — polled for up to `seconds`. */
 export async function workloadGone(name, seconds = 10) {
@@ -705,11 +647,17 @@ export const httpSpawnContent = (workloadId, tenant) => ({
 });
 
 /**
- * A real client (@toon-protocol/client) with a SOLANA mock-USDC channel
- * against `connector`. `storeName` picks the channel store under
+ * A real client (@toon-protocol/client) with an x402 channel in mock USDC ON
+ * SOLANA against `connector`, opened through that node's own sponsor endpoint
+ * (connector ADR 0074). `storeName` picks the channel store under
  * .toon-client/: every smoke that pays the HUB shares `channels.json` (one
- * payer, one channel, one nonce watermark), and a channel against any other
- * node gets its own file.
+ * payer, one channel, one watermark), and a channel against any other node
+ * gets its own file. `opened.channelId` is the channel account; the node's
+ * `GET /claims` keys what it is paid on it `solana:<channelId>`.
+ *
+ * `fetch: hostFetch()` because the peered nodes publish their compose-network
+ * names (scripts/lib/sandbox-endpoints.mjs), and a client dials what a node
+ * publishes — its sponsor endpoint included.
  */
 export async function openChannel(connector, storeName = 'channels.json', deposit = 10_000_000n) {
   mkdirSync(join(ROOT, '.toon-client'), { recursive: true });
@@ -721,9 +669,10 @@ export async function openChannel(connector, storeName = 'channels.json', deposi
     channelStore: join(ROOT, '.toon-client', storeName),
     deposit,
     timeoutMs: 60_000,
+    fetch: hostFetch(),
   });
-  const opened = await client.channel.open({ deposit });
-  return { client, opened };
+  const summary = await client.channel.open();
+  return { client, opened: { channelId: summary.channel.channelId, deposit: summary.depositTotal, summary } };
 }
 
 /**

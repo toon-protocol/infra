@@ -1,43 +1,64 @@
 # =============================================================================
 # relay-connector — the HUB. Terminates the relay's paid write routes and
-# FORWARDS g.toon.store / g.toon.gastation / g.anyone.credentials /
-# g.toon.provider.* over four ILP-over-HTTP peerings.
+# FORWARDS g.toon.store / g.toon.gastation / g.toon.provider.* /
+# g.toon.provider2.* over four peerings.
 # =============================================================================
-# Shape copied from the connector repo's proven multi-node topologies
-# (connector/local/two-hop + local/mixed-chain — the repo's own CI-exercised
-# peering mechanism: static config-file peering, ADR 0060/0028/0042). Three
-# things to know before editing (from the connector's own config docs):
+# Three things to know before editing (from the connector's own config docs):
 #   1. There is NO environment-variable layer; every value comes from this file.
-#   2. Every table is deny_unknown_fields — a typo is a load failure by name.
+#   2. Every table is deny_unknown_fields — a typo is a load failure by name,
+#      and so is every retired key (connector ADR 0075: `contract_address`,
+#      `program_id`, `[[client_channels]]`, and any channel row naming a
+#      `channel_id`/`channel_account`/`counterparty_key`).
 #   3. Startup is FAIL-CLOSED: missing key file / unreachable chain = exit 1.
 #
-# Every address below is deterministic, which is what lets this file be
-# committed: settlement keys are derived from anvil's public test mnemonic at
-# fixed indices (see keys/toon/README inside scripts/gen-toon-keys.sh), the
-# contracts land at fixed addresses (DeployLocal.s.sol by anvil account 0 at
-# fixed nonces), and the channel ids are keccak(p1, p2, epoch=0) with the
-# participants sorted (ADR 0059) — recomputed and asserted on every `make up`
-# by scripts/seed-toon-evm.sh.
+# EVERY CHANNEL IS AN x402 batch-settlement CHANNEL (connector ADR 0075), on
+# `x402BatchSettlement` on anvil and on solana-foundation's `payment-channels`
+# on the validator — both constants of the binary, placed on the local chains
+# by scripts/seed-x402.sh and docker-compose.yml's validator. A client pays
+# this node from a channel it opens itself: on EVM through the Onboarder this
+# node names below, on Solana through this node's own sponsor endpoint.
+#
+# THE PEERINGS ARE NOT IN THIS FILE. A peering is two one-way x402 channels,
+# each opened by its own node with a fresh salt, so no config can name one;
+# the `open-peerings` init job writes them at runtime through each node's
+# signed `POST /peers`, and this node's forwarding routes with
+# `POST /routes/peers` (a config route may only name a peer the same file
+# declares, connector ADR 0034). The table, fees and forwarding prices are
+# scripts/peerings.mjs; `GET /peers` and `GET /routes/peers` show them live.
+#
+# The ANYONE flip this node used to deal (connector ADR 0071) is out of the
+# sandbox until infra#42 moves it into a Dealer node: a node holds one token
+# per chain, and this one settles USDC on EVM now (infra ADR 0003).
 
 client_edge_addr = "0.0.0.0:3000"
 
-# Peer claim ledger + claim journal (named volume; the image ships /app/state
-# owned by uid 10001, which a fresh named volume inherits and a bind does not).
+# Claim journal, outbound-channel journal and the runtime peer/route table
+# (named volume; the image ships /app/state owned by uid 10001, which a fresh
+# named volume inherits and a bind does not).
 state_dir = "/app/state"
 
-# The three peerings below dial plain http:// inside the compose network. A peer
-# endpoint is wss/https-only unless a node says otherwise; local dev says so.
+# A peering is established from BOTH ends, so this node is dialled as well as
+# dialling: each payee's own `POST /peers` reads this node's self-description
+# and opens its reverse channel through this node's sponsor endpoint. `http`
+# carriage only — the one every node here publishes.
+peer_expose = "http"
+
+# Every peer here is a plain http:// container port. A peer endpoint is
+# wss/https-only unless a node says otherwise; local dev says so.
 peer_allow_plaintext_endpoints = true
 
 [signer]
 key_file = "/app/data/signer.key"
 
-# What this node says about itself on GET /ilp. Loopback URLs because the
-# payer (the smoke test) runs on the host; the edge is published at 3200.
+# What this node says about itself on GET /ilp — and what a PEER dials. So
+# the compose-network name, which every container reaches: a payee's
+# `POST /peers` dials exactly this. A host-run smoke reaches the same node at
+# 127.0.0.1:3200 through scripts/lib/sandbox-endpoints.mjs, and the directory
+# publishers need no rewrite at all. No `btp_endpoint`: `POST /peers` prefers
+# BTP wherever a node publishes it, and the peerings here ride HTTP.
 [node]
 addresses = ["g.toon.relay", "g.toon.relay.ephemeral"]
-http_endpoint = "http://127.0.0.1:3200/ilp"
-btp_endpoint = "ws://127.0.0.1:3200/ilp/btp"
+http_endpoint = "http://relay-connector:3000/ilp"
 
 # ── Terminated: the relay's paid write path ──────────────────────────────────
 [[routes]]
@@ -50,591 +71,44 @@ prefix = "g.toon.relay.ephemeral"
 handler_url = "http://relay:3100/write-ephemeral"
 price = 0
 
-# ── Forwarded: the store, over the relay-store peering ───────────────────────
-# ADR 0028 arithmetic, enforced by NOTHING in code, so written out: this hop
-# collects `price`, retains the peering's `fee` (100), forwards the rest. The
-# store-connector terminates g.toon.store at {base=1000, per_kib=10}, so
-# base 1100 - fee 100 == 1000 exactly, with no slack, at every payload size
-# (the per-KiB component is forwarded untouched).
-[[routes]]
-prefix = "g.toon.store"
-peer_id = "relay-store"
-price = { base = 1100, per_kib = 10 }
-
-# ── Forwarded: the gas station, over the relay-gas peering ───────────────────
-# gas-connector terminates g.toon.gastation at 1000; 1100 - 100 == 1000.
-[[routes]]
-prefix = "g.toon.gastation"
-peer_id = "relay-gas"
-price = 1100
-
-# ── Forwarded: the Anyone credentials issuer, ACROSS A DENOMINATION BOUNDARY ─
-#
-# THIS IS THE ONE ROUTE ON THIS NODE THAT CONVERTS, and the whole of the
-# difference between it and the two rows above. The packet arrives on the
-# client's SOLANA channel in mock USDC and leaves on the anytoon peering's EVM
-# channel in ANYONE — two different tokens, so ADR 0071 decision 1 applies and
-# the forward is `floor(amount x rate) - fee` with the fee in the OUTGOING
-# unit. The rate is not declared anywhere: it is a live Uniswap v3 TWAP, read
-# off this sandbox's own anvil by the poller the `[[tokens]]` block below
-# starts. See the `[[rates]]` / `[rate_guards]` blocks for the whole model.
-#
-# `price` IS STILL IN THE INCOMING UNIT, and it is still a STATIC NUMBER. That
-# is not an oversight and it cannot be otherwise: a route price is config
-# (ADR 0028), `GET /ilp` reads it straight out of the route table, and nothing
-# on the advertisement path ever touches the rate table. A dealing hub quotes
-# its client a fixed price in the client's own money and carries the FX risk
-# between quoting and settling — which is what a dealer IS.
-#
-# SO THE PRICE HAS TO COVER THE WORST RATE THE HUB EXPECTS TO SEE, and here is
-# that arithmetic, which is the single most load-bearing derivation in this
-# sandbox:
-#
-#   downstream price   40000000000000000   0.04 ANYONE (conf/anytoon.conf)
-#   + peering fee         400000000000000   0.0004 ANYONE (the [[peers]] row)
-#   = must arrive      40400000000000000
-#
-#   mid rate           4e12 ANYONE base units per uUSDC
-#                      (ANYONE = 0.25 USDC; see conf/amm-topology.conf)
-#   less spread 0.3%   x 0.997
-#   less the swap driver's band, 200 ticks = 2.02%     x 0.98
-#   = worst rate       3.908e12
-#
-#   40400000000000000 / 3.908e12 = 10338 uUSDC   <- the floor
-#   price = 11000                                 <- what this row charges
-#
-# The 662 uUSDC of headroom is the FX buffer, and it is deliberately about four
-# times the driver's band: the purchase keeps clearing until ANYONE has
-# appreciated ~8.6% against the sandbox's mid, which cannot happen while
-# scripts/swap-driver.sh is the only thing trading. scripts/smoke-toon.mjs
-# re-derives this inequality from GET /rates on every run, so a drift in either
-# direction fails by name rather than as an F06 nobody can explain.
-#
-# WHAT HAPPENS TO THE SLACK: it is the hub's. The converted amount is forwarded
-# in full less the fee, so the anytoon node receives MORE than its own price
-# asks for and keeps the difference — which is why the smoke asserts that leg
-# with `>=` and the client leg with `==`.
-[[routes]]
-prefix = "g.anyone.credentials"
-peer_id = "relay-anytoon"
-price = 11000
-
-# The key document, forwarded, and converted like everything else on this
-# peering. It is FREE at the anytoon node (price 0 there), so the only thing
-# this row has to buy is the hop itself: enough uUSDC that `floor(price x rate)`
-# still clears the 0.0004 ANYONE fee at the worst rate in the band.
-#
-#   400000000000000 / 3.908e12 = 103 uUSDC   ->   110 charged, same buffer logic
-#
-# THIS ROW IS NOT OPTIONAL and must not be "simplified" to price = 0. Prefix
-# matching is longest-wins, so without it a packet to g.anyone.credentials.keys
-# would fall onto the priced row above and cost 11000 to read a public key. And
-# with it set to 0 the hub would charge nothing while still subtracting its fee
-# from the packet's carried amount — R01 Insufficient Source Amount on every
-# request that carried 0, which is every honest one.
-[[routes]]
-prefix = "g.anyone.credentials.keys"
-peer_id = "relay-anytoon"
-price = 110
-
-# ── Forwarded: the compute provider, over the relay-provider peering ─────────
-# Same token at par (mock USDC on Solana), so plain ADR 0028 arithmetic: hub
-# price = the provider's price + the peering's fee (100). The provider's own
-# rows are GENERATED (`toon-provider routes`, pasted into
-# conf/connector-provider.toml): spawn and extend at the listing price, and
-# four FREE provider-wide rows at 0. A listing change is a new version and
-# new rows on both nodes (TOON_Network ADR 0009).
-#
-# THE FREE ROWS ARE PRICED 100 HERE, NOT 0, for the reason the
-# g.anyone.credentials.keys row above spells out: this hop subtracts its fee
-# from what the packet carries, so a 0 here would forward a negative amount
-# and refuse R01 every honest request. 100 - 100 == 0 arrives, which is what
-# a free route asks for. And every row is written out because prefix matching
-# is longest-wins: without its own row, g.toon.provider.status would fall
-# onto nothing at all (g.toon.provider itself is not a route).
-[[routes]]
-prefix = "g.toon.provider.basic.v1.spawn"
-peer_id = "relay-provider"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider.basic.v1.extend"
-peer_id = "relay-provider"
-price = 1100
-
-# The sandbox-only `smoke` listing (conf/provider.toml): same price, a 30 s
-# Lease Interval, bought by `make smoke-m1`.
-[[routes]]
-prefix = "g.toon.provider.smoke.v1.spawn"
-peer_id = "relay-provider"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider.smoke.v1.extend"
-peer_id = "relay-provider"
-price = 1100
-
-# The `ci` listing (conf/provider.toml; spec Appendix A.1): 5000 at the
-# provider + the fee, bought by `make smoke-ci`.
-[[routes]]
-prefix = "g.toon.provider.ci.v1.spawn"
-peer_id = "relay-provider"
-price = 5100
-
-[[routes]]
-prefix = "g.toon.provider.ci.v1.extend"
-peer_id = "relay-provider"
-price = 5100
-
-# The `warm` listing (conf/provider.toml): the tier that PRICES WARM STANDBYS
-# (spec §7). Four rows, not two — the standby pair is forwarded at the
-# standby price + the fee (400 + 100), the running pair at the full one, which
-# is the whole point of the tier: held capacity costs less than a workload.
-[[routes]]
-prefix = "g.toon.provider.warm.v1.spawn"
-peer_id = "relay-provider"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider.warm.v1.extend"
-peer_id = "relay-provider"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider.warm.v1.standby"
-peer_id = "relay-provider"
-price = 500
-
-[[routes]]
-prefix = "g.toon.provider.warm.v1.standby.extend"
-peer_id = "relay-provider"
-price = 500
-
-[[routes]]
-prefix = "g.toon.provider.availability"
-peer_id = "relay-provider"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider.status"
-peer_id = "relay-provider"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider.terminate"
-peer_id = "relay-provider"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider.rotate"
-peer_id = "relay-provider"
-price = 100
-
-# ── Forwarded: the SECOND provider, over the relay-provider2 peering ─────────
-# The same arithmetic and the same generated-rows discipline as the block
-# above, against conf/provider2.toml and conf/connector-provider2.toml. It is
-# a SEPARATE peering with a separate channel, because it is a separate payee:
-# the two providers are told apart by address (g.toon.provider2), by sealing
-# key and by Nostr pubkey, which is what lets a Standby Set span them
-# (TOON_Network #34, spec §7).
-[[routes]]
-prefix = "g.toon.provider2.basic.v1.spawn"
-peer_id = "relay-provider2"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider2.basic.v1.extend"
-peer_id = "relay-provider2"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider2.smoke.v1.spawn"
-peer_id = "relay-provider2"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider2.smoke.v1.extend"
-peer_id = "relay-provider2"
-price = 1100
-
-# `warm` again, identically priced: a Standby Set is one tier bought twice.
-[[routes]]
-prefix = "g.toon.provider2.warm.v1.spawn"
-peer_id = "relay-provider2"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider2.warm.v1.extend"
-peer_id = "relay-provider2"
-price = 1100
-
-[[routes]]
-prefix = "g.toon.provider2.warm.v1.standby"
-peer_id = "relay-provider2"
-price = 500
-
-[[routes]]
-prefix = "g.toon.provider2.warm.v1.standby.extend"
-peer_id = "relay-provider2"
-price = 500
-
-[[routes]]
-prefix = "g.toon.provider2.availability"
-peer_id = "relay-provider2"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider2.status"
-peer_id = "relay-provider2"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider2.terminate"
-peer_id = "relay-provider2"
-price = 100
-
-[[routes]]
-prefix = "g.toon.provider2.rotate"
-peer_id = "relay-provider2"
-price = 100
-
-# ── The peerings ─────────────────────────────────────────────────────────────
-# Only the dialing side has an endpoint; http:// scheme selects ILP-over-HTTP
-# carriage, and on HTTP the dialer is structurally the payer.
-[[peers]]
-id = "relay-store"
-endpoint = "http://store-connector:3000/ilp"
-fee = 100
-
-[[peers]]
-id = "relay-gas"
-endpoint = "http://gas-connector:3000/ilp"
-fee = 100
-
-[[peers]]
-id = "relay-provider"
-endpoint = "http://provider-connector:3000/ilp"
-fee = 100
-
-[[peers]]
-id = "relay-provider2"
-endpoint = "http://provider2-connector:3000/ilp"
-fee = 100
-
-# The converting peering. BOTH numbers on this row are in ANYONE base units,
-# because a fee attaches to the peering it buys carriage over (ADR 0061) and
-# the cap is checked against the amount actually going out, POST-conversion
-# (ADR 0071 decision 1) — this peering's amounts are 18-decimal ones.
-#
-# `fee = 400000000000000` is 0.0004 ANYONE, which at the sandbox's mid is the
-# same 100 uUSDC the other two peerings charge. It is NOT "100 converted": a
-# fee is bilateral configuration, and this one is written in the unit it is
-# collected in and left there.
-#
-# `max_packet_amount` HAS TO BE WRITTEN OUT. The default is 1000000 base units
-# (connector_config::DEFAULT_MAX_PACKET_AMOUNT), which on an 18-decimal leg is
-# 10^-12 of one token — every crossing would refuse T04 naming a ceiling in a
-# unit nobody meant. 10^18 is one whole ANYONE, ~25 times what a bundle costs,
-# and comfortably inside ADR 0071's real ceiling on an 18-decimal leg (u64
-# tops out at ~18.4 ANYONE, and a packet past it is R01 "send less").
-[[peers]]
-id = "relay-anytoon"
-endpoint = "http://anytoon-connector:3000/ilp"
-fee = 400000000000000
-max_packet_amount = 1000000000000000000
-
-# One on-chain channel per peering, in two roles (the deployed shape): the
-# peer role for claims that arrive, the client role (pay_channels) for the
-# cover-forward claims this node signs BEFORE each forwarded PREPARE leaves
-# (ADR 0042 item 2 — required since connector#1145).
-#
-# THE CLIENT EDGE AND TWO OF THE THREE PEERINGS SETTLE MOCK USDC ON SOLANA;
-# the third settles ANYONE on anvil. So this node forwards across a CHAIN
-# boundary at par on two routes (same token, same 6 decimals, amounts pass
-# through unconverted) and across a DENOMINATION boundary on the third, at a
-# live market rate. The Solana row shape is
-# the connector repo's own (local/mixed-chain, issue #759/#1146): a
-# `channel_account` PDA rather than an EVM channel_id, no chain_id (Solana
-# has none), no token_network (the channel account IS the claim's signed
-# message), and no program_id (since connector#1128 the program is read from
-# [settlement.solana] alone). `counterparty_key` is the peer's Solana
-# settlement PUBLIC key.
-#
-# channel_account = find_program_address(["channel", min, max, mint]) with
-# the participants sorted by 32-byte value (packages/solana-program
-# processor.rs). Opened and collateralised AFTER this node boots by the
-# open-toon-solana-channels init job through THIS node's own operator
-# surface (POST /channels + /channels/:id/fund) — the repo's only
-# InitializeChannel submitter, and Deposit credits strictly by signer, so
-# only this node can put its own collateral behind its own claims
-# (connector#1118; scripts/open-solana-channel.py, vendored from
-# connector/local/).
-[[peer_channels]]
-peer_id = "relay-store"
-channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
-counterparty_key = "8VQznfuCBp9aDTwdHaXYneqgfckmVezE1MXrNW8hhUMe" # store-connector Solana settlement
-
-[[pay_channels]]
-peer_id = "relay-store"
-channel_account = "4yUyXpi3c23g1sxGWWUpANVoGKzt8i4iMc2xjdC3njR7"
-client_edge_url = "http://store-connector:3000/ilp"
-
-[[peer_channels]]
-peer_id = "relay-gas"
-channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
-counterparty_key = "5tci9czy3L2StZ6cNu3f85HcnnJqmHPYt8YSbGMWUE9q" # gas-connector Solana settlement
-
-[[pay_channels]]
-peer_id = "relay-gas"
-channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
-client_edge_url = "http://gas-connector:3000/ilp"
-
-# The provider peering: same Solana shape as the two above, opened by the
-# same job against the provider-connector's committed settlement key
-# (keys/toon/provider-connector, mnemonic index 38).
-[[peer_channels]]
-peer_id = "relay-provider"
-channel_account = "87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn"
-counterparty_key = "6dbRwZDF34CCWGvUm36VRRsEb7TTySQ1uLrYFEMumtgA" # provider-connector Solana settlement
-
-[[pay_channels]]
-peer_id = "relay-provider"
-channel_account = "87EGu9qGRB3G88jTdwz51uJscLQDHgzJfje7eXWfuEkn"
-client_edge_url = "http://provider-connector:3000/ilp"
-
-# The second provider's peering: the same shape again, its own PDA, against
-# provider2-connector's committed settlement key (keys/toon/provider2-connector,
-# mnemonic index 39).
-[[peer_channels]]
-peer_id = "relay-provider2"
-channel_account = "Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF"
-counterparty_key = "CUCCqWMWMhwcHrZnxouDdwgRuUCd4MoSXx11zkfpLN4a" # provider2-connector Solana settlement
-
-[[pay_channels]]
-peer_id = "relay-provider2"
-channel_account = "Fx5gAB3vJy3fqeEoc5NWMmVdCVa2KTPbhge5h3eQicoF"
-client_edge_url = "http://provider2-connector:3000/ilp"
-
-# The ANYONE peering, and the reason this file has a `[[tokens]]` block at all.
-# A DIFFERENT SHAPE, not a different spelling: `channel_id` is an EVM channel
-# identifier rather than a program-derived address, `chain_id` exists because
-# EVM chains have numeric ids, and `token_network` is the contract whose
-# EIP-712 domain the claim is verified under (ADR 0024) — none of which a
-# Solana row has, and all of which a Solana row's `channel_account` replaces.
-#
-# channel_id = keccak256(p1, p2, epoch=0) with the participants SORTED by
-# address (TokenNetwork.openChannel, ADR 0059): anytoon 0x40Fc9… sorts before
-# the hub 0x61097…. `token_network` is the ANYONE TokenNetwork, registry nonce
-# 2 — a DIFFERENT contract from the mock-USDC one every other EVM thing in this
-# sandbox names, because a TokenNetwork is per token.
-#
-# Opened and collateralised by scripts/seed-toon-evm.sh with `cast send`, which
-# is the EVM half's whole story: `openChannel` and `setTotalDeposit` are
-# ordinary contract calls Foundry can build from a signature string, so unlike
-# Solana's `InitializeChannel` they need no operator surface (see
-# scripts/open-solana-channel.py's header for that contrast).
-[[peer_channels]]
-peer_id = "relay-anytoon"
-channel_id = "0x94ab42f98c210488becb8fab3ccb790d8572fe91d1b50f93d70a30f02321f02f"
-counterparty_key = "0x40Fc963A729c542424cD800349a7E4Ecc4896624" # anytoon-connector EVM settlement
-chain_id = 31337
-token_network = "0x9f1ac54BEF0DD2f6f3462EA0fa94fC62300d3a8e"
-
-# THE CLAIM THIS ROW MINTS IS FOR THE CONVERTED FIGURE (ADR 0071 decision 1):
-# `cover_forward` signs for whatever the forward decided to send, so it names
-# ~4.39e16 ANYONE base units, not the 11000 uUSDC that arrived. Nothing on the
-# claim wire had to change for that — a claim was always denominated by the
-# channel it is written against, and neither reader has ever needed telling
-# what it is 11000 or 43880000000000000 OF.
-[[pay_channels]]
-peer_id = "relay-anytoon"
-channel_id = "0x94ab42f98c210488becb8fab3ccb790d8572fe91d1b50f93d70a30f02321f02f"
-chain_id = 31337
-token_network = "0x9f1ac54BEF0DD2f6f3462EA0fa94fC62300d3a8e"
-client_edge_url = "http://anytoon-connector:3000/ilp"
-
 # ── Settlement ───────────────────────────────────────────────────────────────
-# contract_address is the TokenNetworkRegistry (getTokenNetwork is resolved
-# through it at startup, refuse-to-start on empty).
-#
-# THE EVM TOKEN IS ANYONE, and this one line is what makes this node a dealer.
-# A peering's token is the `token_address` of the `[settlement.<chain>]` table
-# its channels settle through (connector#1292, crates/connector-config/
-# peering_asset.rs) — ONE token per chain per node, with no per-peering
-# override — so flipping this line flips the relay-anytoon peering, and with it
-# every forward onto that peering, into ANYONE. It is also the address a claim
-# arriving on an `evm:` CLIENT channel would be denominated in, which is why
-# the smoke's buyer opens a SOLANA channel: on this node an EVM client channel
-# is now an ANYONE channel.
-#
-# 0xFeAc2Eae… is the REAL mainnet ANYONE ERC-20, its real runtime bytecode
-# placed at its own mainnet address by scripts/seed-toon-evm-amm.sh. `decimals`
-# is asserted against the token's own `decimals()` at startup (connector#564),
-# so the 18 below is checked against that contract rather than declared about
-# it. The TokenNetwork for it is registry nonce 2, created by the same script.
+# EVM: Circle's FiatToken v2.2 as USDC, deployed by scripts/seed-x402.sh at a
+# deterministic address (anvil-mnemonic index 20, nonce 1). Its EIP-712 domain
+# is "USDC" / "2", which a client signs its ERC-3009 deposit under and boot
+# checks against the token's own DOMAIN_SEPARATOR() (connector #1425).
+# `facilitator_url` is the sandbox's Onboarder, which relays a 0-ETH payer's
+# deposit and pays its gas (connector ADR 0076); this node publishes it and
+# never calls it. A host-run client reaches it at localhost:4022.
 [settlement.evm]
 rpc_url = "http://anvil:8545"
-contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
-token_address = "0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
-decimals = 18
+token_address = "0x0A867CA0442383c2A89951244B955AA19b615b58"
+decimals = 6
+asset_eip712_name = "USDC"
+asset_eip712_version = "2"
+asset_transfer_method = "eip3009"
+facilitator_url = "http://onboarder:4022"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
-# Solana settlement: startup submits a real ATA-create and simulates an
-# InitializeChannel against the payment_channel program, so a green boot IS
-# the "payment_channel.so loaded and working" proof. The settlement key must
-# hold SOL before boot — seed-toon-solana funds it.
+# Solana: the deterministic mock USDC mint (scripts/seed-toon-solana.mjs).
+# `min_sponsored_deposit` is the smallest opening deposit this node's sponsor
+# endpoint co-signs an `open` for — 1 USDC, as on the devnet — and what bounds
+# the rent a stranger can make it spend. The key must hold SOL before boot
+# (seed-toon-solana funds it); it pays every sponsored open's rent.
 [settlement.solana]
 rpc_url = "http://solana-validator:8899"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
 decimals = 6
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
 
 # ── Operator surface ─────────────────────────────────────────────────────────
-# Reads (GET /claims — how the smoke test proves a write was PAID) need the
-# bearer token; writes need an RFC 9421 signature from the allowlisted key.
-#
-# Since this node deals, the bearer half has a second job: GET /rates reports
-# every ordered pair it prices, out of the very table the forwarding path
-# converts against (ADR 0071, connector#1297). scripts/smoke-toon.mjs polls it
-# twice and asserts (a) that the ANYONE leg is LIVE and moving, and (b) that
-# the hub's static 11000 uUSDC quote still covers the live market.
+# Reads (GET /claims — how the smokes prove a write was PAID) need the bearer
+# token; writes (the open-peerings job's POST /peers, /channels/:id/fund and
+# /routes/peers) need an RFC 9421 signature from the allowlisted key.
 [operator]
 bearer_token_file = "/app/data/operator-bearer.token"
 write_keys_file = "/app/data/operator-write.keys"
-
-# ═════════════════════════════════════════════════════════════════════════════
-# WHAT THIS NODE DEALS (ADR 0071 decision 3)
-# ═════════════════════════════════════════════════════════════════════════════
-# Three rows, and the moment the FIRST of them exists this node is held to the
-# absence rule for every ordered pair it forwards across: a crossing with no
-# rate is refused F02 rather than carried at par. So the set below is not "the
-# tokens we quote", it is "every token any channel on this node settles in,
-# plus the one everything is priced against".
-#
-#   evm:0x5FbD…   the mock USDC — THE NUMERAIRE, and the one token here that
-#                 NOTHING ON THIS NODE SETTLES IN. That is legal and it is the
-#                 point: a numeraire is a unit of account, not a balance. It is
-#                 where the ANYONE quote path has to land (a quote's last leg
-#                 must end at the numeraire, on the numeraire's own chain), and
-#                 declaring it is also what lets the `[[rates]]` row below name
-#                 it at all (`RateRowUnknownToken` otherwise).
-#   evm:0xFeAc…   ANYONE, quoted LIVE off this sandbox's own anvil.
-#   solana:H8HS…  the mock USDC on Solana — the client edge and the store/gas
-#                 peerings. No quote: there is no Solana RateSource in the
-#                 connector at all, and declaring one would refuse startup by
-#                 name (`QuotePathUnusable::NoSourceForChain`). It runs the
-#                 static row below instead, which is the arm ADR 0071 decision 3
-#                 provides for exactly this case.
-#
-# EVERY `[settlement.<chain>]` TABLE'S TOKEN MUST APPEAR HERE — not only the
-# ones a `[[client_channels]]` row names, because a settlement table is what
-# lets this node accept a claim on a channel it was never configured for
-# (ADR 0052). Omitting either is `ClientChannelTokenNotDeclared` at load.
-[[tokens]]
-asset = "evm:0x5FbDB2315678afecb367f032d93F642f64180aa3"
-numeraire = true
-
-# THE LIVE QUOTE — the only one in this repository, and the thing this whole
-# sandbox flip exists to exercise. Two legs, ANYONE -> WETH -> USDC, because
-# there is no ANYONE/USDC pool on mainnet either: ANYONE's principal venue is
-# a 1% ANYONE/WETH pool, and WETH is priced in USDC one hop further on. Both
-# pools are REAL Uniswap v3 core contracts deployed on this sandbox's anvil
-# (scripts/seed-toon-evm-amm.sh) with real liquidity, and a swap driver keeps
-# their observations advancing (scripts/swap-driver.sh).
-#
-# What the connector does with them (crates/connector-rate-source-evm): per leg
-# it reads `token0()`, `token1()` and `observe([window, 0])` at one pinned
-# block, turns the mean tick into a `Rate` by an integer port of v3-core's own
-# `TickMath`, and composes the two legs. A v3 tick is ALREADY `token1 per
-# token0 in base units` — the 18-vs-6 decimal gap is folded into it and nothing
-# applies a second scale (ADR 0071 decision 4), which is why `decimals` in the
-# settlement tables is a boot-time assertion against the chain and never an
-# input to value arithmetic.
-#
-# `pool` is a BARE address (no `evm:`); `quote_token` is prefixed; the chain is
-# inherited from `asset` and written nowhere. The last leg MUST end at the
-# numeraire, on the numeraire's own chain — `TokenQuoteDoesNotEndAtNumeraire`
-# otherwise. Two legs is the maximum.
-#
-# `twap_window_secs = 300` against pools primed with 900s of history and an
-# observation cardinality of 128 at a 15s swap cadence: six windows of ring to
-# spare. A window the pool cannot serve is `WindowNotServed` — which does NOT
-# refuse startup, it just means the pair silently never prices, so
-# seed-toon-evm-amm.sh calls `observe()` itself before it reports success.
-[[tokens]]
-asset = "evm:0xFeAc2Eae96899709a43E252B6B92971D32F9C0F9"
-quote = [
-  { pool = "0x8983f1366e1c0d20647c9a1b0cb46ce4c46e13c7", quote_token = "evm:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", twap_window_secs = 300 },
-  { pool = "0xef5d6240753bcaa3b8e59a9c668c62d430692c58", quote_token = "evm:0x5FbDB2315678afecb367f032d93F642f64180aa3", twap_window_secs = 300 },
-]
-
-[[tokens]]
-asset = "solana:H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
-
-# ── The one declared rate: two mock USDCs at par ─────────────────────────────
-# ORDERED, and the order is not a preference: `RateTable::leg` only ever looks
-# for `(token, numeraire)`, so a token reaches the composition machinery ONLY
-# through a row written in that direction. Written the other way round this row
-# is invisible and every credentials purchase is refused F02.
-#
-# It exists so the pair the packets actually convert — `solana:H8HS… ->
-# evm:0xFeAc…`, which is declared NOWHERE — can be COMPOSED: this row to the
-# numeraire, then the ANYONE quote read backwards. Neither leg is a trade this
-# node makes; the composition is.
-#
-# 1/1 because they are the same asset at the same scale: two 6-decimal mock
-# USDCs, one per chain. `spread = {0, 1}` is a per-pair override that turns
-# dealing OFF for this leg specifically — a hub that shaved its own par
-# crossing would be charging a market-making margin for moving USDC from one
-# disposable chain to another. The spread that IS taken is the composed pair's,
-# from `[rate_guards]` below, applied once on top of the composition rather
-# than once per leg (a cross rate is one trade, not two).
-#
-# A static row NEVER GOES STALE: `ttl` governs an observation and an operator's
-# declaration is not one. So the par leg is always live and the ANYONE leg is
-# the only thing that can take the pair down.
-[[rates]]
-from = "solana:H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
-to = "evm:0x5FbDB2315678afecb367f032d93F642f64180aa3"
-rate = { numerator = 1, denominator = 1 }
-spread = { numerator = 0, denominator = 1 }
-
-# ── The three guards ─────────────────────────────────────────────────────────
-# Required as a SET the moment any rate or any quote exists, and refused at
-# boot otherwise (`RateGuardsMissing`): a node that deals without saying what it
-# deals at the edges of is a node whose operator has not thought about it.
-#
-# `spread = 30/10000` — 0.3%, this hub's dealing margin, and a separate
-# earnings stream from the flat `fee` (decision 8). Applied against the sender:
-# a mid of m deals at m * (10000-30)/10000, so fewer ANYONE leave per uUSDC
-# that arrives. It is a FRACTION rather than a basis point because there are no
-# floats on this path. This is the 0.997 in the price derivation at the top of
-# this file.
-#
-# `ttl_secs = 120` — and it also sets the POLLING CADENCE, which is ttl/3 with
-# no separate knob: 40 seconds. That is what makes the smoke's "the rate is
-# live" assertion cheap (two polls a minute and a half apart cross at least two
-# refreshes) and it is three refreshes of slack before a pair goes dark. A pair
-# that does go stale refuses T00 — retryable, and only that pair.
-#
-# `max_move = 5/100` — a refresh more than 5% from the last accepted one is
-# treated as probable manipulation: it is REFUSED, the previous rate stays in
-# force and goes on ageing, and `refused_refresh` shows up on the pair's row in
-# GET /rates. Nothing is taken down; a refused refresh buys a human time to
-# look. The swap driver moves the 300s TWAP by ~0.5% between polls, so this
-# guard should never trip here — if it does, something other than the driver
-# is trading.
-#
-# NOTE which pair each guard is read from, because it is not the same one:
-# `spread` comes from the pair being LOOKED UP (the composed one), while `ttl`
-# and `max_move` are read per LEG, from that leg's own `(token, numeraire)`
-# pair. An override of either on a composed pair would be inert.
-[rate_guards]
-spread = { numerator = 30, denominator = 10000 }
-ttl_secs = 120
-max_move = { numerator = 5, denominator = 100 }

@@ -48,6 +48,11 @@ dump mainnet-beta CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d mpl_core.so
 # scheme drives (connector ADR 0074). Dumped from MAINNET-BETA, the binary
 # production runs — its devnet deployment is a different build.
 dump mainnet-beta CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX payment_channels.so
+# p-token, mainnet-beta's SPL Token program, loaded over the bundled one (see
+# the solana-validator service). The committed copy is the connector's own
+# pinned fixture (crates/connector-settlement-solana/fixtures/p_token.so at
+# release 2026.09.29.1, sha256 8190d3f7…f697); re-dumping takes mainnet's current build.
+dump mainnet-beta TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA p_token.so
 
 # ── the EVM asset layer's bytecode (artifacts/evm/README.md) ────────────────
 # Two mainnet contracts at their own mainnet addresses, and the official Uniswap

@@ -1,4 +1,17 @@
 # =============================================================================
+# PARKED UNTIL infra#42 — NOTHING STARTS THIS NODE.
+# =============================================================================
+# This file is the TokenNetwork-era shape (a `[[client_channels]]` row,
+# `contract_address`, a hub that pays in ANYONE), and the connector the
+# sandbox pins since infra#39 is x402-only: it refuses every one of those by
+# name. It is kept, unmigrated, because #42 rewrites it for the Dealer node
+# that takes the ANYONE flip over (docs/adr/0003-the-anyone-flip-lives-in-a-
+# dealer-node.md): `[settlement.evm]` in ANYONE with
+# `asset_transfer_method = "permit2"`, paid by the Dealer as a client.
+# docker-compose.yml gives anytoon-connector the profile `anytoon`, which no
+# Makefile target selects. Everything below describes the parked shape.
+#
+# =============================================================================
 # anytoon-connector — terminates g.anyone.credentials in front of the Anyone
 # Protocol credentials issuer (through the claim minter), and takes the hub's
 # forwarded traffic as a PAYING CLIENT rather than as a peer. Read the next

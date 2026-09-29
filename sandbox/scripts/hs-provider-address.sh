@@ -185,12 +185,13 @@ grep -q '^connector_url = ' "$PROVIDER_TEMPLATE" && grep -q '^relay_set = ' "$PR
 #                         whole point). So the configured URL stays
 #                         clearnet-shaped and the REWRITE below is what carries
 #                         every request to the overlay.
-#   TOON_ENDPOINT_REWRITE two entries, and each is a real hop: the URL above
+#   TOON_ENDPOINT_REWRITE the hub's compose origin, which is both the URL above
 #                         (the first fetch, before any self-description has
-#                         been read) and http://127.0.0.1:3200 (what this hub
-#                         ADVERTISES, because its smokes run on the host — a
-#                         client dials what a node publishes). Both land on the
-#                         hub's virtual port, so the packet leaves through
+#                         been read) and what the hub ADVERTISES (it publishes
+#                         its compose-network name so its peers can dial it,
+#                         infra#39 — and a client dials what a node publishes,
+#                         its Solana sponsor endpoint included). It lands on
+#                         the hub's virtual port, so the packet leaves through
 #                         `anon` and arrives naming nothing about this host.
 #   RELAY_WRITE_ROUTES    relay READ url -> the paid ILP destination that
 #                         writes to it. The key must be exactly what the
@@ -201,8 +202,7 @@ grep -q '^connector_url = ' "$PROVIDER_TEMPLATE" && grep -q '^relay_set = ' "$PR
   printf '# The hidden provider publisher'"'"'s endpoints, on the anytoon daemon'"'"'s\n'
   printf '# address (%s), which carries the hub and the relay.\n' "$SANDBOX_ADDRESS"
   printf 'TOON_CONNECTOR_URL=%s\n' "$HUB_URL"
-  printf 'TOON_ENDPOINT_REWRITE={"%s":"http://%s:3200","http://127.0.0.1:3200":"http://%s:3200"}\n' \
-    "$HUB_URL" "$SANDBOX_ADDRESS" "$SANDBOX_ADDRESS"
+  printf 'TOON_ENDPOINT_REWRITE={"%s":"http://%s:3200"}\n' "$HUB_URL" "$SANDBOX_ADDRESS"
   printf 'RELAY_WRITE_ROUTES={"ws://%s:7100":"g.toon.relay"}\n' "$SANDBOX_ADDRESS"
 } > "$PUBLISHER_ENV"
 

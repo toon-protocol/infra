@@ -7,28 +7,29 @@ import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol"
 
 /**
  * @title DeploySandboxExtras
- * @notice SANDBOX-OWNED deploy script (lives in infra/sandbox/contracts/, NOT
- *         in the connector repo) for the extra contracts kind:5098 needs on
- *         anvil. It is mounted read-only at /sandbox-extras in the anvil
- *         container (forge runs it by absolute path from the connector's
- *         project root, so the connector checkout is never written to) right
- *         after DeployLocal.s.sol — see sandbox/docker-compose.yml (anvil).
+ * @notice SANDBOX-OWNED deploy script for the extra contracts kind:5098
+ *         needs on anvil. This directory is the sandbox's own Foundry project
+ *         (foundry.toml beside it), mounted at /contracts in the anvil
+ *         container and run first thing — see sandbox/docker-compose.yml
+ *         (anvil). It used to run from the connector checkout's project,
+ *         after that repo's DeployLocal.s.sol; both are gone (infra#39).
  *
  * What it deploys, and why:
  *
  *  1. `ERC2771Forwarder("ToonSandboxForwarder")` — the OpenZeppelin v5.5.0
- *     trusted forwarder (vendored in the connector checkout's
- *     lib/openzeppelin-contracts, the exact contract whose
+ *     trusted forwarder (installed into lib/openzeppelin-contracts at the
+ *     pinned revision by the anvil service, the exact contract whose
  *     `ForwardRequestData` struct / `execute` / `verify` / `nonces` ABI the
  *     gas-station's kind:5098 handler is written against). EIP-712 domain:
  *     name "ToonSandboxForwarder", version "1" (hardwired by OZ).
  *
  *  2. `SandboxTokenNetworkProbe(forwarder)` — a minimal ERC-2771-aware
- *     recipient the smoke test relays a real forwarded call to. It exists
- *     because the REAL TokenNetwork DeployLocal creates was constructed with
- *     trustedForwarder = address(0) (the registry's default; ERC2771Context
- *     stores the forwarder as an IMMUTABLE, so that instance can never accept
- *     meta-transactions). The probe exposes exactly the whitelisted
+ *     recipient the smoke test relays a real forwarded call to. It stood in
+ *     for the connector's TokenNetwork, which was constructed with
+ *     trustedForwarder = address(0) and so could never accept
+ *     meta-transactions, and it outlived that contract: the gas station's
+ *     kind:5098 still whitelists this selector and this target, and nothing
+ *     here settles through a TokenNetwork any more. The probe exposes exactly the whitelisted
  *     `setTotalDeposit(bytes32,address,uint256)` selector (the gas station
  *     refuses every other selector — mitigation (d)) and records
  *     `_msgSender()`, which is THE ERC-2771 proof: after a relayed call it
@@ -36,8 +37,7 @@ import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol"
  *
  * DETERMINISM: broadcast from anvil account 9 (0xa0Ee…9720) — an account
  * nothing else in the sandbox transacts from — so the addresses are pure
- * functions of (deployer, nonce 0/1) and stay stable even if the connector's
- * DeployLocal.s.sol grows or shrinks:
+ * functions of (deployer, nonce 0/1), whatever else the anvil seed deploys:
  *
  *   ERC2771Forwarder          0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35
  *   SandboxTokenNetworkProbe  0xA15BB66138824a1c7167f5E85b957d04Dd34E468
@@ -69,7 +69,7 @@ contract SandboxTokenNetworkProbe is ERC2771Context {
 
 contract DeploySandboxExtrasScript is Script {
     // anvil account 9 (public test key, local chain only) — dedicated to this
-    // script so its nonces (0, 1) are independent of DeployLocal's account 0.
+    // script so its nonces (0, 1) are independent of every other deploy.
     uint256 internal constant DEPLOYER_KEY =
         0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6;
 

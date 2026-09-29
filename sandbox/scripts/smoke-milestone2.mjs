@@ -57,17 +57,21 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { getPublicKey } from 'nostr-tools/pure';
 import {
-  ROOT, HUB, PROVIDER_EDGE, PROVIDER_CHANNEL, STORE_CHANNEL, HUB_FEE,
+  ROOT, HUB, PROVIDER_EDGE, HUB_FEE,
   K_PROFILE, K_IMAGE, K_BLOB, K_TEMPLATE, TOON_LABEL,
   AVAILABILITY_ROUTE, STATUS_ROUTE, TERMINATE_ROUTE, spawnRoute, IMAGE, SSH_USER,
   listing,
   checkLeaseBody,
   reporter, jstr, nowSec, waitFor,
-  claims, clientBookOnChannel, peerBookTotal,
+  claims, clientBookOnChannel, peerBookTotal, peeringChannel,
   relayReadUntil, directoryFilter, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
   newTenant, newRootSecret, tokenRequest, newWorkloadId, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
+// The hub's peering channels (`solana:<account>`), where each payee books what
+// the peering paid it: a fact of the run, off the hub's own GET /channels.
+const PROVIDER_CHANNEL = await peeringChannel('provider-connector');
+const STORE_CHANNEL = await peeringChannel('store-connector');
 import { publishImage } from './publisher/image.mjs';
 import { hexOf } from './publisher/blob.mjs';
 import { publishTemplate } from './publisher/template.mjs';
@@ -111,7 +115,7 @@ for (const [name, url] of [['hub', HUB], ['provider-connector', PROVIDER_EDGE]])
 assert(BigInt(advertised['provider-connector'][SPAWN_ROUTE]) === L.price && BigInt(advertised.hub[SPAWN_ROUTE]) === HUB_PRICE,
   `${SPAWN_ROUTE} is ${L.price} at the provider connector and ${HUB_PRICE} = price + fee ${HUB_FEE} at the hub`);
 // The hub's route table advertises g.toon.store by its base alone; the per
-// KiB part is in conf/connector-relay.toml and shows up in what each upload
+// KiB part is in scripts/peerings.mjs (the hub's runtime route) and shows up in what each upload
 // is charged (step 8).
 assert(advertised.hub[STORE_ROUTE] !== undefined && BigInt(advertised.hub[RELAY_ROUTE]) === 1n,
   `the hub sells ${STORE_ROUTE} (advertised at ${jstr(advertised.hub[STORE_ROUTE])}, plus per KiB) and ${RELAY_ROUTE} at ${advertised.hub[RELAY_ROUTE]} per event`);
@@ -413,11 +417,11 @@ const after = await waitFor(async () => {
 assert(storeCharges.length === uploads.length && storeCharges.every((c) => c > HUB_FEE),
   `${uploads.length} store uploads (${uploads.reduce((s, n) => s + n, 0)} bytes in parts and Blob Record copies), each charged base ${jstr(advertised.hub[STORE_ROUTE])} + per KiB on its size, plus the hub's fee: ${sum(STORE_ROUTE)} in all`);
 assert(after.store - before.store === expected.store,
-  `the store connector's peer book on ${STORE_CHANNEL} grew by ${after.store - before.store} = every upload's charge less the fee ${HUB_FEE} (${expected.store})`);
+  `the store connector's watermark on the hub's channel ${STORE_CHANNEL} grew by ${after.store - before.store} = every upload's charge less the fee ${HUB_FEE} (${expected.store})`);
 assert(count(RELAY_ROUTE) === relayWrites && sum(RELAY_ROUTE) === BigInt(relayWrites),
   `${relayWrites} relay writes (${eventsA} for ${NAME}:sshd and its Template, ${eventsB} for ${NAME}:store) cost ${sum(RELAY_ROUTE)}: one unit per event, at the hub itself`);
 assert(spawns === 3 && sum(SPAWN_ROUTE) === 3n * HUB_PRICE && after.provider - before.provider === expected.provider,
-  `the provider connector's peer book on ${PROVIDER_CHANNEL} grew by ${after.provider - before.provider} = ${spawns} spawns x ${L.price}; the ${freeCalls} free calls (${freeRoutes.map((r) => `${count(r)} ${r.split('.').pop()}`).join(', ')}) added nothing there`);
+  `the provider connector's watermark on the hub's channel ${PROVIDER_CHANNEL} grew by ${after.provider - before.provider} = ${spawns} spawns x ${L.price}; the ${freeCalls} free calls (${freeRoutes.map((r) => `${count(r)} ${r.split('.').pop()}`).join(', ')}) added nothing there`);
 assert(after.hub - before.hub === expected.hub,
   `the hub's client book on the tenant's channel grew by ${after.hub - before.hub} = every claim this run made (${expected.hub}: store ${sum(STORE_ROUTE)} + relay ${sum(RELAY_ROUTE)} + spawns ${sum(SPAWN_ROUTE)} + ${freeCalls} free calls x ${HUB_FEE})`);
 

@@ -1,19 +1,29 @@
 # =============================================================================
 # gas-connector — terminates g.toon.gastation in front of the gas station and
-# ACCEPTS the relay-gas peering. See conf/connector-relay.toml for provenance.
+# is the PAYEE of the relay-gas peering. See conf/connector-relay.toml for
+# the shared notes.
 # =============================================================================
 
 client_edge_addr = "0.0.0.0:3000"
 state_dir = "/app/state"
 peer_expose = "http"
 
+# The hub is a plain http:// container port too, and this node reads its
+# self-description and dials it to open its own reverse channel.
+peer_allow_plaintext_endpoints = true
+
 [signer]
 key_file = "/app/data/signer.key"
 
+# What this node publishes at GET /ilp, and so what the hub DIALS: its
+# compose-network name, because the hub's `POST /peers` reads this document and
+# dials the endpoint in it. A host-run client reaches the same node at
+# 127.0.0.1:3220 (scripts/lib/sandbox-endpoints.mjs). No `btp_endpoint`:
+# `POST /peers` prefers BTP wherever a node publishes it, and this peering
+# rides HTTP.
 [node]
 addresses = ["g.toon.gastation"]
-http_endpoint = "http://127.0.0.1:3220/ilp"
-btp_endpoint = "ws://127.0.0.1:3220/ilp/btp"
+http_endpoint = "http://gas-connector:3000/ilp"
 
 # ── The terminated route ─────────────────────────────────────────────────────
 # /gas is the gas station's any-phase handler (POST /gas takes quote and
@@ -23,31 +33,37 @@ prefix = "g.toon.gastation"
 handler_url = "http://gas-station:3300/gas"
 price = 1000
 
-[[peers]]
-id = "relay-gas"
+# ── The peering with the hub: not in this file ───────────────────────────────
+# ADR 0075: a peering is two one-way x402 channels, each opened by its own node
+# with a fresh salt, so no config can name one. The `open-peerings` init job
+# (scripts/open-peerings.mjs, table in scripts/peerings.mjs) sends this node a
+# signed `POST /peers` naming the hub FIRST — binding the hub's voucher signer,
+# so every forwarded packet arrives in the PEER role, and opening this node's
+# own small channel back toward the hub through the hub's sponsor endpoint —
+# and then the hub its own, which opens the channel that pays this node.
 
-# The peering settles on SOLANA (row shape per connector/local/mixed-chain);
-# counterparty is the hub's Solana settlement public key, and the channel is
-# opened post-boot through the hub's operator surface (payer side).
-[[peer_channels]]
-peer_id = "relay-gas"
-channel_account = "4oUEsaokTBie41Xtb7PDkeMK8vDoqvzeWecwk98Abc3T"
-counterparty_key = "9gXKH3AtUErhsAVaLmBkiJxdtUmUE29MjaRLFKxCqfAx" # relay-connector Solana settlement
-
+# ── Settlement ───────────────────────────────────────────────────────────────
+# The hub's terms exactly (conf/connector-relay.toml says why each value is
+# what it is): FiatToken USDC on anvil, named "USDC"/"2", deposited through the
+# sandbox's Onboarder; the mock USDC mint on the validator, sponsored from
+# 1 USDC. Every channel is an x402 channel (connector ADR 0075).
 [settlement.evm]
 rpc_url = "http://anvil:8545"
-contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
-token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+token_address = "0x0A867CA0442383c2A89951244B955AA19b615b58"
 decimals = 6
+asset_eip712_name = "USDC"
+asset_eip712_version = "2"
+asset_transfer_method = "eip3009"
+facilitator_url = "http://onboarder:4022"
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
 rpc_url = "http://solana-validator:8899"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
 decimals = 6
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
