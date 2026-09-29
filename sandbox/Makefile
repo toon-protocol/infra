@@ -3,8 +3,8 @@
 # Every service in docker-compose.yml carries a profile, so a profile is always
 # selected here (see the "Profiles" block at the top of that file).
 #   full         the whole stack, every service — the sandbox's default
-#   payments     chains + hub + seed/open jobs only, no sibling app checkout
-#                needed beyond the connector's
+#   payments     chains + hub + both providers + the open-peerings job, no
+#                sibling app checkout needed beyond the provider's
 #   credentials  `payments` PLUS the Anyone credentials issuer path and the
 #                swap driver — the denomination boundary without the permaweb
 #                half. Needs the anytoon checkout, NOT the store one
@@ -36,7 +36,9 @@ COMPOSE_GW = $(COMPOSE) --profile gateway
 
 # down/clean must sweep EVERY profile's containers, whichever one brought them
 # up — otherwise `make up-hs && make down` leaves three daemons running.
-COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway
+# `anytoon` is the parked anytoon-connector's profile (until infra#42): nothing
+# starts it, but a sweep must still reach a container someone started by hand.
+COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway --profile anytoon
 
 # The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
 # own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
@@ -75,17 +77,17 @@ export GATEWAY_CONTEXT ?= ../../gateway
 # `make setup` installs its dependencies when the checkout is present.
 export PROVIDER_CONTEXT ?= ../../provider
 
-# The anvil service bind-mounts the connector sibling's Foundry project
+# The anvil service bind-mounts the sandbox's own Foundry project (./contracts)
 # READ-WRITE and runs as the invoking user so forge's artifacts stay owned by
-# the developer (vendored pattern from connector/docker-compose.yml).
+# the developer.
 export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
 .PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-x402 smoke-credentials smoke-provider smoke-provider2 \
         smoke-directory smoke-eviction smoke-extend-shape smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
-        preflight-channel-state logs ps test require-store-context require-anytoon-context require-gateway-context \
-        devnet-status
+        state-guard logs ps test require-store-context require-anytoon-context require-gateway-context \
+        require-provider-publisher devnet-status
 
 # The store image is BUILT from the store sibling checkout carrying the
 # local-endpoint-override change (STORE_TURBO_UPLOAD_URL / ARNS_SOLANA_*_URL);
@@ -150,6 +152,27 @@ require-gateway-context:
 		exit 1; \
 	fi
 
+# Hard gate for the paths that BUILD the directory publishers — every profile
+# with a provider in it. They are built from the provider checkout, and one
+# from before provider#52 pays in `toon-channel` claims the pinned connector
+# refuses by name: every relay write would fail and the provider would never
+# appear in the directory, on a stack that otherwise looks healthy.
+require-provider-publisher:
+	@if ! grep -qE '"@toon-protocol/client": *"[\^~]?([4-9]|[1-9][0-9])\.' "$(PROVIDER_CONTEXT)/tools/publisher/package.json" 2>/dev/null; then \
+		echo "ERROR: the directory publisher in $(PROVIDER_CONTEXT) is not on @toon-protocol/client 4.x."; \
+		echo "The sandbox's connectors are x402-only (infra#39), and a publisher from before"; \
+		echo "toon-protocol/provider#52 pays in toon-channel claims they refuse. Update the"; \
+		echo "provider checkout (git -C $(PROVIDER_CONTEXT) pull), or point at one that is:"; \
+		echo "    make up PROVIDER_CONTEXT=/path/to/provider"; \
+		exit 1; \
+	fi
+
+## refuse to start on connector volumes from before the x402-only migration
+## (infra#39): the pinned connector refuses a toon-channel journal and would
+## restart-loop. Says `make clean` instead. Every `up*` runs it first.
+state-guard:
+	@./scripts/state-guard.sh
+
 ## one-time: install the script deps (needed by `make smoke` on the host).
 ## Deliberately does NOT require the store or anytoon checkouts — a
 ## payments-only developer must be able to run setup, up-payments and
@@ -179,27 +202,28 @@ setup:
 	fi
 
 ## start everything (chains + init jobs + gateway + bundler + TOON layer)
-up: require-store-context require-anytoon-context
+up: state-guard require-store-context require-anytoon-context require-provider-publisher
 	$(COMPOSE) up -d --build
 
-## start the PAYMENT LAYER ONLY: anvil + solana-validator + their seed jobs +
-## the relay + the hub + the Solana channel-open job + BOTH compute providers,
+## start the PAYMENT LAYER ONLY: anvil + solana-validator + the Solana seed
+## job + the relay + the hub + the open-peerings job + BOTH compute providers,
 ## each with its own connector and its own directory publisher + the
 ## Onboarder (14 services).
 ## No gateway, no bundler, no store, no gas station — and no store sibling
 ## checkout.
 up-payments: COMPOSE_PROFILE = payments
-up-payments:
+up-payments: state-guard require-provider-publisher
 	$(COMPOSE) up -d --build
 
-## start the CREDENTIALS slice: the payment layer PLUS the paid side of the
+## start the CREDENTIALS slice: the chains, the hub and the paid side of the
 ## denomination boundary — the issuer path (issuer + minter + datastores + key
-## job), the anytoon connector, and the swap driver that keeps the ANYONE TWAP
-## fresh (without it the crossing refuses T00 within minutes). 16 services.
-## Needs the anytoon sibling checkout (claim-minter builds from it) but NOT
-## the store checkout — the whole point of the profile.
+## job) and the swap driver that keeps the ANYONE TWAP fresh. The anytoon
+## connector that sold across the boundary is PARKED until infra#42 (a Dealer
+## node takes the flip over, infra ADR 0003), so no bundle can be bought here
+## yet. Needs the anytoon sibling checkout (claim-minter builds from it) but
+## NOT the store checkout — the whole point of the profile.
 up-credentials: COMPOSE_PROFILE = credentials
-up-credentials: require-anytoon-context
+up-credentials: state-guard require-anytoon-context
 	$(COMPOSE) up -d --build
 
 ## OPT-IN, and it takes a THIRD-PARTY DEPENDENCY: `full` plus the hidden-service
@@ -208,7 +232,7 @@ up-credentials: require-anytoon-context
 ## and fronts the anytoon issuer path with it. Never folded into `make up`: a
 ## cold start that can go red because a relay network had a bad day is not a
 ## sandbox. Expect a minute or two of bootstrapping, more on a cold volume.
-up-hs: require-store-context require-anytoon-context
+up-hs: state-guard require-store-context require-anytoon-context require-provider-publisher
 	# Build EVERYTHING first, including the images `up` would otherwise build
 	# later. A `--build` on the final `up` rebuilds the anon image, and a new
 	# image id makes compose RECREATE those containers — throwing away the
@@ -250,12 +274,9 @@ up-hs: require-store-context require-anytoon-context
 	@echo "  re-checking the daemons, in case the rest of the stack disturbed them"
 	@$(call wait_healthy,anon anon-client anon-hs)
 	@echo
-	@echo "up. \`make smoke-hs\` buys a bundle over the circuit."
-	@echo
-	@echo "NOTE: the anytoon node now advertises the CIRCUIT as its ingress, which is"
-	@echo "the production shape being rehearsed — so \`make smoke\` no longer reaches it"
-	@echo "directly on clearnet (its hub-routed leg is unaffected). Run \`make smoke\`"
-	@echo "against \`make up\`; run \`make smoke-hs\` against this. See README §2 + §6.6."
+	@echo "up. \`make smoke-m4\` rehearses the hidden provider over the circuit."
+	@echo "(\`make smoke-hs\`, the credentials purchase over the anytoon daemon's address,"
+	@echo "is parked with anytoon until infra#42.) See README §2 + §6.8."
 
 ## THE WORKLOAD GATEWAY (TOON_Network ADR 0013, spec §12; Milestones 5 and 6,
 ## #53 and #62): `full` PLUS the gateway and its own connector — two services,
@@ -268,7 +289,7 @@ up-hs: require-store-context require-anytoon-context
 ## `node scripts/handover.mjs --withdraw <lease.json>` takes it off again.
 ## README §2, "The Workload Gateway", walks the whole path. The `hs` profile is
 ## NOT part of this: the hidden path is `make up-gateway-hs`, by hand.
-up-gateway: require-gateway-context
+up-gateway: state-guard require-gateway-context require-provider-publisher
 	@if [ "$(COMPOSE_PROFILE)" = full ]; then $(MAKE) --no-print-directory require-store-context require-anytoon-context; fi
 	$(COMPOSE_GW) up -d --build
 
@@ -333,8 +354,10 @@ down:
 
 ## stop the stack and wipe ALL local state (next `make up` is a cold start).
 ## `-v` also removes the connectors' claim-journal volumes — load-bearing: a
-## journal left behind pairs a live replay watermark with a wiped chain and
-## satisfies the next smoke's payment assertion without it having paid.
+## journal left behind pairs a live watermark with a wiped chain and satisfies
+## the next smoke's payment assertion without it having paid. It is also THE
+## UPGRADE STEP across a connector that changes what a journal may hold, as
+## the x402-only one did (infra#39): `make up` refuses the old volumes by name.
 ## Some services run as root and leave root-owned files in ./data, so the
 ## wipe happens inside a throwaway container rather than needing sudo.
 ## `-v` also takes the anon-data volume, i.e. THIS SANDBOX'S HIDDEN-SERVICE KEY
@@ -349,27 +372,13 @@ clean:
 		rmdir data; \
 	fi
 
-## THE CHANNEL-STATE PREFLIGHT (TOON_Network #74, M7-6): compares every
-## RUNNING directory publisher's local channel store (channels.json on its own
-## volume) against relay-connector's own claim journal, and fails AT ONCE — by
-## name, with both amounts and the remedy — on the drift README §8 documents,
-## where a publisher's store has fallen STRICTLY BEHIND the connector's own
-## watermark (equal is the normal resting state between two writes) and every
-## claim it signs from there advances value by 0. A prerequisite of every
-## RELAY-WRITING smoke below (smoke-provider, smoke-provider2,
-## smoke-directory, smoke-eviction, smoke-ci, smoke-m1 through smoke-m7) so
-## the drift is caught before a lease is bought rather than several steps
-## into one. Safe
-## to run on its own, against a stack that is not up (it then finds nothing
-## to compare and exits 0) or mid-session (`make preflight-channel-state`).
-preflight-channel-state:
-	node scripts/preflight-channel-state.mjs
-
 ## end-to-end proof: AR.IO flow (upload -> buy name -> serve) + TOON flow
-## (contracts/program live -> paid write -> paid store blob via peering ->
-## brokered ArNS buy: paid 5095 prepare + 5096 gas spawn + 5095 buy, name
-## resolves -> paid gas jobs via peering: Solana quote + EVM ERC-2771
-## meta-tx relay, with claim journals asserted per settlement leg)
+## (x402 contracts/program live -> every node's x402 terms -> peerings open
+## on chain -> a publisher recovers from a wiped channel store -> paid write
+## -> paid store blob via peering -> brokered ArNS buy: paid 5095 prepare +
+## 5096 gas spawn + 5095 buy, name resolves -> paid gas jobs via peering:
+## Solana quote + EVM ERC-2771 meta-tx relay, with every leg's voucher
+## watermark asserted) + the gasless EVM deposit and a voucher on it
 smoke: smoke-ario smoke-toon smoke-x402
 
 smoke-ario:
@@ -379,36 +388,41 @@ smoke-toon:
 	node scripts/smoke-toon.mjs
 
 ## payment-layer proof for `make up-payments`: the same smoke-toon.mjs, told to
-## stop after the payment layer — contracts/program live, the hub's two SOLANA
-## peering channels open and collateralised, an EVM channel opened against the
-## hub, a PAID write routed through it, and the hub's own claim journal
-## advanced on that channel. No store, gateway or bundler assertions.
+## stop after the payment layer — x402BatchSettlement, the FiatToken and
+## payment-channels live with no TOON contract left, every node publishing its
+## x402 terms, the hub's two provider peerings open and collateralised on
+## SOLANA, a directory publisher recovering from a wiped channel store, a
+## sponsored Solana channel opened against the hub, a PAID write over it and
+## the hub's own journal holding the voucher — then smoke-x402. No store,
+## gateway or bundler assertions.
 smoke-payments:
 	TOON_SMOKE_PAYMENTS_ONLY=1 node scripts/smoke-toon.mjs
 	$(MAKE) smoke-x402
 
-## x402 batch-settlement proof (toon-protocol/infra#23, connector ADR 0074): a
-## wallet with USDC and NO ETH deposits into a channel whose receiver is the
-## hub, through the sandbox's own Onboarder, which pays the gas — then the
-## channel is read back off anvil. Also runs ADR 0074's zero-voucher question
-## and checks payment-channels is loaded on the validator. Runs in every
-## profile that starts anvil (payments, credentials, full).
+## x402 batch-settlement proof (infra#23, #39; connector ADR 0074, 0076): the
+## hub's EVM offer names the Onboarder, a wallet with FiatToken USDC and NO
+## ETH deposits into a channel to the hub through it (the Onboarder pays the
+## gas), the channel is read back off anvil, and the wallet then PAYS THE HUB
+## a relay write with a voucher on that channel — the hub fulfils it, its
+## claim-state names the voucher, and its own GET /claims holds it. Also runs
+## ADR 0074's zero-voucher question and checks payment-channels is loaded on
+## the validator. Runs in every profile that starts anvil.
 smoke-x402:
 	npm --prefix ../onboarder ci --no-audit --no-fund --silent
 	node ../onboarder/smoke.mjs
 
-## credentials proof for `make up-credentials`: the payments assertions PLUS
-## the denomination boundary end to end — the price triple asserted, the
-## ANYONE rate live off the swap driver's market, the free key document, the
-## scoped free route, the unpaid refusal, and one PAID hub-routed bundle
-## purchase converted uUSDC -> ANYONE at the live TWAP, with both sides'
-## books asserted in their own units and the rate required to have MOVED.
-## No store, gateway, bundler or gas-station assertions.
+## credentials proof — PARKED UNTIL infra#42. It bought a bundle across the
+## denomination boundary, which the hub dealt: uUSDC in, ANYONE out at a live
+## TWAP. The x402-only connector (infra#39) holds one token per chain per
+## node, the hub settles USDC on EVM now, and anytoon-connector is out of the
+## stack until #42 gives the flip its own Dealer node (infra ADR 0003).
 smoke-credentials:
-	TOON_SMOKE_CREDENTIALS_ONLY=1 node scripts/smoke-toon.mjs
+	@echo "smoke-credentials is parked until infra#42: the ANYONE flip moves from the hub to a"
+	@echo "Dealer node there (docs/adr/0003), and anytoon-connector is out of the stack until then."
+	@exit 2
 
 ## compute-provider proof for `make up-payments` (or `make up`): a tenant
-## opens a Solana mock-USDC channel against the hub, signs a Lease Request
+## opens an x402 channel in mock USDC on Solana against the hub, builds a Lease Request
 ## with a fresh Nostr key, pays g.toon.provider.basic.v1.spawn through the
 ## hub (sealed to the provider's own connector), and the answer names a
 ## container that is running on the host and reachable over SSH with the
@@ -416,7 +430,7 @@ smoke-credentials:
 ## of the same request is refused (and still billed). The workload is left
 ## to expire (conf/provider.toml lease_interval_s) unless the script removes
 ## it — see TOON_SMOKE_KEEP_WORKLOAD in scripts/smoke-provider.mjs.
-smoke-provider: preflight-channel-state
+smoke-provider:
 	node scripts/smoke-provider.mjs
 
 ## THE SAME SMOKE, AGAINST THE SECOND PROVIDER (TOON_Network #34): the same
@@ -427,7 +441,7 @@ smoke-provider: preflight-channel-state
 ## SSH on a port out of the second provider's own range, and the money lands
 ## in the second peering's own channel. Buys the 180 s `basic` tier, so a run
 ## left half-finished frees its slot in three minutes.
-smoke-provider2: preflight-channel-state
+smoke-provider2:
 	TOON_SMOKE_PROVIDER=provider2 node scripts/smoke-provider.mjs
 
 ## provider-directory proof for `make up-payments` (or `make up`): the
@@ -439,7 +453,7 @@ smoke-provider2: preflight-channel-state
 ## g.toon.relay packet on the directory publisher's own Solana channel —
 ## never the free g.toon.relay.ephemeral lane. It waits out one cadence
 ## (conf/provider.toml liveness_cadence_s), so it takes about a minute.
-smoke-directory: preflight-channel-state
+smoke-directory:
 	node scripts/smoke-directory.mjs
 
 ## eviction proof for `make up-payments` (or `make up`): a tenant pays for its
@@ -450,7 +464,7 @@ smoke-directory: preflight-channel-state
 ## reason is readable on the sandbox relay. The lease is always evicted
 ## before the script exits, so — unlike smoke-provider's raw `docker rm -f` —
 ## it never leaves a lease running for smoke-directory to count.
-smoke-eviction: preflight-channel-state
+smoke-eviction:
 	node scripts/smoke-eviction.mjs
 
 ## WHAT A MALFORMED EXTENSION COSTS (TOON_Network#115), for `make up-payments`
@@ -468,7 +482,7 @@ smoke-eviction: preflight-channel-state
 ## book was the guard rather than a meter that never moves. Buys nothing and
 ## leaves nothing running: every refusal is about the SHAPE or about a workload
 ## id no lease ever had. Spends two intervals of mock USDC on purpose; seconds.
-smoke-extend-shape: preflight-channel-state
+smoke-extend-shape:
 	node scripts/smoke-extend-shape.mjs
 
 ## MILESTONE 1 ACCEPTANCE TEST (TOON_Network #1 / #9) for `make up-payments`
@@ -486,7 +500,7 @@ smoke-extend-shape: preflight-channel-state
 ## runs' answer shapes and lifecycles are compared. Buys the sandbox-only
 ## `smoke` listing (conf/provider.toml, 30 s Lease Interval); three to four
 ## minutes. TOON_M1_LISTING=basic runs it on the three-minute tier instead.
-smoke-m1: preflight-channel-state
+smoke-m1:
 	node scripts/smoke-milestone1.mjs
 
 ## Milestone 2's acceptance test (TOON_Network #10, scripts/smoke-milestone2.mjs):
@@ -499,7 +513,7 @@ smoke-m1: preflight-channel-state
 ## gateway; closes the store, relay and provider books to the unit. Needs the
 ## FULL stack (`make up`): the store and the gateway. Buys the `smoke`
 ## listing; about two minutes.
-smoke-m2: preflight-channel-state
+smoke-m2:
 	node scripts/smoke-milestone2.mjs
 
 ## MILESTONE 3 ACCEPTANCE TEST (TOON_Network #11 / #35, scripts/smoke-milestone3.mjs)
@@ -527,7 +541,7 @@ smoke-m2: preflight-channel-state
 ## TOON_M3_STANDBY_ONLY=1 runs the reservation side against provider2 alone
 ## — for a first provider that does not sell `warm` — and says in its
 ## verdict that it is not a pass.
-smoke-m3: preflight-channel-state
+smoke-m3:
 	node scripts/smoke-milestone3.mjs
 
 ## The `ci` listing (TOON_Network #14; spec §4.4 and Appendix A.1,
@@ -541,7 +555,7 @@ smoke-m3: preflight-channel-state
 ## a terminate bearing the lease's token removes the workload, the sidecar,
 ## its volumes, its network and its slice. Pre-pulls the dind image so the
 ## spawn does not pay for it. About a minute.
-smoke-ci: preflight-channel-state
+smoke-ci:
 	@docker pull -q $$(node -e "process.stdout.write(require('fs').readFileSync('scripts/smoke-ci.mjs','utf8').match(/DIND_IMAGE = '([^']+)'/)[1])") >/dev/null
 	node scripts/smoke-ci.mjs
 
@@ -552,14 +566,16 @@ smoke-ci: preflight-channel-state
 test:
 	npm test
 
-## hidden-service proof for `make up-hs`: a client dials this sandbox's
-## `.anyone` address through the SOCKS5h proxy — chain RPC on the same circuit,
-## which is the client's default — and buys one real bundle of blind signatures
-## from the issuer. A REHEARSAL, NOT A GATE: it can fail because the Anyone
-## network had a bad day, and it says which side failed in those words. Exit 75
-## (EX_TEMPFAIL) means network-side; exit 1 means this sandbox.
+## hidden-service proof for `make up-hs` — PARKED UNTIL infra#42, with the
+## anytoon node it buys from: a client dialled this sandbox's `.anyone` address
+## through the SOCKS5h proxy and bought one real bundle of blind signatures,
+## paying anytoon directly in ANYONE. #42 brings anytoon back and moves this
+## buyer onto a Permit2 x402 deposit. (`make smoke-m4`, the HIDDEN PROVIDER,
+## is not parked: it is the same overlay with a node this issue migrated.)
 smoke-hs:
-	node scripts/smoke-hs.mjs
+	@echo "smoke-hs is parked until infra#42, with the anytoon node it buys credentials from."
+	@echo "The hidden-provider rehearsal on the same overlay is \`make smoke-m4\`."
+	@exit 2
 
 ## MILESTONE 4 ACCEPTANCE TEST (TOON_Network #12 / #44, scripts/smoke-milestone4.mjs)
 ## for `make up-hs` ONLY — it dials the REAL Anyone network, and like
@@ -568,8 +584,9 @@ smoke-hs:
 ## provider end to end: its Profile on the relay says `hidden: true` with no
 ## `host` and an `.anyone` connector_url, every Listing carries `hidden:true`
 ## and the two public providers' carry none; a buyer with only that address
-## and the SOCKS proxy (account index 6, minting its own mock USDC over the
-## circuit) opens an EVM channel against the hidden connector and pays a
+## and the SOCKS proxy (account index 6, minted FiatToken USDC over the
+## circuit) opens an x402 channel on EVM against the hidden connector, paying
+## its own deposit gas (no Onboarder is reachable over a circuit), and pays a
 ## spawn there — no hub in the path; the answer's access.host is a PER-LEASE
 ## `.anyone` address and no IP appears anywhere; on the host the lease is
 ## three containers on the anon egress network in the 1200-1299 range and
@@ -583,7 +600,7 @@ smoke-hs:
 ## listing price, on the sandbox chains (the private-RPC gate is asserted in
 ## preflight). Buys the 180 s `basic` tier (a fresh descriptor is the slow
 ## part); two to three minutes. TOON_M4_LISTING overrides the tier.
-smoke-m4: preflight-channel-state
+smoke-m4:
 	node scripts/smoke-milestone4.mjs
 
 ## MILESTONE 5 ACCEPTANCE TEST (TOON_Network #46 / #54, scripts/smoke-milestone5.mjs)
@@ -612,7 +629,7 @@ smoke-m4: preflight-channel-state
 ## six to seven minutes, four of them the takeover timeline. It stops and
 ## restarts the FIRST provider's container, so nothing else should be spawning
 ## on it meanwhile.
-smoke-m5: preflight-channel-state
+smoke-m5:
 	node scripts/smoke-milestone5.mjs
 
 ## MILESTONE 6 ACCEPTANCE TEST (TOON_Network #56 / #63, scripts/smoke-milestone6.mjs)
@@ -645,7 +662,7 @@ smoke-m5: preflight-channel-state
 ## `warm` tier twice on the first provider (one lease at a time) and once as a
 ## standby on the second; two to three minutes. It stops and restarts the FIRST
 ## provider's container, so nothing else should be spawning on it meanwhile.
-smoke-m6: preflight-channel-state
+smoke-m6:
 	node scripts/smoke-milestone6.mjs
 
 ## MILESTONE 7 ACCEPTANCE TEST (TOON_Network #69 / #76, scripts/smoke-milestone7.mjs)
@@ -669,7 +686,7 @@ smoke-m6: preflight-channel-state
 ## read it through its pages; `availability` says would_run and a paid `smoke`
 ## spawn runs it by digest. Buys `warm` with a standby, then `smoke` once;
 ## two to three minutes, most of it the gateway's cadence and the uploads.
-smoke-m7: preflight-channel-state
+smoke-m7:
 	node scripts/smoke-milestone7.mjs
 
 logs:

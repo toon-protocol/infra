@@ -11,11 +11,12 @@
 #     <node>/operator-send.key     ed25519 seed for operator writes, 64 hex
 #     <node>/operator-bearer.token operator read credential, 64 hex
 #   DERIVED from anvil's public test mnemonic (rewritten every run; their
-#   ADDRESSES are committed in conf/connector-*.toml as counterparty_key and
-#   feed the committed channel ids, so they must be identical everywhere):
+#   ADDRESSES are committed in scripts/lib/provider-smoke.mjs and the smokes,
+#   which find the runtime peering channels by them, so they must be
+#   identical everywhere):
 #     <node>/settlement.key        EVM secp256k1, indices 24/25/26/28/29/30/31
 #     <node>/settlement-solana.key 32-byte ed25519 SEED as hex, indices 34-41
-#       (28/37 are the anytoon-connector's, 29/38 the provider-connector's,
+#       (28/37 are the anytoon-connector's — parked until infra#42 — 29/38 the provider-connector's,
 #        30/39 the SECOND provider's, provider2-connector, and 31/40 the HIDDEN
 #        provider's, provider-hs-connector; 27 was already spent on the gas
 #        relayer below, which is why the EVM index skips it)
@@ -30,7 +31,8 @@
 #                                  DEDICATED kind:5098 relayer; its 0x-prefixed
 #                                  value is embedded in conf/gas-station.conf
 #                                  (EVM_GAS_STATION_CONFIG_JSON) and its address
-#                                  in scripts/seed-toon-evm.sh
+#                                  in scripts/seed-evm-nodes.sh + the anvil
+#                                  healthcheck
 #   NOT HERE, AND NOWHERE: the Workload Gateway has no Nostr key since
 #   Milestone 6 (TOON_Network #56) — it signs nothing and publishes nothing,
 #   so conf/workload-gateway.conf's GATEWAY_SECRET_KEY line is gone. Its
@@ -54,14 +56,17 @@
 # after the commit. Nothing about them feeds a committed config, so nothing
 # here has to know their values. See docker-compose.yml (`issuer-keys`).
 #
-# After changing settlement keys: recompute the three channel accounts
-#   find_program_address(["channel", min(a,b), max(a,b), mint])   (Solana)
-#   keccak(abi.encodePacked(min(a,b), max(a,b), uint256(0)))      (EVM)
-# and update conf/connector-*.toml + scripts/seed-toon-evm.sh +
-# scripts/seed-toon-solana-channels.sh; the operator
-# allowlists (<node>/operator-write.keys) must be re-derived with
-#   docker run --rm -v <dir>:/w:ro ghcr.io/toon-protocol/connector:rust-2026.08.28.1 \
+# After changing settlement keys: no channel id is committed anywhere any
+# more — every channel is an x402 channel opened with a fresh salt, and the
+# open-peerings job (scripts/peerings.mjs) finds or opens each peering's at
+# run time — but the Solana PUBLIC keys the smokes look channels up by are
+# (scripts/lib/provider-smoke.mjs PROVIDER_SOL & co., scripts/seed-toon-solana.mjs
+# for the payers). The operator allowlists (<node>/operator-write.keys) must be
+# re-derived with
+#   docker run --rm -v <dir>:/w:ro ghcr.io/toon-protocol/connector:rust-2026.09.29.1 \
 #     send --operator-key /w/operator-send.key --print-keyid
+# which is what this script does; scripts/lib/operator-write.test.mjs holds
+# the open-peerings job's own signer to the hub's allowlist.
 #
 # The connector image runs as uid 10001 and mounts these read-only, so files
 # must be world-readable. Nothing here is written by root, so a+r suffices
@@ -72,7 +77,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEYS="$HERE/keys/toon"
 MN="test test test test test test test test test test test junk"
 CAST="docker run --rm --entrypoint cast ghcr.io/foundry-rs/foundry:v1.8.1"
-CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.08.28.1
+CONNECTOR_IMAGE=ghcr.io/toon-protocol/connector:rust-2026.09.29.1
 
 # The RANDOM files every connector node has — identity and operator credentials
 # — kept if present, and the operator allowlist derived from them.
@@ -105,4 +110,4 @@ echo "workload-gateway-connector: solana only (terminates the free handover rout
 $CAST wallet private-key --mnemonic "$MN" --mnemonic-index 27 | sed 's/^0x//' >"$KEYS/gas-evm-relayer.key"
 echo "gas-evm-relayer: evm $($CAST wallet address --private-key 0x$(cat "$KEYS/gas-evm-relayer.key"))"
 chmod -R a+rX "$KEYS"
-echo "keys under $KEYS refreshed — re-derive committed addresses/channel ids if settlement keys changed."
+echo "keys under $KEYS refreshed — update the committed Solana addresses if settlement keys changed."

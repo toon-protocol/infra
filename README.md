@@ -7,27 +7,30 @@ Infrastructure for the TOON Protocol.
 **[`sandbox/`](sandbox/README.md)** is a complete TOON Protocol network on
 your machine: one `docker compose` project with local chains (Solana, EVM,
 Arweave-sim), a local AR.IO permaweb stack (gateway + Turbo bundler + ArNS),
-the TOON payment layer (four ILP connectors with real, collateralised
-payment channels, settling mock USDC on Solana and **ANYONE on the EVM chain
-across a live Uniswap v3 rate**), and the four first-party TOON apps (relay,
-store, gas station, Anyone credentials issuer). Nothing touches mainnet; every
-key is a valueless committed throwaway.
+the TOON payment layer (a hub and four peered ILP connectors on the
+x402-only connector release: every channel an x402 `batch-settlement`
+channel — FiatToken USDC on the EVM chain, deposited gaslessly through a local
+**Onboarder**, and mock USDC on Solana, sponsored by the receiving node — and
+every payment a voucher), and the first-party TOON apps (relay, store, gas
+station, two compute providers; the Anyone credentials issuer's connector is
+parked until infra#42). Nothing touches mainnet; every key is a valueless
+committed throwaway.
 
 ```bash
 cd sandbox
 make setup && make up && make smoke
 ```
 
-`make smoke` proves the whole thing end to end — paid Nostr writes, paid
-Arweave uploads served by the local gateway, the full brokered ArNS buy
-ceremony, paid gas on both chains, and a blind-signed credentials bundle
-bought **across a denomination boundary**: all entering at the hub connector,
-settling on local payment channels, in the unit each leg is actually
-denominated in.
+`make smoke` proves the whole thing end to end — every node's x402 terms, the
+peerings open on chain, paid Nostr writes, paid Arweave uploads served by the
+local gateway, the full brokered ArNS buy ceremony, paid gas on both chains,
+and a gasless EVM deposit with a voucher paid on it: all entering at the hub
+connector, every leg's voucher watermark asserted in the connectors' own
+books. Coming from an older sandbox? `make clean` first — `make up` says so.
 
 Working on the payment layer or on a TOON client? `make up-payments && make
-smoke-payments` runs the chains, the hub and its seed jobs alone — seven
-services, five ports, and none of the permaweb half's prerequisites.
+smoke-payments` runs the chains, the hub and the two compute providers alone
+— none of the permaweb half's prerequisites.
 
 **Read the [operator guide](sandbox/README.md)** — it covers what's running,
 a cookbook for every surface, and a step-by-step path to putting **your own

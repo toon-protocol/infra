@@ -167,7 +167,7 @@ const container = (await findWorkload(lease.access.ssh_port, 30))?.name ?? fatal
 ok(`${container} is running on the host daemon`);
 
 // The tenant's own client, opened only now: spawn.mjs above paid on the same
-// channel store and has exited, so the two never hold one nonce watermark.
+// channel store and has exited, so the two never hold one watermark.
 const { client } = await openChannel(HUB, 'channels.json');
 const sendTo = (P, route, body) => client.send(route, { body: checkLeaseBody(route, body) }, { sealTo: P.edge, timeoutMs: 120_000 });
 /** `{ status, body }` of the app's answer, or `{ code }` for a packet refused short of it. */

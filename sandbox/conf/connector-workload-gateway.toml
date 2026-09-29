@@ -64,11 +64,14 @@ prefix = "g.toon.workload-gateway.handover"
 handler_url = "http://workload-gateway:8081/handover"
 price = 0
 
+# Every channel is an x402 channel (connector ADR 0075). The one route here is
+# free, and a free route carries no voucher, so nothing has to open a channel
+# to reach it; the table is what makes this node a counterparty at all.
 [settlement.solana]
 rpc_url = "http://solana-validator:8899"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
 decimals = 6
+min_sponsored_deposit = 1000000
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"

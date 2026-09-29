@@ -78,7 +78,7 @@ import {
   HUB, HUB_FEE, BUYER_SOL, K_LISTING, K_LIVENESS, K_TAKEOVER, TOON_LABEL,
   providerOf, IMAGE, SSH_USER, SWEEP_S, WATCHDOG_S,
   reporter, jstr, nowSec, waitFor,
-  claims, clientBookOnChannel, peerBookTotal, publisherChannel,
+  claims, clientBookOnChannel, peerBookTotal, peeringChannel, publisherChannel,
   relayRead, relayReadUntil, directoryFilter, takeoverFilter, tagValues, hasTag,
   docker, composeNotRunning, composeService, composeHealthy, findWorkload, containerState, runningWorkloads, workloadGone,
   newTenant, newRootSecret, tokenRequest, extendBody, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshInto,
@@ -92,6 +92,12 @@ const startedAt = Date.now();
 // `standby_set` lists them. Every question below is asked of one of the two.
 const PRIMARY = providerOf('provider');
 const STANDBY = providerOf('provider2');
+// The hub's peering channel toward each, where each provider books what the
+// peering paid it (a fact of the run, off the hub's own GET /channels).
+const PEERING = {
+  [PRIMARY.service]: await peeringChannel(PRIMARY.connectorNode),
+  [STANDBY.service]: await peeringChannel(STANDBY.connectorNode),
+};
 const SET = [PRIMARY, STANDBY];
 const L = STANDBY.listing('warm');
 {
@@ -201,7 +207,7 @@ const { client, opened } = await openChannel(HUB, 'channels.json');
 assert(client.identity?.solanaPublicKey === BUYER_SOL, `the tenant pays as ${client.identity?.solanaPublicKey} — the address seed-toon-solana funded`);
 ok(`channel ${opened.channelId} against the hub (status ${opened.status ?? 'open'})`);
 const channelKey = `solana:${opened.channelId}`;
-const RELAY_PAYER = publisherChannel('directory-publisher2');
+const RELAY_PAYER = await publisherChannel('directory-publisher2');
 // Every packet is SEALED TO THE MEMBER IT IS FOR: two providers, two edges,
 // two sealing keys (ADR 0011), and a packet sealed to the wrong one is money
 // paid to the wrong connector.
@@ -227,8 +233,8 @@ const readBooks = async () => {
   return {
     hub: clientBookOnChannel(hub, channelKey),
     relay: clientBookOnChannel(hub, RELAY_PAYER),
-    [PRIMARY.service]: peerBookTotal(await claims(PRIMARY.connectorNode), PRIMARY.channel),
-    [STANDBY.service]: peerBookTotal(await claims(STANDBY.connectorNode), STANDBY.channel),
+    [PRIMARY.service]: peerBookTotal(await claims(PRIMARY.connectorNode), PEERING[PRIMARY.service]),
+    [STANDBY.service]: peerBookTotal(await claims(STANDBY.connectorNode), PEERING[STANDBY.service]),
   };
 };
 // The relay book is counted from a FRESH Liveness: the standby's publisher
@@ -461,9 +467,9 @@ assert(after.hub - before.hub === paid.hub,
     ? `${s} (.standby) + ${s} (.standby.extend) + ${L.price} (the billed not_running refusal)`
     : `${s} (.standby) + ${s} (.standby.extend) + ${L.price} (the billed not_running refusal) + ${L.price} (the post-Takeover .extend) + ${s} (the billed not_standby refusal)`;
   assert(after[STANDBY.service] - before[STANDBY.service] === paid[STANDBY.service],
-    `${STANDBY.connectorNode}'s peer-book watermark on ${STANDBY.channel} grew by ${after[STANDBY.service] - before[STANDBY.service]} = ${legs} = ${paid[STANDBY.service]}; the free calls added nothing`);
+    `${STANDBY.connectorNode}'s watermark on the hub's channel ${PEERING[STANDBY.service]} grew by ${after[STANDBY.service] - before[STANDBY.service]} = ${legs} = ${paid[STANDBY.service]}; the free calls added nothing`);
   assert(after[PRIMARY.service] - before[PRIMARY.service] === paid[PRIMARY.service],
-    `${PRIMARY.connectorNode}'s peer-book watermark on ${PRIMARY.channel} grew by ${after[PRIMARY.service] - before[PRIMARY.service]} = ${STANDBY_ONLY ? 'nothing: it was never paid' : `${L.price}, the full spawn price, and nothing else`}`);
+    `${PRIMARY.connectorNode}'s watermark on the hub's channel ${PEERING[PRIMARY.service]} grew by ${after[PRIMARY.service] - before[PRIMARY.service]} = ${STANDBY_ONLY ? 'nothing: it was never paid' : `${L.price}, the full spawn price, and nothing else`}`);
 }
 assert(after.relay - before.relay === expectedRelay,
   `directory-publisher2's channel ${RELAY_PAYER} paid ${after.relay - before.relay} g.toon.relay units between Liveness ${liveness0.created_at} and ${liveness1.created_at} = ${cadences} cadence(s) of Liveness${takeover ? ' + 1 for the Takeover event' : ' and no Takeover'} (${expectedRelay})`);

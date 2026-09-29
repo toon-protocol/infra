@@ -9,19 +9,20 @@
 //      (connector/infra/solana/*.json), so every [settlement.solana]
 //      token_address in conf/connector-*.toml resolves
 //   3. for each connector node: airdrop SOL to its settlement account, create
-//      its USDC ATA and mint 1000 USDC into it (the connector's Solana
-//      settlement backend submits a real ATA-create + simulated
-//      InitializeChannel at startup — an unfunded key is a refuse-to-boot)
+//      its USDC ATA and mint 1000 USDC into it (a connector refuses to boot on
+//      a Solana key with no lamports, its sponsor endpoint refuses to open a
+//      channel into a receiving account that does not exist, and its own
+//      outbound channels are deposited out of that ATA)
 //   4. airdrop SOL to the gas station's fee payer (keys/toon/gas-fee-payer.json)
 //   5. fund THE BUYER — the smoke test's own Solana identity — and THE
 //      DIRECTORY PUBLISHER, the compute provider's payer for relay writes,
 //      which needs the same SOL + ATA for the same reason. New with the
 //      cross-asset flip: the client leg used to settle on anvil, where a payer
 //      needs nothing seeded (mock USDC is mintable and anvil hands out ETH),
-//      but a Solana channel needs its payer to already hold SOL *and* an ATA
-//      of the right mint. @toon-protocol/client opens the channel and will not
-//      create either: `assertOpenFunding` refuses below 4179040 lamports or
-//      without an ATA holding the deposit, which would strand the smoke at
+//      but a Solana channel needs its payer to already hold an ATA of the
+//      right mint holding the deposit. @toon-protocol/client opens the channel
+//      (a payer-signed payment-channels `open` the receiving node sponsors)
+//      and will not create the account, which would strand the smoke at
 //      step 1 with a ChannelFundingError.
 //
 // This is the JS equivalent of the connector repo's host-side
@@ -50,8 +51,10 @@ const KEYS_DIR = process.env.KEYS_DIR ?? new URL('../keys/', import.meta.url).pa
 const SYSTEM = address('11111111111111111111111111111111');
 const TOKEN = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ATA_PROGRAM = address('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
-const PAYMENT_CHANNEL_PROGRAM = address('HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR');
-const NODES = ['relay-connector', 'store-connector', 'gas-connector', 'anytoon-connector',
+// solana-foundation's payment-channels, which every Solana channel here lives
+// in (connector ADR 0075); loaded at genesis by docker-compose.yml.
+const PAYMENT_CHANNELS_PROGRAM = address('CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX');
+const NODES = ['relay-connector', 'store-connector', 'gas-connector',
   'provider-connector', 'provider2-connector',
   // The HIDDEN provider's connector (TOON_Network #43, the `hs` profile). It
   // is seeded on every profile, like every other node here: a chain is seeded
@@ -77,17 +80,17 @@ const BUYER_USDC = 1_000_000_000n; // 1000 USDC — the smoke deposits 10 of it
 // (the `directory-publisher` service; provider/tools/publisher). Account
 // index 1 of the SAME phrase, so it is deterministic like the buyer but holds
 // its OWN wallet and its OWN channel: two processes sharing one channel share
-// one nonce watermark, and the loser of that race has every later claim
+// one watermark, and the loser of that race has every later claim
 // refused. Derived by `deriveFullIdentity(mnemonic, { accountIndex: 1 })`.
 const PUBLISHER = address('AqynRZwvVqUPRwRJXvm6odUb3t93fDjnWe3p6BeuUFxD');
 const PUBLISHER_USDC = 1_000_000_000n; // 1000 USDC — it deposits 10 of it
 // THE SECOND PROVIDER'S PUBLISHER (`directory-publisher2`, TOON_Network #34),
 // on account index 2 of the same phrase. It is a second wallet for the same
-// reason index 1 is a first one: one channel, one nonce watermark, one payer.
+// reason index 1 is a first one: one channel, one watermark, one payer.
 const PUBLISHER2 = address('CqMbRgMuEhQi9BUS8xP44Wk5nENm48FqJnfjEi4eNb1k');
 // THE HIDDEN PROVIDER'S PUBLISHER (`directory-publisher-hs`, TOON_Network #43,
 // the `hs` profile), on account index 3. A third wallet for the reason the
-// second one exists: one channel, one nonce watermark, one payer.
+// second one exists: one channel, one watermark, one payer.
 const PUBLISHER3 = address('9Tj3srBSxH7RFRCm8uharreY7ZBS49XSfpwCeYa7Xaqp');
 // THE HANDOVER SCRIPT'S PAYER (scripts/handover.mjs, the tenant side of the
 // Workload Gateway, TOON_Network #53 and #62), on account index 4. Since
@@ -95,7 +98,7 @@ const PUBLISHER3 = address('9Tj3srBSxH7RFRCm8uharreY7ZBS49XSfpwCeYa7Xaqp');
 // the free Gateway Handover route (opening a channel against it, which is
 // what the deposit is for). It must not share a channel store with the
 // smokes' buyer at index 0: a smoke holds its own client open while it calls
-// the script, and two processes on one channel share one nonce watermark,
+// the script, and two processes on one channel share one watermark,
 // whose loser has every later claim refused. Index 4 is the first free one
 // (5 and 6 are smoke-hs's and smoke-m4's own buyers). Funded on every
 // profile, like index 3: re-seeding a live chain to add a wallet is the thing
@@ -123,15 +126,16 @@ const nodeSigners = Object.fromEntries(await Promise.all(
   NODES.map(async (n) => [n, await kpSeedHex(`${n}/settlement-solana.key`)]),
 ));
 
-// The payment-channel program must be in genesis or nothing here matters.
+// payment-channels must be in genesis or nothing here matters: a connector
+// refuses to boot on a chain it is not deployed to.
 {
-  const info = await rpc.getAccountInfo(PAYMENT_CHANNEL_PROGRAM, { encoding: 'base64' }).send();
+  const info = await rpc.getAccountInfo(PAYMENT_CHANNELS_PROGRAM, { encoding: 'base64' }).send();
   if (info.value === null || !info.value.executable) {
-    console.error(`[seed-toon-solana] FATAL: no executable program at ${PAYMENT_CHANNEL_PROGRAM}.`);
-    console.error('The validator must load artifacts/payment_channel.so at genesis (docker-compose.yml).');
+    console.error(`[seed-toon-solana] FATAL: no executable program at ${PAYMENT_CHANNELS_PROGRAM}.`);
+    console.error('The validator must load artifacts/payment_channels.so at genesis (docker-compose.yml).');
     process.exit(1);
   }
-  console.log(`[seed-toon-solana] payment_channel program present at ${PAYMENT_CHANNEL_PROGRAM}`);
+  console.log(`[seed-toon-solana] payment-channels present at ${PAYMENT_CHANNELS_PROGRAM}`);
 }
 
 async function ata(owner) {
@@ -299,7 +303,7 @@ for (const n of NODES) {
 
 // ── 6. the SECOND provider's publisher ────────────────────────────────────
 // Its own wallet, its own ATA, its own channel: two publishers on one account
-// would share one nonce watermark and the loser would have every later claim
+// would share one watermark and the loser would have every later claim
 // refused (see docker-compose.yml, `directory-publisher2`).
 {
   const publisher2Ata = await ata(PUBLISHER2);

@@ -1,16 +1,18 @@
-// `make smoke-x402`: a gasless x402 batch-settlement deposit, end to end, on
-// the sandbox's own chain and through the sandbox's own Onboarder
-// (toon-protocol/infra#23, connector ADR 0074).
+// `make smoke-x402`: a gasless x402 batch-settlement deposit and a voucher
+// paid on it, end to end, on the sandbox's own chain and through the
+// sandbox's own Onboarder (toon-protocol/infra#23, #39; connector ADR 0074,
+// 0076). The channel's receiver is the sandbox HUB's EVM `batchSettlements`
+// offer, read off its own `GET /ilp`, which must name the Onboarder as its
+// `facilitator`. After the deposit it pays the hub one relay write
+// (`g.toon.relay`, 1 µUSDC) with a voucher on that same channel, through the
+// published `@toon-protocol/client`, checks the hub fulfils it, and reads the
+// voucher back out of the hub's own `GET /claims`.
 //
 // `node onboarder/smoke.mjs --devnet` runs the same path on the devnet: Base
 // Sepolia, through https://onboard.devnet.toonprotocol.dev, with devnet USDC
-// from the faucet, into a channel whose receiver is the devnet RELAY
-// connector's EVM `batchSettlements` offer, read off its own `GET /ilp`, which
-// must name this Onboarder as its `facilitator`. After the deposit it pays the
-// relay one write (`g.toon.relay`, 1 µUSDC) with a voucher on that same
-// channel, through the published `@toon-protocol/client`, and checks the relay
-// fulfils it (infra#43). It spends no ETH of the caller's (the Onboarder pays)
-// and leaves a 5 USDC channel of faucet money behind.
+// from the faucet, into a channel to the devnet RELAY connector (infra#43).
+// It spends no ETH of the caller's (the Onboarder pays) and leaves a 5 USDC
+// channel of faucet money behind.
 //
 // A fresh wallet holding USDC and NO ETH signs one ERC-3009 authorization. The
 // Onboarder verifies it, relays the deposit and pays the gas, and the
@@ -52,7 +54,6 @@ const DEVNET = process.argv.includes("--devnet");
 // there on anvil.
 const BATCH_SETTLEMENT = "0x4020074e9dF2ce1deE5A9C1b5c3f541D02a10003";
 const DEPOSIT = 5_000_000n; // 5 USDC
-const WITHDRAW_DELAY = 86_400; // ADR 0074's default minimum: one day
 
 // Where each target's chain, Onboarder, USDC and receiver come from.
 const TARGET = DEVNET
@@ -76,6 +77,13 @@ const TARGET = DEVNET
       usdc: "0x0A867CA0442383c2A89951244B955AA19b615b58",
       // anvil-mnemonic index 21, the FiatToken's minter.
       minterKey: "0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b",
+      // The hub. It publishes its compose-network name (a peer dials what a
+      // node publishes, infra#39), so a client on the host is handed
+      // sandbox/scripts/lib/sandbox-endpoints.mjs's `hostFetch`.
+      connectorUrl: process.env.CONNECTOR_URL ?? "http://localhost:3200",
+      // What the hub names as its facilitator: the Onboarder's name ON THE
+      // COMPOSE NETWORK. This script dials it at ONBOARDER_URL above.
+      facilitator: "http://onboarder:4022",
     };
 const NETWORK = `eip155:${TARGET.chainId}`;
 const RPC_URL = TARGET.rpcUrl;
@@ -119,19 +127,10 @@ async function onboarder(path, body) {
   return res.json();
 }
 
-// The receiving connector's channel terms. On the sandbox, the hub's EVM
-// settlement address, from its committed throwaway key, on ADR 0074's defaults.
-// On the devnet, the relay's own `GET /ilp`: its `batchSettlements` offer for
-// this chain and this token, and the endpoint a paid packet goes to.
+// The receiving connector's channel terms, off its own `GET /ilp`: its
+// `batchSettlements` offer for this chain and this token, and the endpoint a
+// paid packet goes to.
 async function receiverOffer() {
-  if (!DEVNET) {
-    const hubKey = readFileSync(
-      join(HERE, "..", "sandbox", "keys", "toon", "relay-connector", "settlement.key"),
-      "utf8",
-    ).trim();
-    const hub = privateKeyToAccount(`0x${hubKey.replace(/^0x/, "")}`).address;
-    return { payTo: hub, receiverAuthorizer: hub, withdrawDelay: WITHDRAW_DELAY, name: "USDC", version: "2" };
-  }
   const self = await fetch(`${TARGET.connectorUrl}/ilp`).then((res) => res.json());
   const offer = self.batchSettlements?.find(
     (b) => b.network === NETWORK && b.asset?.toLowerCase() === USDC.toLowerCase(),
@@ -151,20 +150,22 @@ async function receiverOffer() {
 }
 const offer = await receiverOffer();
 const hub = offer.payTo;
+const RECEIVER = DEVNET ? "relay" : "hub";
 console.log(`${TARGET.name}: Onboarder ${ONBOARDER_URL}, receiver ${hub}`);
 
-// 0. Devnet only: the relay's offer sends a gasless deposit to this Onboarder.
-// A client learns its Onboarder from here, so a relay that stops naming it
-// strands every 0-ETH payer, and this says so before anything is spent.
-if (DEVNET) {
+// 0. The receiver's offer sends a gasless deposit to this Onboarder. A client
+// learns its Onboarder from here, so a node that stops naming it strands every
+// 0-ETH payer, and this says so before anything is spent.
+{
   const trim = (url) => url?.replace(/\/+$/, "");
+  const named = TARGET.facilitator ?? ONBOARDER_URL;
   check(
-    `the relay's ${NETWORK} offer names the Onboarder as its \`facilitator\``,
-    trim(offer.facilitator) === trim(ONBOARDER_URL),
+    `the ${RECEIVER}'s ${NETWORK} offer names the Onboarder as its \`facilitator\``,
+    trim(offer.facilitator) === trim(named),
     `facilitator ${JSON.stringify(offer.facilitator ?? null)}`,
   );
   check(
-    `the relay's ${NETWORK} offer takes an eip3009 deposit`,
+    `the ${RECEIVER}'s ${NETWORK} offer takes an eip3009 deposit`,
     offer.assetTransferMethod === "eip3009",
     `assetTransferMethod ${JSON.stringify(offer.assetTransferMethod ?? null)}`,
   );
@@ -274,18 +275,21 @@ const [balance, totalClaimed] = await chainClient.readContract({
 check("the channel holds the deposit on chain", balance === DEPOSIT, `balance ${balance}`);
 check("nothing is claimed yet", totalClaimed === 0n, `totalClaimed ${totalClaimed}`);
 
-// 5. Devnet only: pay the relay one write with a voucher on THAT channel. The
-// published client does the paying (the relay requires BTP for this route, and
-// the sealed request and voucher envelope are its own), and is handed the
-// channel through its store instead of opening one: it adopts the binding, and
-// autoOpenChannel off makes a miss throw rather than deposit again. The body
-// is what the relay app takes, a signed Nostr event (as sandbox smoke-toon).
-if (DEVNET) {
+// 5. Pay the receiver one relay write with a voucher on THAT channel. The
+// published client does the paying (the devnet relay requires BTP for this
+// route, and the sealed request and voucher envelope are its own), and is
+// handed the channel through its store instead of opening one: it adopts the
+// binding, and autoOpenChannel off makes a miss throw rather than deposit
+// again. The body is what the relay app takes, a signed Nostr event (as
+// sandbox smoke-toon). On the sandbox the client is handed the host's view of
+// the hub, whose published endpoint is its compose-network name.
+{
   const { BatchChannelManager, InMemoryChannelStore, ToonClient } = await import("@toon-protocol/client");
   const { finalizeEvent, generateSecretKey } = await import("nostr-tools/pure");
+  const { hostFetch } = await import("../sandbox/scripts/lib/sandbox-endpoints.mjs");
   const store = new InMemoryChannelStore();
   const client = await ToonClient.create({
-    connector: offer.endpoint,
+    connector: DEVNET ? offer.endpoint : TARGET.connectorUrl,
     evmPrivateKey: payerKey,
     chain: "evm",
     rpcUrl: RPC_URL,
@@ -293,11 +297,12 @@ if (DEVNET) {
     autoOpenChannel: false,
     facilitatorUrl: ONBOARDER_URL,
     depositGas: "facilitator",
+    ...(DEVNET ? {} : { fetch: hostFetch() }),
   });
   try {
     new BatchChannelManager(store).adopt(client.connector, { chain: "evm", channelId, network: NETWORK, config }, balance);
     const price = await client.price("g.toon.relay");
-    check("the relay prices g.toon.relay at 1 µUSDC", price === 1n, `price ${price}`);
+    check(`the ${RECEIVER} prices g.toon.relay at 1 µUSDC`, price === 1n, `price ${price}`);
     const event = finalizeEvent(
       {
         kind: 30078,
@@ -312,21 +317,35 @@ if (DEVNET) {
       body: JSON.stringify({ event }),
     });
     check(
-      "a paid relay write over the new channel is fulfilled",
+      `a paid relay write to the ${RECEIVER} over the new channel is fulfilled`,
       written.fulfilled === true && written.status === 200,
       written.fulfilled ? `HTTP ${written.status}` : `${written.code} from ${written.refusedBy}: ${written.message}`,
     );
-    // The relay's own watermark, asked of it rather than inferred from the
+    // The receiver's own watermark, asked of it rather than inferred from the
     // fulfil: the one voucher the client signed on this channel was accepted.
     const [state] = await client.claimState([channelId]);
     check(
-      "the relay banked the 1 µUSDC voucher on that channel",
+      `the ${RECEIVER} banked the 1 µUSDC voucher on that channel`,
       state?.ok === true && state.cumulativeClaimed === "1",
       JSON.stringify(state ?? null),
     );
   } finally {
     await client.close();
   }
+}
+
+// 5b. Sandbox only: the hub's own book, read with its operator bearer token.
+// claim-state is what the hub tells a payer; `GET /claims` is what its
+// journal holds, and the voucher must be in it under this channel's key.
+if (!DEVNET) {
+  const token = readFileSync(join(HERE, "..", "sandbox", "keys", "toon", "relay-connector", "operator-bearer.token"), "utf8").trim();
+  const rows = await fetch(`${TARGET.connectorUrl}/claims`, { headers: { authorization: `Bearer ${token}` } }).then((res) => res.json());
+  const row = rows.find((r) => r.direction === "inbound" && String(r.channel_id).toLowerCase() === `evm:${channelId}`.toLowerCase());
+  check(
+    "the hub's GET /claims holds the voucher, a batch-settlement claim at 1 µUSDC on that channel",
+    row?.scheme === "batch-settlement" && String(row?.cumulative_amount) === "1",
+    JSON.stringify(row ?? rows.map((r) => r.channel_id)),
+  );
 }
 
 check("the payer still holds no ETH", (await chainClient.getBalance({ address: payer.address })) === 0n);

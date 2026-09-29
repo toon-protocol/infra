@@ -80,7 +80,7 @@
 //                    .toon-client/handover-channels.json, NOT the smokes'
 //                    channels.json — a smoke holds its own client open on that
 //                    one while it runs this script, and two processes on one
-//                    channel share one nonce watermark
+//                    channel share one watermark
 //   the route        the one prefix conf/connector-workload-gateway.toml
 //                    terminates, g.toon.workload-gateway.handover, at price 0
 //   the sealing key  DERIVED from keys/toon/workload-gateway-connector/signer.key

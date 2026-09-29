@@ -42,10 +42,10 @@
 //         via hub — the hub's CLIENT book on the tenant's Solana channel grew
 //                   by (spawn + extend) x (price + fee) PLUS ONE FEE PER FREE
 //                   CALL — the hub charges its fee on every packet it
-//                   forwards, free ones included (conf/connector-relay.toml
+//                   forwards, free ones included (scripts/peerings.mjs
 //                   says why: 100 - 100 == 0 arrives) — and the provider
-//                   connector's PEER-book watermark on the committed peering
-//                   channel grew by spawn + extend at the listing price: the
+//                   connector's watermark on the hub's peering channel toward
+//                   it grew by spawn + extend at the listing price: the
 //                   free routes added nothing there
 //         direct  — the provider connector's CLIENT book on the tenant's own
 //                   channel grew by spawn + extend at the listing price, and
@@ -65,16 +65,19 @@
 // polls a paid or fee-bearing route — expiry is watched on the host daemon
 // and confirmed with ONE status call.
 import {
-  HUB, PROVIDER_EDGE, PROVIDER_CHANNEL, HUB_FEE, BUYER_SOL,
+  HUB, PROVIDER_EDGE, HUB_FEE, BUYER_SOL,
   K_PROFILE, K_LISTING, K_LIVENESS, TOON_LABEL,
   AVAILABILITY_ROUTE, STATUS_ROUTE, spawnRoute, extendRoute, IMAGE, SSH_USER,
   confValue, listings, listing, PROVIDER_PUBKEY, SWEEP_S,
   reporter, sleep, jstr, nowSec, waitFor,
-  claims, clientBookOnChannel, peerBookTotal,
+  claims, clientBookOnChannel, peerBookTotal, peeringChannel,
   relayRead, relayReadUntil, directoryFilter, tagValues, hasTag,
   docker, composeNotRunning, findWorkload, workloadGone,
   newTenant, newRootSecret, tokenRequest, extendBody, checkLeaseBody, newWorkloadId, spawnContent, openChannel, sshInto,
 } from './lib/provider-smoke.mjs';
+// The hub's peering channels (`solana:<account>`), where each payee books what
+// the peering paid it: a fact of the run, off the hub's own GET /channels.
+const PROVIDER_CHANNEL = await peeringChannel('provider-connector');
 
 const { step, ok, bad, assert, fatal, done } = reporter('MILESTONE 1 SMOKE');
 const startedAt = Date.now();
@@ -362,7 +365,7 @@ const hubBooks = async (channelKey) => ({
     assert(now.hub - before.hub === exp.hub,
       `the hub's client book on the tenant's channel grew by ${now.hub - before.hub} = ${paid} x ${HUB_PRICE} (spawn + extend) + ${free} x ${HUB_FEE} (the free calls' fee) = ${exp.hub}`);
     assert(now.provider - before.provider === exp.provider,
-      `the provider connector's peer-book watermark on ${PROVIDER_CHANNEL} grew by ${now.provider - before.provider} = ${paid} x ${L.price} (spawn + extend); the ${free} free calls added nothing`);
+      `the provider connector's watermark on the hub's channel ${PROVIDER_CHANNEL} grew by ${now.provider - before.provider} = ${paid} x ${L.price} (spawn + extend); the ${free} free calls added nothing`);
   },
 });
 // Direct: one book — the provider connector's CLIENT book on the tenant's

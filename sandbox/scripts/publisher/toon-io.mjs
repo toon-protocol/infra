@@ -1,7 +1,7 @@
 // The publisher's paid I/O against the sandbox: the real @toon-protocol/client
 // payer behind blob.mjs's `io` seam. One client, one Solana mock-USDC channel
 // against the hub (shared with the smokes through .toon-client/channels.json —
-// one payer, one nonce watermark), and three things bought or read with it:
+// one payer, one watermark), and three things bought or read with it:
 //
 //   store.upload        a paid kind:5094 job on g.toon.store, sealed to the
 //                       store connector, answered with an Arweave txid

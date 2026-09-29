@@ -74,7 +74,7 @@ import {
   providerOf, WATCHDOG_S,
   checkLeaseBody,
   reporter, jstr, nowSec, sleep, waitFor,
-  claims, clientBookOnChannel, peerBookTotal,
+  claims, clientBookOnChannel, peerBookTotal, peeringChannel,
   relayRead, relayReadUntil, takeoverFilter, hasTag,
   docker, composeNotRunning, composeService, composeHealthy, findWorkload, containerState, runningWorkloads,
   continuationFor, gatewaySubFor, newRootSecret, newTenant, newWorkloadId, httpSpawnContent, openChannel, tokenRequest,
@@ -94,6 +94,11 @@ const startedAt = Date.now();
 // `standby_set` is read in (spec §12.4 step 3).
 const PRIMARY = providerOf('provider');
 const STANDBY = providerOf('provider2');
+// The hub's peering channel toward each (a fact of the run, off its GET /channels).
+const PEERING = {
+  [PRIMARY.service]: await peeringChannel(PRIMARY.connectorNode),
+  [STANDBY.service]: await peeringChannel(STANDBY.connectorNode),
+};
 const SET = [PRIMARY, STANDBY];
 const L = STANDBY.listing('warm');
 {
@@ -212,8 +217,8 @@ const took = (P, sent, what, expectedCost) => {
 await sendTo(STANDBY, STANDBY.availabilityRoute, { listing: L.name, version: L.version, image: HTTP_IMAGE });
 const readBooks = async () => ({
   hub: clientBookOnChannel(await claims('relay-connector'), channelKey),
-  [PRIMARY.service]: peerBookTotal(await claims(PRIMARY.connectorNode), PRIMARY.channel),
-  [STANDBY.service]: peerBookTotal(await claims(STANDBY.connectorNode), STANDBY.channel),
+  [PRIMARY.service]: peerBookTotal(await claims(PRIMARY.connectorNode), PEERING[PRIMARY.service]),
+  [STANDBY.service]: peerBookTotal(await claims(STANDBY.connectorNode), PEERING[STANDBY.service]),
 });
 const before = await readBooks();
 console.log(`  books before: hub client (${channelKey}) = ${before.hub}; ${PRIMARY.connectorNode} peer = ${before[PRIMARY.service]}; ${STANDBY.connectorNode} peer = ${before[STANDBY.service]}`);

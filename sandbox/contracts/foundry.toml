@@ -1,0 +1,25 @@
+# The sandbox's own Foundry project (infra#39). It used to borrow the connector
+# checkout's packages/contracts, which the connector deleted with TOON's
+# contracts (connector#1386), and it only ever needed two libraries from it.
+# The anvil service mounts this directory READ-WRITE at /contracts and runs
+# forge from here: the two scripts beside this file are the whole source, and
+# lib/, out/, cache/ and broadcast/ are written at bring-up (gitignored).
+[profile.default]
+# Deliberately directories that DO NOT EXIST. forge compiles `src` wholesale,
+# so `src = "."` would drag lib/openzeppelin-contracts' own mocks in (some
+# need a newer solc than the pin below) and fail the build; the anvil service
+# names each script by path instead, which forge compiles with its imports
+# alone.
+src = "src"
+script = "script"
+test = "test"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.26"
+via_ir = true
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+]

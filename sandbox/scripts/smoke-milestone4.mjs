@@ -31,8 +31,9 @@
 //       `#l = hidden:true` returns the hidden provider's alone); an unexpired
 //       Liveness says the full capacity
 //   2.  THE TENANT, over the circuit: a buyer that has only the address and
-//       the proxy reads the connector's self-description, mints its mock USDC
-//       and opens an EVM channel — every JSON-RPC call through the same SOCKS
+//       the proxy reads the connector's self-description, is minted its
+//       FiatToken USDC and opens an x402 channel on EVM, paying its own
+//       deposit gas — every JSON-RPC call through the same SOCKS
 //       proxy (`proxyRpc` is the client's default and nothing here turns it
 //       off); the free availability route answers { would_run: true } and
 //       spends no claim
@@ -92,7 +93,7 @@ import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { ToonClient } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
-import { HDNodeWallet, Interface } from 'ethers';
+import { HDNodeWallet, Interface, Wallet } from 'ethers';
 import {
   ROOT, MNEMONIC, K_PROFILE, K_LISTING, K_LIVENESS, TOON_LABEL, IMAGE, SSH_USER, SWEEP_S,
   providerOf, reporter, sleep, jstr, nowSec, waitFor,
@@ -116,10 +117,18 @@ const ATTEMPTS = Number(process.env.SMOKE_HS_ATTEMPTS ?? 3);
 const RENDERED = join(ROOT, 'conf', '.rendered');
 // The buyer: anvil's test mnemonic at ACCOUNT INDEX 6 — the one README §2
 // leaves free (0 is `make smoke`'s, 1-3 the three publishers', 5 `smoke-hs`'s).
-// Not seeded by any job: it mints its own mock USDC below, over the circuit.
+// Not seeded by any job: the FiatToken's minter mints it USDC below, over the
+// circuit, and it pays its channel deposit's gas from its own anvil ETH.
 const ACCOUNT_INDEX = 6;
 const EVM_CHAIN_ID = 31337;
-const DEPOSIT = 10_000_000n; // 10 mock USDC at 6 dp; a spawn is 1000
+const DEPOSIT = 10_000_000n; // 10 USDC at 6 dp; a spawn is 1000
+// The FiatToken's minter, anvil-mnemonic index 21 (scripts/seed-x402.sh): a
+// public test key, local chain only. The FiatToken mints to its minter alone,
+// unlike the MockERC20 it replaced, so the minter pays the buyer.
+const USDC_MINTER_KEY = '0xc511b2aa70776d4ff1d376e8537903dae36896132c90b91d52c1dfbae267cd8b';
+// x402's batch-settlement contract, where the buyer's channel and its
+// collateral live (connector ADR 0074).
+const X402_BATCH_SETTLEMENT = '0x4020074e9dF2ce1deE5A9C1b5c3f541D02a10003';
 const STORE = join(ROOT, '.toon-client', 'm4-hidden-buyer.json');
 const ANYONE_ADDRESS = /^[a-z2-7]{56}\.anyone$/;
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
@@ -295,18 +304,20 @@ function rpcOver(fetchImpl, url) {
   };
 }
 const ERC20 = new Interface(['function balanceOf(address) view returns (uint256)', 'function mint(address,uint256)']);
-/** The buyer holds `want` mock USDC: MockERC20.mint is ungated on the sandbox deploy (scripts/seed-toon-evm.sh), so it mints its own, paying gas from anvil's ETH. */
+const X402 = new Interface(['function channels(bytes32) view returns (uint128 balance, uint128 totalClaimed)']);
+/** The buyer holds `want` FiatToken USDC: its minter mints it, over the circuit, paying the gas from its own anvil ETH. */
 async function fundBuyer(rpc, wallet, token, want) {
   const balanceOf = async () => BigInt(ERC20.decodeFunctionResult('balanceOf',
     await rpc('eth_call', [{ to: token, data: ERC20.encodeFunctionData('balanceOf', [wallet.address]) }, 'latest']))[0]);
   const held = await balanceOf();
   if (held >= want) return { held, minted: 0n };
+  const minter = new Wallet(USDC_MINTER_KEY);
   const data = ERC20.encodeFunctionData('mint', [wallet.address, want]);
   const [nonce, gasPrice, gasLimit] = await Promise.all([
-    rpc('eth_getTransactionCount', [wallet.address, 'pending']), rpc('eth_gasPrice'),
-    rpc('eth_estimateGas', [{ from: wallet.address, to: token, data }]),
+    rpc('eth_getTransactionCount', [minter.address, 'pending']), rpc('eth_gasPrice'),
+    rpc('eth_estimateGas', [{ from: minter.address, to: token, data }]),
   ]);
-  const raw = await wallet.signTransaction({ type: 0, to: token, data, chainId: EVM_CHAIN_ID, nonce: Number(nonce), gasPrice: BigInt(gasPrice), gasLimit: BigInt(gasLimit) * 2n });
+  const raw = await minter.signTransaction({ type: 0, to: token, data, chainId: EVM_CHAIN_ID, nonce: Number(nonce), gasPrice: BigInt(gasPrice), gasLimit: BigInt(gasLimit) * 2n });
   const hash = await rpc('eth_sendRawTransaction', [raw]);
   let receipt = null;
   for (let i = 0; i < 60 && receipt === null; i++) { receipt = await rpc('eth_getTransactionReceipt', [hash]); if (receipt === null) await sleep(500); }
@@ -367,9 +378,9 @@ async function preflight() {
     if (prices[`${P.ilpAddress}.${free}`] !== 0n) throw new SandboxFault(`${P.ilpAddress}.${free} is priced ${prices[`${P.ilpAddress}.${free}`]}, not 0`);
   }
   ok(`it terminates ${SPAWN_ROUTE} and .extend at ${L.price} and the three free routes at 0 — no hub in this path, so nothing adds a fee`);
-  const evm = (described.settlements ?? []).find((s) => s.chain === `evm:${EVM_CHAIN_ID}`);
-  if (!evm?.tokenAddress) throw new SandboxFault(`the connector publishes no evm:${EVM_CHAIN_ID} settlement for this buyer to pay on`);
-  ok(`it settles on evm:${EVM_CHAIN_ID} in ${evm.tokenAddress} (mock USDC, ${evm.decimals ?? 6} dp) — the chain its address publishes on virtual port 8545`);
+  const evm = (described.batchSettlements ?? []).find((s) => s.network === `eip155:${EVM_CHAIN_ID}`);
+  if (!evm?.asset) throw new SandboxFault(`the connector publishes no eip155:${EVM_CHAIN_ID} batchSettlements entry for this buyer to open a channel on`);
+  ok(`it takes x402 channels on eip155:${EVM_CHAIN_ID} in ${evm.asset} (the FiatToken USDC, "${evm.name}"/"${evm.version}", ${evm.assetTransferMethod}) — the chain its address publishes on virtual port 8545`);
 
   // THE PRIVATE-RPC GATE (spec §10): every chain read of the hidden provider's
   // stays on this side. Three configs, four URLs, all compose service names.
@@ -399,7 +410,7 @@ async function preflight() {
   const localIps = Object.values(networkInterfaces()).flat().filter((i) => i.family === 'IPv4').map((i) => i.address);
   ok(`this host's public address is ${hostIp} (and it holds ${localIps.length} local IPv4 addresses) — what no workload may observe`);
 
-  return { address, described, hostIp, localIps, token: evm.tokenAddress };
+  return { address, described, hostIp, localIps, token: evm.asset };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -527,22 +538,29 @@ try {
   const rpcUrl = `http://${target.address}:8545`;
   const wallet = HDNodeWallet.fromPhrase(MNEMONIC, undefined, `m/44'/60'/0'/0/${ACCOUNT_INDEX}`);
   transport = createHiddenServiceTransport(SOCKS_PROXY);
+  // `depositGas: 'self'`, and no facilitator: the Onboarder the connector names
+  // is a private compose service no circuit reaches, and a hidden buyer must
+  // not be seen talking to anything but the node it pays. It deposits from its
+  // own anvil ETH, directly, over the same circuit (toon-client#695).
   const makeClient = () => ToonClient.create({
     connector, socksProxy: SOCKS_PROXY, mnemonic: MNEMONIC, accountIndex: ACCOUNT_INDEX,
     chain: 'evm', rpcUrl, channelStore: STORE, deposit: DEPOSIT, timeoutMs: 180_000,
+    depositGas: 'self', facilitatorUrl: '',
   });
   const t0 = Date.now();
   const rpc = rpcOver(transport.fetch, rpcUrl);
   const chainId = BigInt(await rpc('eth_chainId'));
   if (chainId !== BigInt(EVM_CHAIN_ID)) throw new SandboxFault(`the chain behind ${rpcUrl} says chainId ${chainId}, not ${EVM_CHAIN_ID}`);
   const funded = await fundBuyer(rpc, wallet, target.token, DEPOSIT);
-  ok(`the buyer ${wallet.address} (account index ${ACCOUNT_INDEX}) holds ${funded.held} mock USDC units${funded.minted > 0n ? ` — minted its own over the circuit, tx ${funded.hash}` : ' (already funded)'}; ${((Date.now() - t0) / 1000).toFixed(1)}s of JSON-RPC, none on clearnet`);
+  ok(`the buyer ${wallet.address} (account index ${ACCOUNT_INDEX}) holds ${funded.held} USDC units${funded.minted > 0n ? ` — minted to it over the circuit, tx ${funded.hash}` : ' (already funded)'}; ${((Date.now() - t0) / 1000).toFixed(1)}s of JSON-RPC, none on clearnet`);
 
   client = await makeClient();
   if (client.identity.evmAddress?.toLowerCase() !== wallet.address.toLowerCase()) throw new SandboxFault(`the client derived ${client.identity.evmAddress}, this script ${wallet.address}`);
   const t1 = Date.now();
-  let opened = await client.channel.open({ deposit: DEPOSIT });
-  const collateralOf = async () => BigInt((await client.channel.state({ onChain: true })).onChain?.deposit ?? 0);
+  let opened = (await client.channel.open()).channel;
+  // The channel's balance on x402BatchSettlement itself, over the circuit.
+  const collateralOf = async () => BigInt(X402.decodeFunctionResult('channels',
+    await rpc('eth_call', [{ to: X402_BATCH_SETTLEMENT, data: X402.encodeFunctionData('channels', [opened.channelId]) }, 'latest']))[0]);
   if (await collateralOf() < L.price) {
     console.log(`       the chain does not back channel ${opened.channelId} — anvil forgets on restart, a kept channel store does not. Starting fresh.`);
     await client.close?.().catch(() => {});
@@ -550,7 +568,7 @@ try {
     // binding left behind without its watermark refuses to open at all.
     for (const f of [STORE, STORE.replace(/\.json$/, '.peers.json')]) rmSync(f, { force: true });
     client = await makeClient();
-    opened = await client.channel.open({ deposit: DEPOSIT });
+    opened = (await client.channel.open()).channel;
     if (await collateralOf() < L.price) throw new SandboxFault(`channel ${opened.channelId} holds less than ${L.price} of collateral even after a fresh open`);
   }
   const channelId = opened.channelId;
