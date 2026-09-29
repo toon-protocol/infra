@@ -24,9 +24,10 @@ services:
     # Built from ../ by .github/workflows/onboarder-image.yml. Pinned by DIGEST,
     # never a tag: the gas payer's key is handed to whatever this resolves to.
     #
-    # Built from 8ae9ac8 (sha-8ae9ac892e947270a332639e0aaff884d992a88b), the
-    # first onboarder-image.yml run on main. README § "Bumping the image".
-    image: ghcr.io/toon-protocol/onboarder@sha256:50656ee2a8d60dc406e6992c95c00eb21abce3d046c4e2fd5cd3d3fc17161b18
+    # Built from 12f704b (sha-12f704b65348e191ece0b5fe438eea7865fccddc, #46):
+    # it waits until the RPC shows a sponsored approval's funding and allowance,
+    # not only for their receipts. README § "Bumping the image".
+    image: ghcr.io/toon-protocol/onboarder@sha256:7850a92d3639b3c721d694adf5c918cc33a3876645ad2d731645ebd383606292
     environment:
       # The devnet's EVM chain. Fixed here, not in .env, so which network this
       # host pays gas on is a reviewed commit.
