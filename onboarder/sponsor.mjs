@@ -13,9 +13,16 @@
 // Sequentially, then:
 //   1. fund the approval's sender with exactly what it lacks for the approval's
 //      worst-case cost (its fee, plus the L1 data fee on an OP-stack chain such
-//      as Base), and wait for that to land;
-//   2. broadcast the payer's signed approval as-is, and wait for it;
+//      as Base), and wait until the RPC shows it;
+//   2. broadcast the payer's signed approval as-is, and wait until the RPC
+//      shows the allowance;
 //   3. send the deposit from the Onboarder's own key, and return both hashes.
+//
+// "Until the RPC shows it", not "until its receipt": a public RPC such as
+// sepolia.base.org is load-balanced, and a receipt from one backend says
+// nothing about what the next request's backend has seen. Relayed straight
+// after its funding's receipt, an approval was refused "insufficient funds" by
+// a backend a block behind (toon-client#695).
 //
 // x402.org's hosted facilitator advertises this extension and was seen
 // broadcasting the approval WITHOUT step 1 (connector ADR 0074, prerequisite
@@ -32,10 +39,18 @@
 //     of `maxFeePerGas` and twice this Onboarder's own current estimate;
 //   - comes from a sender this Onboarder has never funded before. A payer
 //     approves Permit2 once, for the maximum. The sender is claimed before the
-//     first await, so concurrent requests cannot each be funded.
+//     first await, so concurrent requests cannot each be funded. A sender
+//     funded before whose approval never went out, and who still holds the
+//     funding, is served again without being funded again.
 // What is left exposed is at most one approval's fee per fresh wallet holding
 // a sponsored token, and the edge rate-limits `/settle`.
-import { decodeFunctionResult, parseAbi, parseTransaction, recoverTransactionAddress } from "viem";
+import {
+  decodeFunctionData,
+  decodeFunctionResult,
+  parseAbi,
+  parseTransaction,
+  recoverTransactionAddress,
+} from "viem";
 
 // x402's own client signs the approval with a 70,000 gas limit and, when it
 // cannot estimate fees, a 1 gwei cap (`ERC20_APPROVE_GAS_LIMIT`,
@@ -47,6 +62,11 @@ export const DEFAULT_MAX_FEE_PER_GAS = 1_000_000_000n;
 export const GAS_PRICE_ORACLE = "0x420000000000000000000000000000000000000F";
 const ORACLE_ABI = parseAbi(["function getL1Fee(bytes) view returns (uint256)"]);
 const APPROVE_ABI = parseAbi(["function approve(address,uint256) returns (bool)"]);
+const ALLOWANCE_ABI = parseAbi(["function allowance(address,address) view returns (uint256)"]);
+
+/** How long a landed transaction may take to show on the RPC, and how often to look. */
+export const DEFAULT_VISIBLE_WITHIN_MS = 30_000;
+export const DEFAULT_POLL_INTERVAL_MS = 1_000;
 
 /**
  * @param chain  what the signer needs of the chain — a viem wallet client
@@ -54,7 +74,8 @@ const APPROVE_ABI = parseAbi(["function approve(address,uint256) returns (bool)"
  *   `getBalance`, `getTransactionCount`, `getCode`, `readContract`, `call`,
  *   `sendTransaction` (from the Onboarder's key), `sendRawTransaction` and
  *   `waitForTransactionReceipt`.
- * @param limits `{ chainId, sponsoredTokens, maxApprovalGas, maxFeePerGas }`.
+ * @param limits `{ chainId, sponsoredTokens, maxApprovalGas, maxFeePerGas,
+ *   visibleWithinMs, pollIntervalMs }`.
  * @returns x402's `sendTransactions(transactions)`.
  */
 export function approvalSponsor(chain, limits) {
@@ -62,12 +83,27 @@ export function approvalSponsor(chain, limits) {
   const sponsored = new Set((limits.sponsoredTokens ?? []).map((t) => t.toLowerCase()));
   const maxGas = limits.maxApprovalGas ?? DEFAULT_MAX_APPROVAL_GAS;
   const maxFee = limits.maxFeePerGas ?? DEFAULT_MAX_FEE_PER_GAS;
-  /** Senders funded, or being funded: each at most once. */
+  const visibleWithin = limits.visibleWithinMs ?? DEFAULT_VISIBLE_WITHIN_MS;
+  const pollInterval = limits.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  /** Senders funded: each at most once. */
   const funded = new Set();
+  /** Senders being served right now. */
+  const serving = new Set();
 
   async function landed(hash, what) {
     const receipt = await chain.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error(`${what} ${hash} reverted`);
+  }
+
+  /** Wait until `read()` satisfies `ok`: the RPC shows what `hash` did. */
+  async function visible(hash, what, read, ok) {
+    const deadline = Date.now() + visibleWithin;
+    while (!ok(await read())) {
+      if (Date.now() >= deadline) {
+        throw new Error(`${what} ${hash} landed, but the RPC did not show it within ${visibleWithin} ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
   }
 
   async function l1Fee(raw) {
@@ -122,10 +158,10 @@ export function approvalSponsor(chain, limits) {
     const sender = (await recoverTransactionAddress({ serializedTransaction: raw })).toLowerCase();
     // Claimed with no await between the check and the add, so a concurrent
     // request for the same sender is refused rather than funded again.
-    if (funded.has(sender)) {
+    if (serving.has(sender)) {
       throw new Error(`${sender} has had its Permit2 approval sponsored already`);
     }
-    funded.add(sender);
+    serving.add(sender);
     try {
       const estimate = (await chain.estimateFeesPerGas()).maxFeePerGas;
       const allowed = 2n * estimate > maxFee ? 2n * estimate : maxFee;
@@ -133,21 +169,42 @@ export function approvalSponsor(chain, limits) {
         throw new Error(`a sponsored approval may pay at most ${allowed} wei per gas, not ${fee}`);
       }
       await vet(raw, tx, sender);
-    } catch (error) {
-      // Nothing was sent: the sender may come back with a better approval.
-      funded.delete(sender);
-      throw error;
-    }
 
-    const needed = gas * fee + (await l1Fee(raw));
-    const held = await chain.getBalance({ address: sender });
-    if (held < needed) {
-      const funding = await chain.sendTransaction({ to: sender, value: needed - held });
-      await landed(funding, "funding the approval's gas");
+      const needed = gas * fee + (await l1Fee(raw));
+      const held = await chain.getBalance({ address: sender });
+      if (held < needed) {
+        if (funded.has(sender)) {
+          throw new Error(`${sender} has had its Permit2 approval sponsored already`);
+        }
+        funded.add(sender);
+        const funding = await chain.sendTransaction({ to: sender, value: needed - held });
+        await landed(funding, "funding the approval's gas");
+        await visible(
+          funding,
+          "funding the approval's gas",
+          () => chain.getBalance({ address: sender }),
+          (balance) => balance >= needed,
+        );
+      }
+      const hash = await chain.sendRawTransaction({ serializedTransaction: raw });
+      await landed(hash, "the sponsored approval");
+      const [spender, amount] = decodeFunctionData({ abi: APPROVE_ABI, data: tx.data }).args;
+      await visible(
+        hash,
+        "the sponsored approval",
+        () =>
+          chain.readContract({
+            address: tx.to,
+            abi: ALLOWANCE_ABI,
+            functionName: "allowance",
+            args: [sender, spender],
+          }),
+        (allowance) => allowance >= amount,
+      );
+      return hash;
+    } finally {
+      serving.delete(sender);
     }
-    const hash = await chain.sendRawTransaction({ serializedTransaction: raw });
-    await landed(hash, "the sponsored approval");
-    return hash;
   }
 
   return async function sendTransactions(transactions) {
