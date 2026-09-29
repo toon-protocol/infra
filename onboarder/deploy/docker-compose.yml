@@ -26,7 +26,7 @@ services:
     #
     # Built from 8ae9ac8 (sha-8ae9ac892e947270a332639e0aaff884d992a88b), the
     # first onboarder-image.yml run on main. README § "Bumping the image".
-    image: ghcr.io/toon-protocol/onboarder@sha256:da06202c88df32da5b98f7d9c3675a1864af10a247816e6a38b5f3e0fc141a18
+    image: ghcr.io/toon-protocol/onboarder@sha256:50656ee2a8d60dc406e6992c95c00eb21abce3d046c4e2fd5cd3d3fc17161b18
     environment:
       # The devnet's EVM chain. Fixed here, not in .env, so which network this
       # host pays gas on is a reviewed commit.
