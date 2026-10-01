@@ -16,6 +16,9 @@
 #                connector (TOON_Network ADR 0013, spec §12, Milestone 5) —
 #                `make up-gateway`; `make up-gateway-hs` puts it on top of
 #                `up-hs` for the hidden path by hand
+# `make up-topology NODES="…" [CHAINS="…"] [HS="…"]` selects none of the above:
+# it names the nodes, the chains they settle on and the nodes to hide, one
+# compose profile per node and per chain (see `up-topology` below).
 # Recursively expanded (`=`, not `:=`) so the payments targets can override
 # COMPOSE_PROFILE for their own recipes.
 COMPOSE_PROFILE ?= full
@@ -36,8 +39,10 @@ COMPOSE_HS = docker compose --profile full --profile hs
 COMPOSE_GW = $(COMPOSE) --profile gateway
 
 # down/clean must sweep EVERY profile's containers, whichever one brought them
-# up — otherwise `make up-hs && make down` leaves three daemons running.
-COMPOSE_ALL = docker compose --profile full --profile payments --profile credentials --profile hs --profile gateway
+# up — otherwise `make up-hs && make down` leaves three daemons running. `*`
+# is compose's own "every profile", so a profile added to the file (a
+# topology's per-node ones were) is swept without being listed here.
+COMPOSE_ALL = docker compose --profile '*'
 
 # The buyer's SOCKS5 port on the host's loopback. 19050, not 9050: a developer's
 # own anon/Tor daemon usually holds 9050 and a second bind fails the bring-up.
@@ -82,7 +87,7 @@ export PROVIDER_CONTEXT ?= ../../provider
 export HOST_UID ?= $(shell id -u)
 export HOST_GID ?= $(shell id -g)
 
-.PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs down clean smoke smoke-ario \
+.PHONY: setup up up-payments up-credentials up-hs up-gateway up-gateway-hs up-topology topology smoke-topology down clean smoke smoke-ario \
         smoke-toon smoke-payments smoke-x402 smoke-credentials smoke-provider smoke-provider2 \
         smoke-directory smoke-eviction smoke-extend-shape smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-ci smoke-hs hs-address \
         state-guard logs ps test require-store-context require-anytoon-context require-gateway-context \
@@ -317,6 +322,47 @@ up-gateway-hs: require-gateway-context
 	PROVIDER_HS_CONNECTOR_CONF=$(HS_PROVIDER_CONNECTOR_CONF) \
 	PROVIDER_HS_CONF=$(HS_PROVIDER_CONF) \
 	  $(COMPOSE_HS) --profile gateway up -d --build workload-gateway workload-gateway-connector
+
+## A TOPOLOGY: only the nodes named, settling only on the chains named.
+##   make up-topology NODES=relay                            a connector and a relay
+##   make up-topology NODES="relay relay2 store" CHAINS=evm   two relay nodes and a store, on anvil alone
+##   make up-topology NODES=relay CHAINS=solana HS=relay      one relay node, hidden, on Solana alone
+## NODES   relay relay2 store gas provider provider2 anytoon dealer — each a
+##         connector with its app behind it. `relay` is the hub: every other
+##         node that runs beside it is peered to it, and one that runs without
+##         it is paid directly at its own edge.
+## CHAINS  evm, solana, or both (the default): what the nodes SETTLE on. A node
+##         on one chain mounts its config with the other `[settlement.*]` table
+##         removed (conf/.rendered/topology/), and the peerings open on
+##         whichever chain both ends have.
+## HS      relay nodes reached ONLY at a `.anyone` address. Like `up-hs`, it
+##         dials the REAL Anyone network and takes a minute or two to bootstrap.
+## Every sandbox container the selection does not name is REMOVED first, so
+## what runs is the topology and nothing else; volumes are kept, and a
+## connector whose rendered config changed is recreated on it. `make topology`
+## prints what a selection would run and starts nothing;
+## scripts/lib/topology.mjs is the planner, README §2 the guide.
+up-topology: state-guard
+	@gates="$$(node scripts/topology.mjs gates)" || exit 1; \
+	  for gate in $$gates; do $(MAKE) --no-print-directory $$gate || exit 1; done
+	@node scripts/topology.mjs up
+
+## what `make up-topology` would run for the same NODES / CHAINS / HS
+topology:
+	@node scripts/topology.mjs plan
+
+## proof for `make up-topology`, whatever it started (it reads the record that
+## target left in conf/.rendered/topology.json): only the selected containers
+## run; every node publishes x402 terms on exactly the chains selected; each
+## relay node takes a PAID write on each of those chains from a channel the
+## smoke opens against it, and its relay returns the event; with both relay
+## nodes, a write to the second is paid THROUGH the hub and both books move;
+## and every other peering is open, collateralised and routed. A hidden node is
+## paid over the circuit, and — like `smoke-hs` — exit 75 means the overlay did
+## not carry rather than that the sandbox is wrong. The apps behind the other
+## nodes keep their own smokes (`make smoke`, `smoke-payments`, …).
+smoke-topology:
+	node scripts/smoke-topology.mjs
 
 ## print this sandbox's TWO `.anyone` addresses — the anytoon issuer path's and
 ## the HIDDEN PROVIDER's — re-rendering the three configs that name them.
@@ -714,11 +760,13 @@ smoke-m6:
 smoke-m7:
 	node scripts/smoke-milestone7.mjs
 
+# Every profile, so both show whatever is running — a topology and the `hs`
+# and `gateway` services included.
 logs:
-	$(COMPOSE) logs -f --tail=100
+	$(COMPOSE_ALL) logs -f --tail=100
 
 ps:
-	$(COMPOSE) ps -a
+	$(COMPOSE_ALL) ps -a
 
 ## Probe the PUBLIC devnet (docs/devnet.md), not this sandbox. Every check is
 ## free — it opens no channel, signs nothing and holds no key — so it needs

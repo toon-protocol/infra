@@ -579,6 +579,101 @@ bundle: 11000 µUSDC from the client, the Dealer's payment landing in
 anytoon's CLIENT book in ANYONE, keyed `evm:<the Dealer's channel id>`, and
 the ANYONE rate having moved during the run.
 
+### A topology of your own (`make up-topology`)
+
+The profiles above are fixed stacks. A **topology** is the sandbox with only
+the nodes you name, settling only on the chains you name:
+
+```bash
+make up-topology NODES=relay                             # a connector and a relay
+make up-topology NODES="relay relay2 store" CHAINS=evm    # two relay nodes and a store, on anvil alone
+make up-topology NODES="relay gas" CHAINS=solana          # the hub and the gas station, on Solana alone
+make up-topology NODES=relay HS=relay                     # one relay node, reached only at a .anyone address
+make topology    NODES="relay relay2" CHAINS=evm          # print what that would run; start nothing
+make smoke-topology                                       # prove whatever is running
+```
+
+| `NODES` | what starts | client edge | needs |
+|---|---|---|---|
+| `relay` | `relay` + `relay-connector` — **the hub** | 3200 (reads 7100) | — |
+| `relay2` | `relay2` + `relay2-connector` — a second relay node, `g.toon.relay2*` | 3290 (reads 7110) | — |
+| `store` | `store` + `store-connector`, with the AR.IO gateway and the Turbo bundler | 3210 | the store checkout |
+| `gas` | `gas-station` + `gas-connector` | 3220 | — |
+| `provider`, `provider2` | the provider, its connector and its directory publisher | 3240, 3250 | `relay`; the provider checkout |
+| `anytoon` | the issuer path + `anytoon-connector` | 3230 | `evm`; the anytoon checkout |
+| `dealer` | `dealer-connector` + `swap-driver` | 3270 | `relay`, `anytoon`, both chains |
+
+- **`relay` is the hub.** Every other node that runs beside it is peered to
+  it by the `open-peerings` job, exactly as under `make up`, and reachable
+  through it; `relay2` is one more spoke (a write to `g.toon.relay2` through
+  the hub costs its 1 plus the hop's 100). A node that runs WITHOUT the hub is
+  simply paid at its own edge — `NODES=relay2`, or `NODES=store`, is a valid
+  topology with no peering in it. The star is the only shape: there is no
+  `relay2`-to-`store` peering, and `relay2` forwards nothing.
+- **`CHAINS`** is `evm`, `solana` or both (the default), and is what the nodes
+  **settle** on. A connector has no environment layer, so a node on one chain
+  mounts a rendered copy of its committed config with the other
+  `[settlement.*]` table removed (`conf/.rendered/topology/`, through that
+  connector's `*_CONNECTOR_CONF` variable); with both chains it mounts the
+  committed file as it is. Each peering opens on Solana when both ends settle
+  there and on anvil otherwise (`fallback` in `scripts/peerings.mjs`) — both
+  are six-decimal USDC, so every fee and price holds. On `evm` alone the
+  directory publishers pay the hub from anvil, through the Onboarder. A chain
+  an **app** reads still runs: the validator with `store` (ArNS) and `gas`,
+  anvil with `gas` — `make topology` says so when it happens.
+- **`HS`** names relay nodes to reach only over a hidden service. It starts
+  the `anon` daemon, its forwarder and the buyer's SOCKS proxy (and none of
+  the rest of the `hs` profile), opens the peerings on compose names, then
+  restarts each hidden node on a config whose endpoint is
+  `http://<address>.anyone:<its port>/ilp` — the order `make up-hs` uses, for
+  its reason. The chain RPCs are on the same address (8545; 8899 and 8900), so
+  a buyer's reads ride the circuit with its packets; the Onboarder is not, so
+  a buyer on EVM pays its own deposit gas. Like `up-hs` it **dials the real
+  Anyone network**: expect a minute or two, and `make smoke-topology` exits 75
+  when the overlay, not the sandbox, failed. `HS=relay` refuses to run with a
+  provider — its publisher dials the hub from the compose network.
+- **Only the selection runs.** `up-topology` first removes every sandbox
+  container the selection does not name (volumes stay), so it can follow any
+  other `make up*` or another topology. A connector whose rendered config
+  changed is recreated on it, and the peerings reopen on the chain both ends
+  now share; `make clean` first is still the unambiguous start, since a
+  journal otherwise keeps the channels of the chain a node left.
+
+`make smoke-topology` reads what `up-topology` recorded and asserts the
+selection: nothing else runs; every node publishes x402 terms on exactly its
+chains; each relay node takes a paid write on each of them (gasless through
+the Onboarder on EVM, sponsored by the node on Solana, over the circuit when
+hidden) and its book moves by its price; a write to the second relay paid
+through the hub lands; and every peering is open, collateralised and routed.
+It does not exercise the apps behind the other nodes — the profile smokes do.
+
+**What has been run.** Each of these was brought up cold and passed
+`make smoke-topology` (2026-10-01):
+
+| selection | what it showed |
+|---|---|
+| `NODES=relay CHAINS=evm` | a paid write from a 0-ETH wallet, through the Onboarder |
+| `NODES="relay relay2 store" CHAINS=evm` | both peerings open on anvil; a write to `relay2` paid through the hub |
+| `NODES="relay relay2" CHAINS=solana` | the same on Solana — started on top of the run above, with no `make clean` between |
+| `NODES="relay relay2" HS=relay` | the hub paid over the real Anyone network on both chains, and `relay2` still reached through it |
+| `NODES="relay provider" CHAINS=evm` | the directory publisher paying the hub from an EVM channel; Profile, Listings and Liveness accepted |
+
+Not run as topology selections: `gas`, `anytoon`, `dealer`, `provider2`, and
+`HS=relay2`. They are wired the same way and held to the committed files by
+`scripts/lib/topology.test.mjs`, but nothing has paid through them in a
+topology yet.
+
+**What it changed for everyone else.** `make down`, `clean`, `ps` and `logs`
+now sweep every profile (`--profile '*'`), so they see a topology and the
+`hs` and `gateway` services too. The anvil seed mints 1000 USDC to the two
+directory publishers' wallets (anvil accounts 1 and 2), `conf/anonrc`
+publishes four more virtual ports (3290, 7110, 8899, 8900), and the
+`open-peerings` job no longer insists on a hub. `make up`, `up-payments`,
+`up-credentials` and `up-hs` start exactly the services they did.
+
+The workload gateway and the hidden provider are not topology nodes; they
+stay on `make up-gateway` and `make up-hs`.
+
 ### Hidden-service ingress (the `hs` profile) — opt-in, and it dials a real network
 
 Everything above reaches every node at a published clearnet port. A hidden
@@ -1096,6 +1191,7 @@ The admission round itself does not cross the circuit — the hidden provider's
 | `provider2` | the SECOND compute provider (TOON_Network #34, Milestone 3), the same image and the same host daemon as `provider`, with its own config (`conf/provider2.toml`), its own Nostr identity, its own lease table and **disjoint ranges**: workload ids 1100–1199, SSH at 43000+, port blocks from 44000. A Standby Set has to span two PROVIDERS — a Warm Standby bought from the provider already running the primary is no standby — so the sandbox runs a second one, whole. Sells `basic`, `smoke` and `warm` (600 s, `standby_price = 400`) | — |
 | `directory-publisher2` | the second provider's payer for relay writes, on ACCOUNT INDEX 2 of the test phrase (the first is on 1): its own wallet, its own channel, its own watermark (8081 unpublished) | — |
 | `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
+| `relay2` + `relay2-connector` | **the second relay node**, only in a topology that names it (`make up-topology NODES="relay relay2"`, §2): its own relay identity, its own connector terminating `g.toon.relay2*`, peered to the hub when both run | 3290 (client edge), 7110 (free reads) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
 | `issuer` | the **upstream** `anyone-protocol/credentials-issuer`, unmodified — blind-signs credential bundles, refuses without a signed `X-Payment-Claim` | none (unpublished) |
@@ -2592,6 +2688,11 @@ package bump changes it. Last, it checks `payment-channels` is loaded and execut
   value exceeds a 2048-bit modulus about half the time). The issuer signs
   them either way; what the smoke proves is the paid path, not RSABSSA,
   which the issuer's own test vectors cover.
+- **A topology is a star, and its smoke stops at the payment layer** (§2, *A
+  topology of your own*): every node is peered to `relay` and to nothing
+  else, `relay2` forwards nothing, and only relay nodes can be hidden.
+  `make smoke-topology` proves the selection, the paid writes, the peerings
+  and the routes — not a stored blob or a spawned workload.
 - **Store and claim-minter images must be built from sibling checkouts** —
   the store until upstream releases the local-endpoint overrides (then the
   commented image pin in `docker-compose.yml` works again), the claim minter

@@ -13,6 +13,8 @@
 #   * each connector's EVM settlement key: 100 ETH (a node lands its own
 #     `claim`/`settle` transactions, and pays its own gas on any outbound
 #     channel it opens) + 1000 USDC in the FiatToken
+#   * the two directory publishers' wallets (anvil accounts 1 and 2):
+#     1000 USDC, for a topology whose hub settles on EVM alone
 #   * the two ANYONE nodes (infra#42): anytoon-connector 100 ETH, to land
 #     its own claims; the Dealer, dealer-connector, 100 ETH + 100 ANYONE, the
 #     float it pays anytoon from (its channel's target is 10; the u64 voucher
@@ -45,11 +47,21 @@ c="$(cast code "$USDC" --rpc-url "$RPC")"
 # Every connector that settles USDC on EVM, whatever profile runs it: the
 # chain is seeded once and cold, so `make up-hs` needs no re-seed for its
 # hidden provider.
-for node in relay-connector store-connector gas-connector provider-connector provider2-connector provider-hs-connector; do
+for node in relay-connector relay2-connector store-connector gas-connector provider-connector provider2-connector provider-hs-connector; do
   addr="$(cast wallet address --private-key "0x$(cat "$KEYS/$node/settlement.key")")"
   cast send --rpc-url "$RPC" --private-key "$FUNDER_KEY" --value 100ether "$addr" >/dev/null
   cast send --rpc-url "$RPC" --private-key "$MINTER_KEY" "$USDC" 'mint(address,uint256)' "$addr" "$NODE_USDC" >/dev/null
   say "$node: funded $addr with 100 ETH + 1000 USDC"
+done
+
+# The two directory publishers' wallets, anvil accounts 1 and 2 — the EVM
+# addresses of the account indices they pay from (docker-compose.yml,
+# TOON_ACCOUNT_INDEX). They pay on Solana wherever the hub settles there; in a
+# topology that leaves Solana out (`make up-topology CHAINS=evm`) they deposit
+# this USDC through the Onboarder instead. anvil already gave them ETH.
+for addr in 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC; do
+  cast send --rpc-url "$RPC" --private-key "$MINTER_KEY" "$USDC" 'mint(address,uint256)' "$addr" "$NODE_USDC" >/dev/null
+  say "directory publisher $addr: minted 1000 USDC"
 done
 
 # The ANYONE nodes: ETH for their own transactions, and the dealer's float.

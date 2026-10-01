@@ -33,6 +33,21 @@ Working on the payment layer or on a TOON client? `make up-payments && make
 smoke-payments` runs the chains, the hub and the two compute providers alone
 — none of the permaweb half's prerequisites.
 
+Want only part of it? `make up-topology` starts just the nodes you name, on
+just the chains you name, with relay nodes optionally reached only over a
+hidden service — and nothing else:
+
+```bash
+make up-topology NODES=relay                             # a connector and a relay
+make up-topology NODES="relay relay2 store" CHAINS=evm    # two relay nodes and a store, EVM only
+make up-topology NODES="relay relay2" HS=relay            # the hub reached only at a .anyone address
+make smoke-topology                                       # prove whatever is running
+```
+
+`NODES` is any of `relay relay2 store gas provider provider2 anytoon dealer`,
+`CHAINS` is `evm`, `solana` or both. The operator guide's §2, *A topology of
+your own*, says what each node needs and what has been run.
+
 **Read the [operator guide](sandbox/README.md)** — it covers what's running,
 a cookbook for every surface, and a step-by-step path to putting **your own
 app** behind a TOON connector (from a five-minute route on the hub to your

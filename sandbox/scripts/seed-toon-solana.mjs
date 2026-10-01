@@ -69,7 +69,10 @@ const NODES = ['relay-connector', 'store-connector', 'gas-connector',
   // THE DEALER (infra#42): the hub pays it µUSDC over Solana, so it sponsors
   // that channel's rent and funds its own 1-USDC channel back. Seeded on every
   // profile for the reason the two above are.
-  'dealer-connector'];
+  'dealer-connector',
+  // THE SECOND RELAY NODE (`make up-topology NODES="relay relay2"`), seeded on
+  // every profile for the same reason again.
+  'relay2-connector'];
 const NODE_USDC = 1_000_000_000n; // 1000 USDC at 6dp per connector node
 const TREASURY_USDC = 100_000_000_000_000n; // 100M USDC to the authority
 // THE BUYER. Deterministic: SLIP-0010 m/44'/501'/0'/0' of anvil's published

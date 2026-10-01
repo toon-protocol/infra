@@ -29,7 +29,7 @@ export const targetOf = (peering) => peering.target ?? CHANNEL_TARGET;
  * nothing is forwarded that way. The PAYER then names the payee and opens the
  * channel that carries traffic, with the whole target behind it.
  */
-export function peerBody(peering, side, nodes) {
+export function peerBody(peering, side, nodes, chain = peering.chain) {
   const payer = side === 'payer';
   return JSON.stringify({
     id: peering.id,
@@ -40,11 +40,23 @@ export function peerBody(peering, side, nodes) {
     // names its own: that default is 1e-12 ANYONE, and every forward onto it
     // would refuse T04.
     max_packet_amount: payer ? (peering.max_packet_amount ?? 0) : 0,
-    chain: peering.chain,
+    chain,
     // JSON numbers: the connector reads them as u128. Every figure in the
     // table (1e18, 1e19 included) is one a double holds exactly.
     deposit: Number(payer ? targetOf(peering) : OPEN_DEPOSIT),
   });
+}
+
+/**
+ * The chain a peering opens on, given what each side settles on (the chains
+ * of its published `batchSettlements`): the row's own `chain` when both do,
+ * its `fallback` when a topology left that chain out, and `null` when the two
+ * nodes share neither — which the job refuses by name.
+ */
+export function peeringChain(peering, payerChains, payeeChains) {
+  const both = (chain) => chain !== undefined && payerChains.has(chain) && payeeChains.has(chain);
+  if (both(peering.chain)) return peering.chain;
+  return both(peering.fallback) ? peering.fallback : null;
 }
 
 /** What `POST /channels/:id/fund` must add — it takes an INCREMENT. */
@@ -53,9 +65,10 @@ export function topUp(collateral, target) {
 }
 
 /**
- * Splits the table by what this compose profile runs. `payments` runs the hub
- * and both providers but no store or gas station; a peering whose far side
- * does not exist here is skipped by name rather than failed.
+ * Splits the table by what is running. `payments` runs the hub and both
+ * providers but no store or gas station, and a topology runs whatever it
+ * named; a peering with a side that does not exist here is skipped by name
+ * rather than failed.
  */
 export function presentPeerings(peerings, present) {
   const run = [];

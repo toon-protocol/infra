@@ -40,14 +40,20 @@
 // channel already open (`"status":"found"`) and opens nothing, a channel is
 // topped up only by what has been spent from it since, and a route write is
 // an upsert by prefix.
-// A peering whose far side this compose profile does not run (`payments` has
-// no store or gas station) is skipped by name.
+// A peering with a side that is not running (`payments` has no store or gas
+// station; a topology runs only what it named) is skipped by name, and a
+// sandbox running one node alone has none to open.
+//
+// A TOPOLOGY CAN LEAVE A CHAIN OUT (`make up-topology CHAINS=evm`). Each
+// peering opens on its own `chain` when both nodes publish it and on its
+// `fallback` otherwise (scripts/peerings.mjs), read off what the two nodes
+// say they settle on rather than off anything this job is told.
 import { readFileSync } from 'node:fs';
 import { lookup } from 'node:dns/promises';
 
 import { NODES, PEERINGS } from './peerings.mjs';
 import { signWrite } from './lib/operator-write.mjs';
-import { binds, peerBody, presentPeerings, targetOf, topUp } from './lib/peering-plan.mjs';
+import { binds, peerBody, peeringChain, presentPeerings, targetOf, topUp } from './lib/peering-plan.mjs';
 import { PAYMENT_CHANNELS_PROGRAM, USDC_MINT, readSolanaChannel } from './lib/solana-channel.mjs';
 import { readEvmChannel } from './lib/evm-channel.mjs';
 
@@ -79,11 +85,15 @@ async function operator(node, method, path, body) {
 
 const selfDescription = (node) => fetch(NODES[node].url).then((res) => res.json());
 
-// A node's settlement key on `chain`, as it publishes it: the `payTo` of its
-// `batchSettlements` entry there (connector client-edge-spec §1.4).
+const chainOf = (network) => (network?.startsWith('eip155:') ? 'evm' : 'solana');
+
+// The chains a node settles on, as it publishes them: one `batchSettlements`
+// entry each (connector client-edge-spec §1.4).
+const settlesOn = async (node) => new Set(((await selfDescription(node)).batchSettlements ?? []).map((b) => chainOf(b.network)));
+
+// A node's settlement key on `chain`: the `payTo` of its entry there.
 async function settlementKey(node, chain) {
-  const prefix = chain === 'evm' ? 'eip155:' : 'solana:';
-  const entry = (await selfDescription(node)).batchSettlements?.find((b) => b.network?.startsWith(prefix));
+  const entry = (await selfDescription(node)).batchSettlements?.find((b) => chainOf(b.network) === chain);
   if (!entry) die(`${node} publishes no ${chain} batchSettlements entry at ${NODES[node].url}`);
   return entry.payTo;
 }
@@ -95,9 +105,9 @@ const sameKey = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
 // x402BatchSettlement holds for the channel id, which is a hash of the
 // channel's whole config — payer, receiver and token included — so the id the
 // payer's own GET /channels names toward this payee is already that check.
-async function assertChannel(peering, account, payer, payee) {
+async function assertChannel(peering, chain, account, payer, payee) {
   const target = targetOf(peering);
-  if (peering.chain === 'evm') {
+  if (chain === 'evm') {
     const ch = await readEvmChannel(EVM_RPC_URL, account);
     if (ch.balance < target) die(`${peering.id}: x402BatchSettlement holds ${ch.balance} in ${account}, not at least ${target}`);
     say(`${peering.id}: x402BatchSettlement holds ${ch.balance} in ${account}, paid by ${payer} to ${payee}`);
@@ -128,33 +138,38 @@ async function present(node) {
 }
 
 // A node fronted by a hidden service publishes a `.anyone` endpoint, which no
-// node here can dial (`make up-hs`, see the header).
+// node here can dial (`make up-hs` and `make up-topology HS=…`, see the header).
 const publishesHidden = async (node) => /\.anyone$/.test(new URL((await selfDescription(node)).httpEndpoint ?? NODES[node].url).hostname);
 
 const running = new Set();
 for (const node of Object.keys(NODES)) if (await present(node)) running.add(node);
 const { run, skipped } = presentPeerings(PEERINGS, running);
-for (const { id, payee } of skipped) say(`${id}: skipped — this profile runs no ${payee}`);
-if (!running.has('relay-connector')) die('the hub (relay-connector) is not on this network');
+for (const { id, payer, payee } of skipped) say(`${id}: skipped — ${running.has(payer) ? payee : payer} is not running`);
 
 for (const peering of run) {
-  const { id, payer, payee, chain } = peering;
+  const { id, payer, payee } = peering;
+  const chain = peeringChain(peering, await settlesOn(payer), await settlesOn(payee));
+  if (!chain) die(`${id}: ${payer} and ${payee} settle on no chain this peering can open on (${[peering.chain, peering.fallback].filter(Boolean).join(', then ')})`);
+  if (chain !== peering.chain) say(`${id}: opening on ${chain} — ${peering.chain} is not settled on here`);
   const [payerKey, payeeKey] = await Promise.all([settlementKey(payer, chain), settlementKey(payee, chain)]);
 
-  if (await publishesHidden(payee)) {
+  // Either side: the payee's `POST /peers` dials the payer just as the
+  // payer's dials the payee.
+  const hiddenSide = (await publishesHidden(payee)) ? payee : (await publishesHidden(payer)) ? payer : null;
+  if (hiddenSide) {
     const known = (await operator(payer, 'GET', '/peers')).some((p) => p.id === id);
     if (!known) {
-      die(`${payee} publishes a hidden-service endpoint, which ${payer} cannot dial, and ${id} was never established toward its compose name.\n  \`make up-hs\` runs this job before it recreates ${payee} against the rendered config; run \`make up-hs\` rather than starting it by hand.`);
+      die(`${hiddenSide} publishes a hidden-service endpoint, which its peer cannot dial, and ${id} was never established toward its compose name.\n  \`make up-hs\` and \`make up-topology\` run this job before they put a node on its hidden endpoint; use them rather than starting it by hand.`);
     }
-    say(`${id}: ${payee} publishes a hidden-service endpoint; ${payer} keeps the peering it already has`);
+    say(`${id}: ${hiddenSide} publishes a hidden-service endpoint; ${payer} keeps the peering it already has`);
   } else {
     if (binds(peering, 'payee')) {
-      const back = await operator(payee, 'POST', '/peers', peerBody(peering, 'payee', NODES));
+      const back = await operator(payee, 'POST', '/peers', peerBody(peering, 'payee', NODES, chain));
       say(`${id}: ${payee} bound ${payer}, its own channel back ${back.channel?.id} (${back.channel?.status})`);
     } else {
       say(`${id}: ${payee} binds nothing — ${payer}'s vouchers arrive there as a client's`);
     }
-    const established = await operator(payer, 'POST', '/peers', peerBody(peering, 'payer', NODES));
+    const established = await operator(payer, 'POST', '/peers', peerBody(peering, 'payer', NODES, chain));
     if (!established.channel?.id || established.channel.chain !== chain) {
       die(`${payer}'s POST /peers for ${id} answered without a ${chain} channel: ${JSON.stringify(established)}`);
     }
@@ -174,7 +189,7 @@ for (const peering of run) {
     await operator(payer, 'POST', `/channels/${channel}/fund`, `{"amount":${shortfall}}`);
     say(`${id}: topped ${channel} up by ${shortfall} to ${targetOf(peering)}`);
   }
-  await assertChannel(peering, channel, payerKey, payeeKey);
+  await assertChannel(peering, chain, channel, payerKey, payeeKey);
 
   for (const route of peering.routes) {
     await operator(payer, 'POST', '/routes/peers', JSON.stringify({ prefix: route.prefix, peer_id: id, price: route.price }));

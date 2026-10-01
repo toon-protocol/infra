@@ -1,0 +1,71 @@
+# =============================================================================
+# relay2-connector — THE SECOND RELAY NODE. Terminates the second relay's paid
+# write routes, g.toon.relay2 and g.toon.relay2.ephemeral, and forwards nothing.
+# =============================================================================
+# A node of its own: its own connector, keys, ILP address and state volume,
+# with its own relay behind it (conf/relay2.conf). It exists so a topology can
+# have TWO relay nodes (`make up-topology NODES="relay relay2"`); no aggregate
+# profile runs it. Beside the hub it is one more spoke — the `relay-relay2`
+# peering in scripts/peerings.mjs, opened at runtime like every other — and on
+# its own it is a relay a client pays directly at :3290.
+#
+# conf/connector-relay.toml's header says what to know before editing a
+# connector config, and why the peerings are not in this file.
+
+client_edge_addr = "0.0.0.0:3000"
+
+state_dir = "/app/state"
+
+# The hub's `POST /peers` reads this node's self-description and opens its
+# channel through this node's sponsor endpoint.
+peer_expose = "http"
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# The compose-network name: what the hub dials. The host reaches the same node
+# at 127.0.0.1:3290 through scripts/lib/sandbox-endpoints.mjs.
+[node]
+addresses = ["g.toon.relay2", "g.toon.relay2.ephemeral"]
+http_endpoint = "http://relay2-connector:3000/ilp"
+
+# ── Terminated: the second relay's paid write path ───────────────────────────
+[[routes]]
+prefix = "g.toon.relay2"
+handler_url = "http://relay2:3100/write"
+price = 1
+
+[[routes]]
+prefix = "g.toon.relay2.ephemeral"
+handler_url = "http://relay2:3100/write-ephemeral"
+price = 0
+
+# ── Settlement ───────────────────────────────────────────────────────────────
+# The same two tables as the hub's (conf/connector-relay.toml says what each
+# value is), on this node's own keys: anvil-mnemonic index 33 and 43.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+token_address = "0x0A867CA0442383c2A89951244B955AA19b615b58"
+decimals = 6
+asset_eip712_name = "USDC"
+asset_eip712_version = "2"
+asset_transfer_method = "eip3009"
+facilitator_url = "http://onboarder:4022"
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+min_sponsored_deposit = 1000000
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+# ── Operator surface ─────────────────────────────────────────────────────────
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file = "/app/data/operator-write.keys"

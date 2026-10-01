@@ -118,8 +118,33 @@ name: toon-sandbox
 #             `make up-gateway-hs` adds it on top of `make up-hs` for the
 #             hidden path by hand. See "The Workload Gateway" below.
 #
+#
+# ONE PROFILE PER NODE AND PER CHAIN, beside the aggregates above, so that a
+# TOPOLOGY can be named piece by piece (`make up-topology NODES="relay relay2
+# store" CHAINS=evm HS=relay`; scripts/lib/topology.mjs turns the selection
+# into this list and says what each node needs):
+#   relay, relay2, store, gas, provider, provider2, anytoon, dealer
+#             one NODE each: its connector, the app behind it and whatever
+#             that app cannot run without (`store` brings the AR.IO gateway and
+#             the Turbo bundler; `dealer` the swap driver). `relay2` — a second
+#             relay node — is on no aggregate profile at all.
+#   evm, solana
+#             a chain the selected nodes SETTLE on: the chain, and what a
+#             payer needs on it (the Onboarder; the mock USDC seed job). A
+#             chain an APP reads runs with that node whatever is settled on —
+#             the validator is on `store` and `gas`, anvil on `gas`. Every
+#             connector's dependency on a chain is `required: false`, so one a
+#             topology leaves out is not waited for, and the config it mounts
+#             there has that chain's `[settlement.*]` table removed (the
+#             `*_CONNECTOR_CONF` variables).
+#   topology  the open-peerings job, which opens whichever peerings have both
+#             ends running.
+#   hidden    the anon daemon, its forwarder and the buyer's SOCKS proxy
+#             WITHOUT the hidden provider or `full`: what `HS=` adds.
+#
 # `make up` / `make up-payments` / `make up-credentials` / `make up-hs` /
-# `make up-gateway` are the supported entry points; see Makefile.
+# `make up-gateway` / `make up-topology` are the supported entry points; see
+# Makefile.
 
 # Bounded json-file logs for the chatty chain services (the validator prints a
 # status line ~30x/sec; an unrotated log once helped fill a dev box's disk —
@@ -157,7 +182,7 @@ services:
   #    2026-07-06; agave 4.1.1 at this digest). Fallback if it ever breaks:
   #    a tiny Dockerfile over Anza release binaries.
   solana-validator:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'solana', 'store', 'gas']
     image: ghcr.io/beeman/solana-test-validator@sha256:419e56a8f2aeac073b7218cb16e982f4ad8ac44bec314b06bf6c2bc9f2756561
     security_opt:
       - seccomp=unconfined
@@ -248,7 +273,7 @@ services:
   # needs a writable home for ~/.svm). It used to borrow the connector
   # checkout's packages/contracts, which that repo has deleted.
   anvil:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'evm', 'gas']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
     environment:
@@ -382,7 +407,7 @@ services:
   # Base Sepolia (../onboarder/deploy). Solana has no counterpart: there the
   # receiving connector sponsors the channel itself.
   onboarder:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'evm']
     build: ../onboarder
     # Every value the devnet must set, set here too (infra#33), though each is
     # also the image's sandbox default: the chain, anvil, and the gas payer's
@@ -412,7 +437,7 @@ services:
   # point at it (core's block importer crashes on ArLocal's minimal genesis;
   # that is why gateway.conf sets START_WRITERS=false).
   arlocal:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: textury/arlocal:v1.1.66
     restart: unless-stopped
     ports:
@@ -430,7 +455,7 @@ services:
   # container wipes chain state — a later `make up` re-runs this job and
   # reseeds (see README "Restarting the validator").
   seed-solana:
-    profiles: ['full'] # ARIO mint + ArNS/core initialize — store side only
+    profiles: ['full', 'store'] # ARIO mint + ArNS/core initialize — store side only
     build: .
     restart: 'no'
     environment:
@@ -451,7 +476,7 @@ services:
   # better-sqlite3) against the shared sqlite bind mount. Idempotent
   # (INSERT OR REPLACE of the same row).
   seed-gateway-block:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: 'no'
     entrypoint: ['/bin/sh', '/seed/seed-head-block.sh']
@@ -471,7 +496,7 @@ services:
   # routes 503, which nothing in the sandbox uses.
 
   envoy:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ar-io/ar-io-envoy:a487df83812f30d8753d89d28f45200606c64678
     restart: unless-stopped
     ports:
@@ -511,7 +536,7 @@ services:
       - core
 
   core:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ar-io/ar-io-core:4704625fe2587cdca2c53828dbc5ceefbd22b4b2
     restart: unless-stopped
     ports:
@@ -557,7 +582,7 @@ services:
         condition: service_healthy
 
   redis:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: redis:7
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save "" --appendonly no
     restart: unless-stopped
@@ -573,7 +598,7 @@ services:
   # load-bearing, envoy's cluster targets it by DNS).
 
   upload-service:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ardriveapp/turbo-upload-service:fd1032e3012c0179577b08bbfe932f4ad7d805cd
     restart: on-failure
     env_file:
@@ -607,7 +632,7 @@ services:
         condition: service_completed_successfully
 
   fulfillment-service:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ardriveapp/turbo-upload-service-fulfillment:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     env_file:
@@ -642,7 +667,7 @@ services:
         condition: service_completed_successfully
 
   upload-service-pg:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: postgres:13.8
     restart: on-failure
     environment:
@@ -653,7 +678,7 @@ services:
       - ./data/upload-service-pg:/var/lib/postgresql/data
 
   localstack:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/ardriveapp/turbo-upload-service-localstack:6299f5497f5de479a1fb17ec86b764a4bf018f7b
     restart: on-failure
     ports:
@@ -722,7 +747,7 @@ services:
 
   # One-shot: mock USDC mint + SOL/USDC for every settlement key (Solana leg).
   seed-toon-solana:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'solana', 'gas']
     build: .
     restart: 'no'
     environment:
@@ -752,7 +777,7 @@ services:
   # profile does not run (`payments` has no store or gas station) is skipped
   # by name, and the hub waits on exactly the peers this profile runs.
   open-peerings:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'topology']
     build: .
     restart: 'no'
     environment:
@@ -762,9 +787,36 @@ services:
     volumes:
       - ./keys:/app/keys:ro
     command: ['node', 'scripts/open-peerings.mjs']
+    # Every node that peers, each `required: false`: under an aggregate profile
+    # the hub already starts last (it waits on its own peers, below), and a
+    # topology (`make up-topology`) may run any subset of them, the hub
+    # included — a `POST /peers` to a node that is not serving yet is a 502,
+    # not a retry.
     depends_on:
       relay-connector:
         condition: service_healthy
+        required: false
+      relay2-connector:
+        condition: service_healthy
+        required: false
+      store-connector:
+        condition: service_healthy
+        required: false
+      gas-connector:
+        condition: service_healthy
+        required: false
+      provider-connector:
+        condition: service_healthy
+        required: false
+      provider2-connector:
+        condition: service_healthy
+        required: false
+      dealer-connector:
+        condition: service_healthy
+        required: false
+      anytoon-connector:
+        condition: service_healthy
+        required: false
 
   # LONG-LIVED: the only thing in this sandbox that trades. A Uniswap v3 pool
   # writes an oracle observation in `swap` and nowhere else, and anvil mines a
@@ -779,7 +831,7 @@ services:
   # `credentials` and `full`. NEVER on `payments`: that profile has no
   # converting route at all.
   swap-driver:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'dealer']
     image: ghcr.io/foundry-rs/foundry:v1.8.1
     restart: unless-stopped
     entrypoint: ['/bin/sh', '/seed/swap-driver.sh']
@@ -803,7 +855,7 @@ services:
     # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
     # this is the one destination a paid packet can reach with no peer running
     # — i.e. what makes "a paid request against the hub settles" testable.
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'relay']
     image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
     env_file:
       - conf/relay.conf
@@ -838,7 +890,7 @@ services:
     # `full` only — this is the one service built from a SIBLING CHECKOUT, and
     # keeping it out of `payments` is what lets a payments-only developer work
     # without STORE_CONTEXT existing at all (see Makefile).
-    profiles: ['full']
+    profiles: ['full', 'store']
     build:
       # The store sibling checkout (documented in README prerequisites; `make
       # up` preflights it — `make setup` only notes it, and `make up-payments`
@@ -870,7 +922,7 @@ services:
   # contracts/DeploySandboxExtras.s.sol and conf/gas-station.conf). Handler
   # port 3300 UNPUBLISHED; free /describe + /health surface at host 3400.
   gas-station:
-    profiles: ['full']
+    profiles: ['full', 'gas']
     image: ghcr.io/toon-protocol/gas-station@sha256:93429c3ad170dac358a58e0692037f2bd0071d5d53619c312afa80d359869cf4 # :release, 2026-09
     env_file:
       - conf/gas-station.conf
@@ -934,7 +986,7 @@ services:
   # could not read the original. DEV KEY MATERIAL, valueless, like everything
   # else under keys/ here.
   issuer-keys:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     restart: 'no'
     entrypoint:
@@ -955,7 +1007,7 @@ services:
   # The upstream issuer, UNMODIFIED. Pinned by digest (the `latest` tag is
   # mutable and this stack's env names track the image's config loader).
   issuer:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     env_file:
       # BUNDLE_PRICE — shared verbatim with claim-minter. See the header above.
@@ -1003,7 +1055,7 @@ services:
   # Runs the schema migrations exactly once, then exits, so no issuer ever
   # races another to migrate.
   issuer-migrate:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: ghcr.io/anyone-protocol/credentials-issuer@sha256:50db4db55250508c52f7c31a24d73b1eaac92aa63b537bee2aedce7c616c1c42 # :latest, 2026-09-05
     restart: 'no'
     entrypoint: ['bun', 'run', 'migration:run']
@@ -1019,7 +1071,7 @@ services:
         condition: service_healthy
 
   issuer-postgres:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: app
@@ -1046,7 +1098,7 @@ services:
     logging: *chain-logging
 
   issuer-redis:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: redis:7-alpine
     volumes:
       - issuer-redis-data:/data
@@ -1068,7 +1120,7 @@ services:
   # (exported by the Makefile) if your checkout lives elsewhere. There is no
   # published image for it.
   claim-minter:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     build:
       context: ${ANYTOON_CONTEXT:-../../anytoon}/claim-minter
     env_file:
@@ -1111,11 +1163,11 @@ services:
   # binds IPv4 only and busybox wget resolves ::1 first).
 
   store-connector:
-    profiles: ['full']
+    profiles: ['full', 'store']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-store.toml:/app/config/connector.toml:ro
+      - ${STORE_CONNECTOR_CONF:-./conf/connector-store.toml}:/app/config/connector.toml:ro
       - ./keys/toon/store-connector:/app/data:ro
       - store-connector-state:/app/state
     ports:
@@ -1129,21 +1181,24 @@ services:
     depends_on:
       anvil:
         condition: service_healthy
+        required: false
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
       store:
         condition: service_healthy
     restart: unless-stopped
     logging: *chain-logging
 
   gas-connector:
-    profiles: ['full']
+    profiles: ['full', 'gas']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-gas.toml:/app/config/connector.toml:ro
+      - ${GAS_CONNECTOR_CONF:-./conf/connector-gas.toml}:/app/config/connector.toml:ro
       - ./keys/toon/gas-connector:/app/data:ro
       - gas-connector-state:/app/state
     ports:
@@ -1152,10 +1207,13 @@ services:
     depends_on:
       anvil:
         condition: service_healthy
+        required: false
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
       gas-station:
         condition: service_healthy
     restart: unless-stopped
@@ -1166,7 +1224,7 @@ services:
   # so the claim minter is told who paid (conf/connector-anytoon.toml's header,
   # infra ADR 0003).
   anytoon-connector:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'anytoon']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -1220,7 +1278,7 @@ services:
   # has the settlement tables, the quote and the guards. Sandbox-only: the
   # devnet has no anytoon, so it has no dealer.
   dealer-connector:
-    profiles: ['credentials', 'full']
+    profiles: ['credentials', 'full', 'dealer']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
@@ -1259,7 +1317,7 @@ services:
   # reference@digest. Handler port 8080 is UNPUBLISHED, like every other
   # app's paid port here — only provider-connector dials it.
   provider:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider']
     build:
       # The provider sibling checkout (toon-protocol/provider). Relative so
       # the file stays portable; only `payments` and `full` render it.
@@ -1303,14 +1361,14 @@ services:
   # `toon-channel` claims this connector refuses. `make up-payments` and
   # `make up` check the checkout first (require-provider-publisher).
   directory-publisher:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider']
     build:
       context: ${PROVIDER_CONTEXT:-../../provider}
       dockerfile: tools/publisher/Dockerfile
     environment:
       TOON_CONNECTOR_URL: http://relay-connector:3000
-      TOON_CHAIN: solana
-      TOON_RPC_URL: http://solana-validator:8899
+      TOON_CHAIN: ${PUBLISHER_CHAIN:-solana}
+      TOON_RPC_URL: ${PUBLISHER_RPC_URL:-http://solana-validator:8899}
       # anvil's published test phrase, like every other key here.
       TOON_MNEMONIC: 'test test test test test test test test test test test junk'
       TOON_ACCOUNT_INDEX: '1'
@@ -1334,19 +1392,24 @@ services:
     depends_on:
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
+      anvil:
+        condition: service_healthy
+        required: false
       relay-connector:
         condition: service_healthy
     restart: unless-stopped
     logging: *chain-logging
 
   provider-connector:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-provider.toml:/app/config/connector.toml:ro
+      - ${PROVIDER_CONNECTOR_CONF:-./conf/connector-provider.toml}:/app/config/connector.toml:ro
       - ./keys/toon/provider-connector:/app/data:ro
       - provider-connector-state:/app/state
     ports:
@@ -1355,10 +1418,13 @@ services:
     depends_on:
       anvil:
         condition: service_healthy
+        required: false
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
       provider:
         condition: service_healthy
     restart: unless-stopped
@@ -1378,7 +1444,7 @@ services:
   #
   # Same image, same build context as `provider` — one checkout, two configs.
   provider2:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider2']
     build:
       context: ${PROVIDER_CONTEXT:-../../provider}
     volumes:
@@ -1406,14 +1472,14 @@ services:
   # committed test phrase, with its own wallet, its own channel and its own
   # watermark volume. scripts/seed-toon-solana.mjs funds it by address.
   directory-publisher2:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider2']
     build:
       context: ${PROVIDER_CONTEXT:-../../provider}
       dockerfile: tools/publisher/Dockerfile
     environment:
       TOON_CONNECTOR_URL: http://relay-connector:3000
-      TOON_CHAIN: solana
-      TOON_RPC_URL: http://solana-validator:8899
+      TOON_CHAIN: ${PUBLISHER_CHAIN:-solana}
+      TOON_RPC_URL: ${PUBLISHER_RPC_URL:-http://solana-validator:8899}
       TOON_MNEMONIC: 'test test test test test test test test test test test junk'
       TOON_ACCOUNT_INDEX: '2'
       TOON_DEPOSIT: '10000000' # 10 mock USDC at 6 dp; a write costs 1 unit
@@ -1426,8 +1492,13 @@ services:
     depends_on:
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
+      anvil:
+        condition: service_healthy
+        required: false
       relay-connector:
         condition: service_healthy
     restart: unless-stopped
@@ -1439,11 +1510,11 @@ services:
   # `.standby` and `.standby.extend` rows conf/provider2.toml's `warm` tier
   # prices (spec §7) — and accepts the relay-provider2 peering.
   provider2-connector:
-    profiles: ['payments', 'full']
+    profiles: ['payments', 'full', 'provider2']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-provider2.toml:/app/config/connector.toml:ro
+      - ${PROVIDER2_CONNECTOR_CONF:-./conf/connector-provider2.toml}:/app/config/connector.toml:ro
       - ./keys/toon/provider2-connector:/app/data:ro
       - provider2-connector-state:/app/state
     ports:
@@ -1452,10 +1523,13 @@ services:
     depends_on:
       anvil:
         condition: service_healthy
+        required: false
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
       provider2:
         condition: service_healthy
     restart: unless-stopped
@@ -1466,11 +1540,11 @@ services:
   # both ends of every peering serving: a `POST /peers` reads the other node's
   # self-description, and one that is not up yet is a 502, not a retry.
   relay-connector:
-    profiles: ['payments', 'credentials', 'full']
+    profiles: ['payments', 'credentials', 'full', 'relay']
     image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
     command: ['/app/config/connector.toml']
     volumes:
-      - ./conf/connector-relay.toml:/app/config/connector.toml:ro
+      - ${RELAY_CONNECTOR_CONF:-./conf/connector-relay.toml}:/app/config/connector.toml:ro
       - ./keys/toon/relay-connector:/app/data:ro
       - relay-connector-state:/app/state
     ports:
@@ -1479,10 +1553,13 @@ services:
     depends_on:
       anvil:
         condition: service_healthy
+        required: false
       solana-validator:
         condition: service_healthy
+        required: false
       seed-toon-solana:
         condition: service_completed_successfully
+        required: false
       relay:
         condition: service_healthy
       # `required: false` ONLY so the `payments` and `credentials` profiles
@@ -1510,6 +1587,60 @@ services:
       dealer-connector:
         condition: service_healthy
         required: false
+    restart: unless-stopped
+    logging: *chain-logging
+
+  # ── THE SECOND RELAY NODE — profile `relay2` only (`make up-topology`) ────
+  # A second relay behind a second connector, whole: its own Nostr identity
+  # (conf/relay2.conf), its own ILP addresses (g.toon.relay2*), its own keys,
+  # client edge (:3290), read port (:7110) and volumes. It is what lets a
+  # topology have two relay nodes — `make up-topology NODES="relay relay2"` —
+  # and NO AGGREGATE PROFILE RUNS IT: `make up` starts exactly what it did.
+  # Beside the hub it is one more spoke (the `relay-relay2` peering,
+  # scripts/peerings.mjs); alone it is a relay a client pays directly.
+  relay2:
+    profiles: ['relay2']
+    image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
+    env_file:
+      - conf/relay2.conf
+    volumes:
+      - relay2-data:/data
+    expose:
+      - '3100' # writes — PRIVATE, only relay2-connector dials this
+    ports:
+      - '7110:7100' # free NIP-01 reads
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    logging: *chain-logging
+
+  relay2-connector:
+    profiles: ['relay2']
+    image: ghcr.io/toon-protocol/connector@sha256:e83ad0cdfdb0a7b59e071dcbd0ee0895ab0ad0327b1afd6fa9b32988bb83960c # rust-2026.09.29.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ${RELAY2_CONNECTOR_CONF:-./conf/connector-relay2.toml}:/app/config/connector.toml:ro
+      - ./keys/toon/relay2-connector:/app/data:ro
+      - relay2-connector-state:/app/state
+    ports:
+      - '3290:3000'
+    healthcheck: *connector-healthcheck
+    depends_on:
+      anvil:
+        condition: service_healthy
+        required: false
+      solana-validator:
+        condition: service_healthy
+        required: false
+      seed-toon-solana:
+        condition: service_completed_successfully
+        required: false
+      relay2:
+        condition: service_healthy
     restart: unless-stopped
     logging: *chain-logging
 
@@ -1711,7 +1842,7 @@ services:
   # Same image as `anon` — it carries socat for exactly this (see anon/Dockerfile)
   # — so the profile builds one image and pulls no second one.
   hs-ingress:
-    profiles: ['hs']
+    profiles: ['hs', 'hidden']
     build:
       context: ./anon
     image: toon-sandbox-anon:v0.4.10.2
@@ -1732,6 +1863,16 @@ services:
         # reliably build. conf/anonrc says it at length.
         socat -d TCP-LISTEN:3200,bind=127.0.0.1,fork,reuseaddr TCP:relay-connector:3000 &
         socat -d TCP-LISTEN:7100,bind=127.0.0.1,fork,reuseaddr TCP:relay:7100 &
+        # 3290 -> the second relay node's client edge and 7110 -> its relay's
+        # websocket; 8899 / 8900 -> the validator's JSON-RPC and pubsub. For a
+        # HIDDEN TOPOLOGY (`make up-topology HS="relay relay2"`): a relay node
+        # reached only at this address, by a buyer whose Solana RPC rides the
+        # same circuit as its EVM RPC already does on 8545. Each target is
+        # resolved per connection, so one that is not running costs nothing.
+        socat -d TCP-LISTEN:3290,bind=127.0.0.1,fork,reuseaddr TCP:relay2-connector:3000 &
+        socat -d TCP-LISTEN:7110,bind=127.0.0.1,fork,reuseaddr TCP:relay2:7100 &
+        socat -d TCP-LISTEN:8899,bind=127.0.0.1,fork,reuseaddr TCP:solana-validator:8899 &
+        socat -d TCP-LISTEN:8900,bind=127.0.0.1,fork,reuseaddr TCP:solana-validator:8900 &
         wait
     restart: unless-stopped
     logging: *chain-logging
@@ -1750,7 +1891,7 @@ services:
   # compose cannot express. `make up-hs` orders them: this daemon first, because
   # its address has to exist before the connector's config can be rendered.
   anon:
-    profiles: ['hs']
+    profiles: ['hs', 'hidden']
     build:
       context: ./anon
     image: toon-sandbox-anon:v0.4.10.2
@@ -1797,7 +1938,7 @@ services:
   # `anytoon-connector` or `anvil` directly makes the shortcut impossible as
   # well as unused, which is what makes smoke-hs proof rather than assertion.
   anon-client:
-    profiles: ['hs']
+    profiles: ['hs', 'hidden']
     build:
       context: ./anon
     image: toon-sandbox-anon:v0.4.10.2
@@ -2262,6 +2403,10 @@ volumes:
   envoy-eds-data:
   relay-data:
   relay-connector-state:
+  # The second relay node's (`relay2` profile): its events, and its connector's
+  # journals and runtime peerings.
+  relay2-data:
+  relay2-connector-state:
   store-connector-state:
   gas-connector-state:
   anytoon-connector-state:
