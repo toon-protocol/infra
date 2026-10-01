@@ -29,6 +29,9 @@ export const NODES = {
   // `credentials` and `full` profiles' only.
   'dealer-connector': { url: 'http://dealer-connector:3000/ilp', port: 3270 },
   'anytoon-connector': { url: 'http://anytoon-connector:3000/ilp', port: 3230 },
+  // The second relay node, which only a topology runs (`make up-topology
+  // NODES="relay relay2"`, scripts/lib/topology.mjs).
+  'relay2-connector': { url: 'http://relay2-connector:3000/ilp', port: 3290 },
 };
 
 // What every channel is OPENED with, in 6-decimal USDC base units: 1 USDC,
@@ -60,6 +63,12 @@ export const CHANNEL_TARGET = 100_000_000n;
 // token, and the price has to cover the payee's at the worst rate instead
 // (scripts/lib/dealer-pricing.mjs).
 //
+// `fallback` is the chain a peering opens on when one of its two nodes does
+// not settle on `chain` — a topology run with `CHAINS=evm`. Every USDC row has
+// one: the FiatToken on anvil and the mock mint on the validator are both
+// six-decimal USDC, so every figure on the row holds on either. The Dealer's
+// two rows have none; it runs on both chains or not at all.
+//
 // Optional per peering: `target` (what the payer keeps behind its channel, in
 // that channel's base units; default CHANNEL_TARGET), `max_packet_amount`
 // (default: the connector's, one USDC; snake_case because it is the wire
@@ -73,6 +82,7 @@ export const PEERINGS = [
     payer: 'relay-connector',
     payee: 'store-connector',
     chain: 'solana',
+    fallback: 'evm',
     fee: 100,
     // The store charges {base=1000, per_kib=10}: base 1100 - 100 == 1000 at
     // every payload size, and the per-KiB part is forwarded untouched.
@@ -83,6 +93,7 @@ export const PEERINGS = [
     payer: 'relay-connector',
     payee: 'gas-connector',
     chain: 'solana',
+    fallback: 'evm',
     fee: 100,
     routes: [{ prefix: 'g.toon.gastation', price: 1100 }],
   },
@@ -91,6 +102,7 @@ export const PEERINGS = [
     payer: 'relay-connector',
     payee: 'provider-connector',
     chain: 'solana',
+    fallback: 'evm',
     fee: 100,
     routes: providerRoutes('g.toon.provider', { ci: true }),
   },
@@ -101,8 +113,25 @@ export const PEERINGS = [
     payer: 'relay-connector',
     payee: 'provider2-connector',
     chain: 'solana',
+    fallback: 'evm',
     fee: 100,
     routes: providerRoutes('g.toon.provider2', { ci: false }),
+  },
+  {
+    // THE SECOND RELAY: one more spoke, when a topology runs both relay nodes.
+    // A write to it through the hub costs its 1 plus the fee; its free
+    // ephemeral lane costs the fee, for the reason a provider's free rows do
+    // (see providerRoutes below).
+    id: 'relay-relay2',
+    payer: 'relay-connector',
+    payee: 'relay2-connector',
+    chain: 'solana',
+    fallback: 'evm',
+    fee: 100,
+    routes: [
+      { prefix: 'g.toon.relay2', price: 101 },
+      { prefix: 'g.toon.relay2.ephemeral', price: 100 },
+    ],
   },
   {
     // THE ANYONE CREDENTIALS, hub -> Dealer at par (infra#42, infra ADR 0003):

@@ -124,6 +124,19 @@ HiddenServicePort 8545 127.0.0.1:8545
 HiddenServicePort 3200 127.0.0.1:3200
 HiddenServicePort 7100 127.0.0.1:7100
 
+# PORTS 3290, 7110, 8899 AND 8900 — A HIDDEN TOPOLOGY (`make up-topology
+# HS="relay relay2"`, scripts/lib/topology.mjs). A relay node run as a hidden
+# service publishes `http://<addr>.anyone:<its port>/ilp`: 3200 above is the
+# hub's, 3290 the second relay node's, and 7110 that node's relay, as 7100 is
+# the first's. 8899 and 8900 are the validator's JSON-RPC and pubsub, for the
+# reason 8545 is anvil's: a buyer paying on Solana reads the chain over the
+# same circuit it pays on. All four are the shared loopback again; a target
+# that is not running refuses the connection and nothing else.
+HiddenServicePort 3290 127.0.0.1:3290
+HiddenServicePort 7110 127.0.0.1:7110
+HiddenServicePort 8899 127.0.0.1:8899
+HiddenServicePort 8900 127.0.0.1:8900
+
 # Twice, deliberately: stdout is where `docker compose logs` reads, and the file
 # is what the healthcheck greps for `Bootstrapped 100%`. A container that is Up
 # is not a container that has a circuit.

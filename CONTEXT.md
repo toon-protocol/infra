@@ -15,6 +15,10 @@ _Avoid_: local devnet, dev stack
 The public TOON network on public testnets (Base Sepolia, Solana devnet), which anybody can reach and the console leases from.
 _Avoid_: testnet, staging, the fleet
 
+**Topology**:
+A Sandbox run with only the Nodes named, settling only on the chains named, and with the Nodes named as hidden reached only over a hidden service.
+_Avoid_: profile (compose's mechanism for it), stack, custom sandbox
+
 ### Where things run
 
 **Host**:
@@ -45,6 +49,7 @@ _Avoid_: facilitator (x402's word for it), gas station (which relays operations 
 
 ### Relationships
 
+- A **Topology** is a star: the relay Node named `relay` is the hub every other Node in it is peered to, and a Node run without the hub is paid at its own edge.
 - A **Host** runs one **Edge** and any number of **Nodes**.
 - A **Node** that accepts payment on EVM names the **Onboarder** its payers deposit through (connector ADR 0076).
 - A **Node** has exactly one connector; nodes are never merged into a shared connector, because each one's seal key is pinned by what it publishes.

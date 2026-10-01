@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 
 import { NODES, PEERINGS, OPEN_DEPOSIT, CHANNEL_TARGET } from '../peerings.mjs';
 import { forwarded, readSpread, worstRate } from './dealer-pricing.mjs';
-import { binds, peerBody, presentPeerings, readTerminatedRoutes, topUp } from './peering-plan.mjs';
+import { binds, peerBody, peeringChain, presentPeerings, readTerminatedRoutes, topUp } from './peering-plan.mjs';
 
 const conf = (node) => readFileSync(new URL(`../../conf/${node.replace(/-connector$/, '').replace(/^/, 'connector-')}.toml`, import.meta.url), 'utf8');
 const flat = (price) => (typeof price === 'number' ? { base: price, per_kib: 0 } : price);
@@ -100,13 +100,48 @@ test('the dealer opens its ANYONE channel with an ANYONE target and a cap in ANY
 });
 
 test('every peering names two nodes the table knows, on a chain both settle on', () => {
-  for (const { id, payer, payee, chain } of PEERINGS) {
+  for (const { id, payer, payee, chain, fallback } of PEERINGS) {
     assert.ok(NODES[payer] && NODES[payee], `${id} names an unknown node`);
     assert.ok(['evm', 'solana'].includes(chain), `${id}: chain ${chain}`);
     for (const node of [payer, payee]) {
       assert.match(conf(node), new RegExp(`^\\[settlement\\.${chain}\\]$`, 'm'), `${node} has no [settlement.${chain}]`);
     }
+    // A fallback is the same USDC on the other chain: both nodes settle
+    // there too, and in six decimals, so the row's figures hold unconverted.
+    if (fallback === undefined) continue;
+    assert.notEqual(fallback, chain, `${id}: the fallback is the chain itself`);
+    for (const node of [payer, payee]) {
+      for (const on of [chain, fallback]) {
+        const table = conf(node).split(new RegExp(`^\\[settlement\\.${on}\\]$`, 'm'))[1]?.split(/^\[/m)[0];
+        assert.match(table ?? '', /^decimals = 6$/m, `${id}: ${node} does not settle six-decimal USDC on ${on}`);
+      }
+    }
   }
+});
+
+test('a peering opens on its own chain, on its fallback when a topology left that out, and otherwise nowhere', () => {
+  const store = PEERINGS.find((p) => p.id === 'relay-store');
+  const both = new Set(['evm', 'solana']);
+  assert.equal(peeringChain(store, both, both), 'solana');
+  assert.equal(peeringChain(store, new Set(['evm']), new Set(['evm'])), 'evm');
+  assert.equal(peeringChain(store, both, new Set(['evm'])), 'evm');
+  assert.equal(peeringChain(store, new Set(['solana']), new Set(['evm'])), null);
+  // The Dealer's rows have no fallback: its EVM token is ANYONE, not USDC.
+  for (const id of ['relay-dealer', 'dealer-anytoon']) {
+    const row = PEERINGS.find((p) => p.id === id);
+    assert.equal(row.fallback, undefined, id);
+    assert.equal(peeringChain(row, both, both), row.chain);
+    assert.equal(peeringChain(row, new Set([row.chain === 'evm' ? 'solana' : 'evm']), both), null);
+  }
+  // Every other row is USDC at par, and has one.
+  for (const row of PEERINGS.filter((p) => !p.id.includes('dealer'))) assert.equal(row.fallback, 'evm', row.id);
+});
+
+test('the body names the chain the peering opens on, not only the row’s own', () => {
+  const store = PEERINGS.find((p) => p.id === 'relay-store');
+  assert.equal(JSON.parse(peerBody(store, 'payer', NODES, 'evm')).chain, 'evm');
+  assert.equal(JSON.parse(peerBody(store, 'payee', NODES, 'evm')).chain, 'evm');
+  assert.equal(JSON.parse(peerBody(store, 'payer', NODES)).chain, 'solana');
 });
 
 test('the payee binds first, with a reverse leg that carries nothing', () => {
@@ -145,7 +180,13 @@ test('a peering whose payee this profile does not run is skipped, not failed', (
   const present = new Set(['relay-connector', 'provider-connector', 'provider2-connector']);
   const { run, skipped } = presentPeerings(PEERINGS, present);
   assert.deepEqual(run.map((p) => p.id), ['relay-provider', 'relay-provider2']);
-  assert.deepEqual(skipped.map((p) => p.id), ['relay-store', 'relay-gas', 'relay-dealer', 'dealer-anytoon']);
+  assert.deepEqual(skipped.map((p) => p.id), ['relay-store', 'relay-gas', 'relay-relay2', 'relay-dealer', 'dealer-anytoon']);
+});
+
+test('two relay nodes alone run the one peering between them', () => {
+  const { run } = presentPeerings(PEERINGS, new Set(['relay-connector', 'relay2-connector']));
+  assert.deepEqual(run.map((p) => p.id), ['relay-relay2']);
+  assert.deepEqual(presentPeerings(PEERINGS, new Set(['relay2-connector'])).run, []);
 });
 
 test('the route reader takes flat and metered prices, and skips forwarded rows', () => {
