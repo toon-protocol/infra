@@ -26,12 +26,17 @@
 //      order is `make up-hs`'s, for its reason: a `POST /peers` dials what the
 //      other node publishes, so the peerings are opened on compose names
 //      first, and a runtime peering outlives the restart.
+//
+// A RELAY FOLLOWS ITS CONNECTOR through 3 and 4: its information document is
+// its connector's self-description, re-read only every five minutes, so a
+// connector that comes back on another config — recreated in 3, restarted in
+// 4 — has its relay restarted behind it (`relaysBehind`, infra#51).
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { NODE_KINDS, RENDER_DIR, hiddenEndpoint, planTopology, renderConf } from './lib/topology.mjs';
+import { NODE_KINDS, RENDER_DIR, hiddenEndpoint, planTopology, relaysBehind, renderConf } from './lib/topology.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_FILE = 'conf/.rendered/topology.env';
@@ -192,7 +197,20 @@ async function up(topology) {
   // recreate the daemon and throw away its circuits (see `make up-hs`).
   say('');
   compose(['build']);
+  // A relay that stays up while its connector is replaced — removed above, or
+  // recreated by compose because it now mounts another file — would go on
+  // publishing what the old one said: it starts again behind the new one.
+  const relayConnectors = topology.nodes.filter((node) => NODE_KINDS[node].relay).map((node) => NODE_KINDS[node].connector);
+  const containers = () => Object.fromEntries([...relayConnectors, ...relaysBehind(relayConnectors)].map((service) => [service, containerOf(service)]));
+  const before = containers();
   compose(['up', '-d']);
+  const after = containers();
+  const outlived = relaysBehind(relayConnectors.filter((connector) => after[connector] !== before[connector]))
+    .filter((relay) => before[relay] && after[relay] === before[relay]);
+  if (outlived.length > 0) {
+    say(`\nrestarting behind a new connector: ${outlived.join(', ')}`);
+    compose(['restart', ...outlived]);
+  }
   say('\nwaiting for the peerings');
   await waitCompleted('open-peerings', 10);
 
@@ -210,6 +228,14 @@ async function up(topology) {
     const connectors = topology.hidden.map((node) => NODE_KINDS[node].connector);
     compose(['restart', ...connectors]);
     await waitHealthy(connectors, 2);
+    // And the relays behind them, once their connectors answer on the new
+    // endpoint: restarted together, a relay could read the old one first.
+    // (Guarded: a `restart` naming no service restarts every one.)
+    const relays = relaysBehind(connectors);
+    if (relays.length > 0) {
+      compose(['restart', ...relays]);
+      await waitHealthy(relays, 2);
+    }
   }
 
   say('\nup.');

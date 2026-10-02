@@ -7,7 +7,15 @@
 //   1. every node publishes x402 terms on exactly the chains it was started
 //      on, at the endpoint it should: its compose name, or — a hidden node —
 //      its virtual port on the daemon's `.anyone` address.
-//   2. EACH RELAY NODE, ON EACH CHAIN IT SETTLES ON, takes a PAID write from a
+//   2. each relay node's INFORMATION DOCUMENT (`GET /` on its read port, asked
+//      with `Accept: application/nostr+json`) carries a `toon` object saying
+//      where a write to it is paid, and it says what that node's connector
+//      says: its own write address, the endpoint and seal key the connector
+//      publishes, the price it charges for the route, and settlement on
+//      exactly the chains the topology was started with. Held to the
+//      connector's answer, read where the document sends a client, and never
+//      to a literal (scripts/lib/relay-document.mjs).
+//   3. EACH RELAY NODE, ON EACH CHAIN IT SETTLES ON, takes a PAID write from a
 //      channel this script opens against it; its relay returns the event, and
 //      the node's own book holds the voucher. On EVM the payer is a fresh
 //      wallet with USDC and no ETH, depositing through the Onboarder; on
@@ -15,19 +23,19 @@
 //      node is paid over the circuit — packets, sponsor endpoint and chain RPC
 //      all through the SOCKS proxy — from a wallet that pays its own EVM gas,
 //      because the Onboarder is not published on the hidden service.
-//   3. with both relay nodes, a write to the second is paid THROUGH the hub:
+//   4. with both relay nodes, a write to the second is paid THROUGH the hub:
 //      the second relay returns it, and its book on the hub's peering channel
 //      moves by its own price.
-//   4. every peering with both ends running is established on the chain the
+//   5. every peering with both ends running is established on the chain the
 //      two nodes share, collateralised, and routed at the hub.
 //
 // What it does NOT prove is the apps behind the other nodes — a stored blob, a
 // spawned workload, a bundle of credentials. Those are `make smoke`,
 // `smoke-payments` and `smoke-credentials`, against the profiles they name.
 //
-// Two operator-side checks reach a hidden node on its HOST port (what it
-// publishes, and its claim book): out-of-band reads no buyer makes. Every
-// byte of the payment itself goes over the circuit.
+// Three operator-side checks reach a hidden node on its HOST ports (what it
+// publishes, its relay's document, and its claim book): out-of-band reads no
+// buyer makes. Every byte of the payment itself goes over the circuit.
 //
 // EXIT 75 (EX_TEMPFAIL), as `make smoke-hs`: a hidden node's step failed in
 // the carriage — the REAL Anyone network did not carry — and not in this
@@ -40,7 +48,8 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { InMemoryChannelStore, ToonClient } from '@toon-protocol/client';
 import { Contract, JsonRpcProvider, Wallet, HDNodeWallet } from 'ethers';
 
-import { hostFetch } from './lib/sandbox-endpoints.mjs';
+import { hostFetch, hostUrl } from './lib/sandbox-endpoints.mjs';
+import { RELAY_DOCUMENT_ACCEPT, documentProblems } from './lib/relay-document.mjs';
 import { NODES, PEERINGS } from './peerings.mjs';
 import { peeringChain } from './lib/peering-plan.mjs';
 import { NODE_KINDS, hiddenEndpoint } from './lib/topology.mjs';
@@ -68,6 +77,11 @@ const DEPOSIT = 5_000_000n; // 5 USDC, above every node's 1 USDC Solana minimum
 // 0 is `make smoke`'s buyer, 1-4 the publishers' and the handover's, 5 and 6
 // smoke-hs's and smoke-m4's.
 const HIDDEN_EVM_ACCOUNT = 7;
+// How long a relay is given to publish what its connector says. A relay
+// starts BEFORE its connector, so its first read of its connector fails and is
+// retried five seconds later: a smoke run straight after `make up-topology`
+// can arrive inside that window.
+const DOCUMENT_WAIT_MS = 30_000;
 
 let failures = 0;
 let carriage = 0;
@@ -204,9 +218,68 @@ for (const [node, endpoint] of Object.entries(topology.hidden)) {
   assert(endpoint === hiddenEndpoint(topology.address, NODE_KINDS[node].hsPort), `${node}'s hidden endpoint is its virtual port ${NODE_KINDS[node].hsPort} on ${topology.address}`);
 }
 
-// ── 2. each relay node, on each chain ────────────────────────────────────
+// ── 2. each relay node's information document ────────────────────────────
 const relays = topology.nodes.filter((node) => NODE_KINDS[node].relay);
-if (relays.length > 0) step('2. each relay node takes a paid write on each chain it settles on');
+if (relays.length > 0) step('2. each relay node’s information document says where a write is paid, as its connector does');
+// One reading: the relay's document, and the self-description of the
+// connector it names — which has to be the node's own, at the endpoint that
+// connector publishes — read where the document sends a client: for a compose
+// name, the host port the sandbox publishes it on. A hidden node's `.anyone`
+// endpoint is not rewritten; its connector is read on its host port, as in
+// step 1.
+async function readDocument(node) {
+  const { address, readPort } = NODE_KINDS[node].relay;
+  let document;
+  try {
+    const res = await fetch(`http://localhost:${readPort}/`, { headers: { accept: RELAY_DOCUMENT_ACCEPT } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    document = await res.json();
+  } catch (e) {
+    return { problems: [`its relay serves no information document at http://localhost:${readPort}/ (Accept: ${RELAY_DOCUMENT_ACCEPT}) — ${e.message}`] };
+  }
+  const toon = document?.toon;
+  if (typeof toon !== 'object' || toon === null) return { problems: documentProblems(document, undefined, address) };
+  const own = topology.hidden[node] ?? NODES[NODE_KINDS[node].connector].url;
+  if (toon.connector_url !== own) return { problems: [`its document sends a write to the connector ${toon.connector_url}, not to its own at ${own}`] };
+  const at = topology.hidden[node] ? `${edge(node)}/ilp` : hostUrl(toon.connector_url);
+  try {
+    const res = await fetch(at);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return { toon, problems: documentProblems(document, await res.json(), address) };
+  } catch (e) {
+    return { problems: [`its document names the connector ${toon.connector_url}, which does not answer the host at ${at} — ${e.message}`] };
+  }
+}
+const published = {};
+for (const node of relays) {
+  const { readPort } = NODE_KINDS[node].relay;
+  const deadline = Date.now() + DOCUMENT_WAIT_MS;
+  let reading;
+  for (;;) {
+    reading = await readDocument(node);
+    if (reading.problems.length === 0 || Date.now() >= deadline) break;
+    await sleep(2000);
+  }
+  if (reading.problems.length > 0) {
+    for (const problem of reading.problems) bad(`${node}: ${problem}`);
+    continue;
+  }
+  const { toon } = reading;
+  published[node] = toon;
+  ok(`${node}: its relay (:${readPort}) says a write is paid at ${toon.ilp_address}, ${toon.price} per write, sealed to ${toon.connector_seal_key.slice(0, 18)}… — address, price, seal key and settlement as its connector describes them`);
+  ok(`${node}: it is paid at ${toon.connector_url}, ${topology.hidden[node] ? 'its .anyone endpoint' : `its own connector, which the host reaches at ${hostUrl(toon.connector_url)}`}`);
+  const chains = [...new Set(toon.settlement.map((s) => chainOf(s.network)))].sort();
+  assert(chains.join() === [...topology.chainsOf[node]].sort().join(),
+    `${node}: it lists settlement on ${chains.join(' + ') || 'nothing'} (selected: ${topology.chainsOf[node].join(' + ')})`);
+}
+if (Object.keys(published).length === 2) {
+  const [a, b] = Object.values(published);
+  assert(a.ilp_address !== b.ilp_address && a.connector_url !== b.connector_url && a.connector_seal_key !== b.connector_seal_key,
+    `the two relay nodes name different addresses, connectors and seal keys: ${a.ilp_address} at ${a.connector_url}, ${b.ilp_address} at ${b.connector_url}`);
+}
+
+// ── 3. each relay node, on each chain ────────────────────────────────────
+if (relays.length > 0) step('3. each relay node takes a paid write on each chain it settles on');
 let hubClient;
 for (const node of relays) {
   const { address, readPort } = NODE_KINDS[node].relay;
@@ -231,7 +304,7 @@ for (const node of relays) {
         after = watermark(await operatorRead(node, '/claims'), key);
       }
       assert(price !== null && after - before === price, `${node}'s book on that channel rose by its price, ${price} (${before} -> ${after})`);
-      // The hub's first client is kept for step 3.
+      // The hub's first client is kept for step 4.
       if (node === 'relay' && !hubClient) { hubClient = client; client = undefined; }
     } catch (e) {
       failed(node, `${node} on ${chain}`, e);
@@ -241,10 +314,10 @@ for (const node of relays) {
   }
 }
 
-// ── 3. the second relay, through the hub ─────────────────────────────────
+// ── 4. the second relay, through the hub ─────────────────────────────────
 const TO_RELAY2 = PEERINGS.find((p) => p.id === 'relay-relay2');
 if (relays.length === 2 && hubClient) {
-  step('3. a write to the second relay is paid through the hub');
+  step('4. a write to the second relay is paid through the hub');
   try {
     const { address, readPort } = NODE_KINDS.relay2.relay;
     const hubKey = described.relay2?.batchSettlements?.map((b) => b.payTo.toLowerCase()) ?? [];
@@ -278,9 +351,9 @@ if (relays.length === 2 && hubClient) {
 }
 await hubClient?.close?.().catch(() => {});
 
-// ── 4. the peerings ──────────────────────────────────────────────────────
+// ── 5. the peerings ──────────────────────────────────────────────────────
 const peerings = PEERINGS.filter((p) => topology.nodes.includes(nodeOf(p.payer)) && topology.nodes.includes(nodeOf(p.payee)));
-if (peerings.length > 0) step('4. every peering with both ends running is open, collateralised and routed');
+if (peerings.length > 0) step('5. every peering with both ends running is open, collateralised and routed');
 for (const peering of peerings) {
   const payer = nodeOf(peering.payer);
   const payee = nodeOf(peering.payee);

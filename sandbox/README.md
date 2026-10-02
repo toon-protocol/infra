@@ -638,10 +638,46 @@ make smoke-topology                                       # prove whatever is ru
   changed is recreated on it, and the peerings reopen on the chain both ends
   now share; `make clean` first is still the unambiguous start, since a
   journal otherwise keeps the channels of the chain a node left.
+- **A relay node says where a write to it is paid.** Its relay answers a
+  plain `GET /` on the read port, asked with
+  `Accept: application/nostr+json`, with the relay information document, and
+  the document's `toon` object says where a write to that node is paid:
+
+  ```bash
+  curl -s -H 'Accept: application/nostr+json' http://localhost:7100/ | jq .toon
+  # { "ilp_address": "g.toon.relay",
+  #   "connector_url": "http://relay-connector:3000/ilp",
+  #   "connector_seal_key": "0x0437…",
+  #   "price": 1,
+  #   "settlement": [ { "network": "eip155:31337", "asset": "0x0a86…" } ] }
+  ```
+
+  The relay is told two things — its connector and the one address whose
+  route reaches its `POST /write` (`TOON_CONNECTOR_URL` and
+  `TOON_WRITE_ILP_ADDRESS`, `conf/relay.conf` and `conf/relay2.conf`) — and
+  reads the rest off that connector's free `GET /ilp`, so the price, the seal
+  key and the settlement terms are the connector's own and list only the
+  chains the topology was started with. `connector_url` is what the connector
+  **publishes**: its compose-network name, or a hidden node's `.anyone`
+  endpoint. A reader on the host moves a compose name onto the host with
+  `hostUrl` / `hostFetch` (`scripts/lib/sandbox-endpoints.mjs`), as the smokes
+  do for everything else a node publishes; the sandbox does not publish
+  host-reachable endpoints. The relay re-reads its connector every five
+  minutes (every five seconds until the first answer, which is the few
+  seconds after boot in which the document has no `toon` object yet), so
+  `up-topology` restarts a relay together with a connector it restarts on
+  another config. Anything else that restarts a connector on other terms —
+  `make up` straight after a one-chain topology — leaves the document on the
+  old ones for up to five minutes.
 
 `make smoke-topology` reads what `up-topology` recorded and asserts the
 selection: nothing else runs; every node publishes x402 terms on exactly its
-chains; each relay node takes a paid write on each of them (gasless through
+chains; each relay node's information document carries a `toon` object that
+says what that node's connector says — its own write address, the endpoint
+and seal key the connector publishes, the price it charges for the route and
+settlement on exactly the selected chains, compared with the connector's
+answer and never with a literal, and named by node when it is missing or
+disagrees; each relay node takes a paid write on each of them (gasless through
 the Onboarder on EVM, sponsored by the node on Solana, over the circuit when
 hidden) and its book moves by its price; a write to the second relay paid
 through the hub lands; and every peering is open, collateralised and routed.
@@ -657,6 +693,17 @@ It does not exercise the apps behind the other nodes — the profile smokes do.
 | `NODES="relay relay2" CHAINS=solana` | the same on Solana — started on top of the run above, with no `make clean` between |
 | `NODES="relay relay2" HS=relay` | the hub paid over the real Anyone network on both chains, and `relay2` still reached through it |
 | `NODES="relay provider" CHAINS=evm` | the directory publisher paying the hub from an EVM channel; Profile, Listings and Liveness accepted |
+
+The information-document step (infra#51) was added on the relay image that
+serves the document (2.3.1) and passed for `NODES=relay`, for
+`NODES="relay relay2"` on `evm` and then on `solana`, and for
+`NODES="relay relay2" HS=relay`, where the hub's document names its `.anyone`
+endpoint. It also failed where it should: with `relay2-connector` stopped,
+naming `relay2`; and for a hub brought back from hidden while its relay kept
+running, whose document still named the `.anyone` endpoint — which is why
+`up-topology` now restarts a relay behind a connector it replaces. On the same
+image `make up-payments` + `make smoke-payments` and `make up` + `make smoke`
+passed unchanged.
 
 Not run as topology selections: `gas`, `anytoon`, `dealer`, `provider2`, and
 `HS=relay2`. They are wired the same way and held to the committed files by
@@ -1190,8 +1237,8 @@ The admission round itself does not cross the circuit — the hidden provider's
 | `provider2-connector` | TOON connector terminating `g.toon.provider2.*` — the SECOND provider's, on its own peering with the hub. Same rows as the first, plus the two the `warm` tier prices: `.standby` and `.standby.extend` at 400 (spec §7) | 3250 (client edge) |
 | `provider2` | the SECOND compute provider (TOON_Network #34, Milestone 3), the same image and the same host daemon as `provider`, with its own config (`conf/provider2.toml`), its own Nostr identity, its own lease table and **disjoint ranges**: workload ids 1100–1199, SSH at 43000+, port blocks from 44000. A Standby Set has to span two PROVIDERS — a Warm Standby bought from the provider already running the primary is no standby — so the sandbox runs a second one, whole. Sells `basic`, `smoke` and `warm` (600 s, `standby_price = 400`) | — |
 | `directory-publisher2` | the second provider's payer for relay writes, on ACCOUNT INDEX 2 of the test phrase (the first is on 1): its own wallet, its own channel, its own watermark (8081 unpublished) | — |
-| `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished) | 7100 (free NIP-01 reads) |
-| `relay2` + `relay2-connector` | **the second relay node**, only in a topology that names it (`make up-topology NODES="relay relay2"`, §2): its own relay identity, its own connector terminating `g.toon.relay2*`, peered to the hub when both run | 3290 (client edge), 7110 (free reads) |
+| `relay` | TOON Nostr relay (paid writes via connector only; write port 3100 unpublished). A plain `GET /` asked with `Accept: application/nostr+json` answers the relay information document, whose `toon` object says where a write is paid, as read off `relay-connector` (§2) | 7100 (free NIP-01 reads, and the information document) |
+| `relay2` + `relay2-connector` | **the second relay node**, only in a topology that names it (`make up-topology NODES="relay relay2"`, §2): its own relay identity, its own connector terminating `g.toon.relay2*`, peered to the hub when both run. Its information document names `g.toon.relay2` at `relay2-connector`, never the hub | 3290 (client edge), 7110 (free reads, and the information document) |
 | `store` | paid Arweave blob store, kind:5094 + kind:5095 ArNS (op=prepare + brokered op=buy) — built from the store sibling checkout (paid handler 3300 unpublished) | 3300 → container 3400 (free /health) |
 | `gas-station` | pays gas: kind:5096 (Solana) + kind:5098 (EVM ERC-2771 meta-tx relay on anvil) (paid handler 3300 unpublished) | 3400 (free /describe + /health) |
 | `issuer` | the **upstream** `anyone-protocol/credentials-issuer`, unmodified — blind-signs credential bundles, refuses without a signed `X-Payment-Claim` | none (unpublished) |

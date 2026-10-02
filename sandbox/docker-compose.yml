@@ -850,13 +850,18 @@ services:
   # Nostr relay. Write port 3100 is deliberately UNPUBLISHED — the only route
   # to it is a paid packet through relay-connector (the relay skips schnorr
   # verification for paid ephemeral kinds on exactly that guarantee). Reads
-  # (7100) are free NIP-01 over WebSocket.
+  # (7100) are free NIP-01 over WebSocket, and a plain `GET /` there asked
+  # with `Accept: application/nostr+json` answers the relay information
+  # document: its `toon` object says where a write is paid, read off
+  # relay-connector's GET /ilp (conf/relay.conf says how; infra#51). The relay
+  # starts BEFORE its connector, so the object appears a few seconds after
+  # the connector does.
   relay:
     # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
     # this is the one destination a paid packet can reach with no peer running
     # — i.e. what makes "a paid request against the hub settles" testable.
     profiles: ['payments', 'credentials', 'full', 'relay']
-    image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
+    image: ghcr.io/toon-protocol/relay@sha256:16465d326fce1410ea45a1e400e096e163fb904dc53d5827de378ef7a104fd59 # :release (2.3.1), 2026-10-01
     env_file:
       - conf/relay.conf
     volumes:
@@ -1600,7 +1605,7 @@ services:
   # scripts/peerings.mjs); alone it is a relay a client pays directly.
   relay2:
     profiles: ['relay2']
-    image: ghcr.io/toon-protocol/relay@sha256:2c628e86b05c7c1f860285d4e876e841934aaca5aafb59c2e6fa31b367da2683 # :release, 2026-09
+    image: ghcr.io/toon-protocol/relay@sha256:16465d326fce1410ea45a1e400e096e163fb904dc53d5827de378ef7a104fd59 # :release (2.3.1), 2026-10-01
     env_file:
       - conf/relay2.conf
     volumes:
