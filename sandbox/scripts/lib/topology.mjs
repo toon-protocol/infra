@@ -36,8 +36,9 @@ export const RENDER_DIR = 'conf/.rendered/topology';
 //   infra      chains its APP reads, which therefore run even when no node
 //              settles on them (the profile wiring is in docker-compose.yml)
 //   hsPort     the virtual port conf/anonrc publishes it on, if it can be hidden
-//   relay      the Nostr relay behind it: its ILP address, read port and the
-//              virtual port its reads are published on
+//   relay      the Nostr relay behind it — the compose service of the node's
+//              own name: the ILP address a write to it is paid at, and the
+//              host port its free reads are published on
 export const NODE_KINDS = {
   relay: {
     connector: 'relay-connector', confVar: 'RELAY_CONNECTOR_CONF', port: 3200, chains: 'any',
@@ -83,6 +84,16 @@ export const NODE_KINDS = {
 
 const words = (value) => String(value ?? '').split(/[\s,]+/).filter(Boolean);
 const unique = (list) => [...new Set(list)];
+
+/**
+ * The relay services behind `connectors`. A relay publishes what its connector
+ * says about itself and re-reads it only every five minutes, so a connector
+ * started again on another config — a chain taken out, a hidden endpoint —
+ * takes its relay with it, or the relay's information document names the old
+ * one until the next read (infra#51).
+ */
+export const relaysBehind = (connectors) => Object.keys(NODE_KINDS)
+  .filter((node) => NODE_KINDS[node].relay && connectors.includes(NODE_KINDS[node].connector));
 
 /** A connector's committed config, relative to sandbox/. */
 export const committedConf = (node) => `conf/connector-${node}.toml`;

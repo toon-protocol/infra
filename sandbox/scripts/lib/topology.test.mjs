@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 
 import { NODES } from '../peerings.mjs';
 import {
-  CHAINS, NODE_KINDS, committedConf, planTopology, publishEndpoint, renderConf, renderedConf, stripSettlement,
+  CHAINS, NODE_KINDS, committedConf, planTopology, publishEndpoint, relaysBehind, renderConf, renderedConf, stripSettlement,
 } from './topology.mjs';
 
 const sandbox = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
@@ -234,4 +234,23 @@ test('a rendered config lands beside the others, under the directory `make clean
   assert.equal(renderedConf('relay2'), 'conf/.rendered/topology/connector-relay2.toml');
   assert.equal(committedConf('relay2'), 'conf/connector-relay2.toml');
   assert.ok(sandbox(committedConf('relay2')).includes('g.toon.relay2'));
+});
+
+// A relay's information document is its connector's self-description, read
+// every five minutes (infra#51): the driver restarts a relay with its
+// connector, and names it by the node's own name.
+test('a connector started again takes the relay behind it, and only that one', () => {
+  assert.deepEqual(relaysBehind(['relay-connector']), ['relay']);
+  assert.deepEqual(relaysBehind(['store-connector', 'relay2-connector']), ['relay2']);
+  assert.deepEqual(relaysBehind(['relay2-connector', 'relay-connector']), ['relay', 'relay2']);
+  assert.deepEqual(relaysBehind(['store-connector', 'gas-connector']), []);
+});
+
+test('every relay node’s relay is the compose service of its own name, on its profile, with its own env', () => {
+  for (const [node, kind] of Object.entries(NODE_KINDS).filter(([, k]) => k.relay)) {
+    const block = service(node);
+    assert.match(block, new RegExp(`profiles: \\[[^\\]]*'${node}'`), `${node} is not on profile ${node}`);
+    assert.match(block, new RegExp(`- conf/${node}\\.conf\\n`), `${node} does not read conf/${node}.conf`);
+    assert.match(block, new RegExp(`'${kind.relay.readPort}:7100'`), `${node} does not publish its reads on ${kind.relay.readPort}`);
+  }
 });
