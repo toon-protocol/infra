@@ -121,7 +121,8 @@ export const PEERINGS = [
     // THE SECOND RELAY: one more spoke, when a topology runs both relay nodes.
     // A write to it through the hub costs its 1 plus the fee; its free
     // ephemeral lane costs the fee, for the reason a provider's free rows do
-    // (see providerRoutes below).
+    // (see providerRoutes below). A subscribe packet through the hub costs
+    // the same as a write and credits relay2's own price, 1 (infra#53).
     id: 'relay-relay2',
     payer: 'relay-connector',
     payee: 'relay2-connector',
@@ -131,6 +132,7 @@ export const PEERINGS = [
     routes: [
       { prefix: 'g.toon.relay2', price: 101 },
       { prefix: 'g.toon.relay2.ephemeral', price: 100 },
+      { prefix: 'g.toon.relay2.subscribe', price: 101 },
     ],
   },
   {

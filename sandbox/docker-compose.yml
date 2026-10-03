@@ -855,15 +855,21 @@ services:
   # document: its `toon` object says where a write is paid, read off
   # relay-connector's GET /ilp (conf/relay.conf says how; infra#51). The relay
   # starts BEFORE its connector, so the object appears a few seconds after
-  # the connector does.
+  # the connector does. It also SELLS ITS LIVE FEED (infra#53): a subscriber
+  # pays g.toon.relay.subscribe, which the connector hands to POST /subscribe
+  # on the same private write port, and the document's `toon_subscription`
+  # says so. The image is the Rust relay, which takes the TypeScript one's
+  # settings name for name and opens the database file it wrote.
   relay:
     # In `payments` too: g.toon.relay is the hub's only TERMINATED route, so
     # this is the one destination a paid packet can reach with no peer running
     # — i.e. what makes "a paid request against the hub settles" testable.
     profiles: ['payments', 'credentials', 'full', 'relay']
-    image: ghcr.io/toon-protocol/relay@sha256:16465d326fce1410ea45a1e400e096e163fb904dc53d5827de378ef7a104fd59 # :release (2.3.1), 2026-10-01
+    image: ghcr.io/toon-protocol/relay@sha256:f2e94e1fde1074691d58cf33f086e86f72f90b9834dcb36ef7df71adff04f761 # rust-2026.10.02.20 (relay c56b435), 2026-10-02
+    # A hidden relay reads a rendered copy with the URL it is dialled at
+    # (conf/relay.conf says why; scripts/lib/topology.mjs renders it).
     env_file:
-      - conf/relay.conf
+      - ${RELAY_ENV:-./conf/relay.conf}
     volumes:
       - relay-data:/data
     expose:
@@ -1605,9 +1611,9 @@ services:
   # scripts/peerings.mjs); alone it is a relay a client pays directly.
   relay2:
     profiles: ['relay2']
-    image: ghcr.io/toon-protocol/relay@sha256:16465d326fce1410ea45a1e400e096e163fb904dc53d5827de378ef7a104fd59 # :release (2.3.1), 2026-10-01
+    image: ghcr.io/toon-protocol/relay@sha256:f2e94e1fde1074691d58cf33f086e86f72f90b9834dcb36ef7df71adff04f761 # rust-2026.10.02.20 (relay c56b435), 2026-10-02
     env_file:
-      - conf/relay2.conf
+      - ${RELAY2_ENV:-./conf/relay2.conf}
     volumes:
       - relay2-data:/data
     expose:

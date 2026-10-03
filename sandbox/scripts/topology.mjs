@@ -13,7 +13,8 @@
 //
 // WHAT `up` DOES, in order:
 //   1. renders the connector configs the selection changes (a chain taken
-//      out; a node to be hidden, still on its compose name) and writes
+//      out; a node to be hidden, still on its compose name) and a hidden
+//      relay's env (still on its localhost URL), and writes
 //      conf/.rendered/topology.env and topology.json — the record
 //      `make smoke-topology` reads, and the `--env-file` for driving compose
 //      by hand;
@@ -22,7 +23,9 @@
 //      last `make up*` left;
 //   3. builds, starts the selection, and waits for the open-peerings job;
 //   4. with HS: waits for the anon daemon's address, re-renders each hidden
-//      node's config with its endpoint at that address, and restarts it. The
+//      node's config with its endpoint at that address, and restarts it —
+//      and re-renders each hidden relay's env with TOON_RELAY_URL at that
+//      address, and recreates it (infra#53). The
 //      order is `make up-hs`'s, for its reason: a `POST /peers` dials what the
 //      other node publishes, so the peerings are opened on compose names
 //      first, and a runtime peering outlives the restart.
@@ -30,13 +33,17 @@
 // A RELAY FOLLOWS ITS CONNECTOR through 3 and 4: its information document is
 // its connector's self-description, re-read only every five minutes, so a
 // connector that comes back on another config — recreated in 3, restarted in
-// 4 — has its relay restarted behind it (`relaysBehind`, infra#51).
+// 4 — has its relay restarted behind it (`relaysBehind`, infra#51). The same
+// read carries the relay's subscribe route and price (infra#53), so the order
+// holds for its paid live feed too.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { NODE_KINDS, RENDER_DIR, hiddenEndpoint, planTopology, relaysBehind, renderConf } from './lib/topology.mjs';
+import {
+  NODE_KINDS, RENDER_DIR, hiddenEndpoint, planTopology, relayUrl, relaysBehind, renderConf, renderRelayEnv,
+} from './lib/topology.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_FILE = 'conf/.rendered/topology.env';
@@ -145,6 +152,12 @@ function render(topology, address) {
     if (existsSync(target) && readFileSync(target, 'utf8') !== text) changed.push(NODE_KINDS[entry.node].connector);
     writeFileSync(target, text);
   }
+  // A hidden relay's env. Compose reads an env file into the service's
+  // config, so a relay whose file now says something else is recreated by
+  // the next `up` — or, in step 4, by name.
+  for (const entry of topology.relayEnvs) {
+    writeFileSync(join(ROOT, entry.target), renderRelayEnv(readFileSync(join(ROOT, entry.source), 'utf8'), entry.node, address));
+  }
   return changed;
 }
 
@@ -230,10 +243,13 @@ async function up(topology) {
     await waitHealthy(connectors, 2);
     // And the relays behind them, once their connectors answer on the new
     // endpoint: restarted together, a relay could read the old one first.
-    // (Guarded: a `restart` naming no service restarts every one.)
+    // RECREATED, not restarted: each is now told the URL a subscriber dials
+    // it at (TOON_RELAY_URL, at the address), and compose re-reads an env
+    // file only into a new container. --no-deps: nothing else moves.
+    // (Guarded: an `up` naming no service starts every one.)
     const relays = relaysBehind(connectors);
     if (relays.length > 0) {
-      compose(['restart', ...relays]);
+      compose(['up', '-d', '--no-deps', '--force-recreate', ...relays]);
       await waitHealthy(relays, 2);
     }
   }
@@ -242,6 +258,7 @@ async function up(topology) {
   for (const node of topology.hidden) {
     const kind = NODE_KINDS[node];
     say(`  ${node} is reached at ${hiddenEndpoint(address, kind.hsPort)}, through socks5h://127.0.0.1:${process.env.ANON_SOCKS_PORT ?? 19050}`);
+    if (kind.relay) say(`  ${node}'s relay is read, and its live feed subscribed to, at ${relayUrl(node, address)}`);
   }
   say('  `make smoke-topology` pays every relay node on every chain it settles on.');
 }
@@ -254,6 +271,7 @@ if (command === 'plan') {
   for (const entry of topology.renders) {
     say(`  renders ${entry.target}${entry.strip.length > 0 ? ` without [settlement.${entry.strip.join('], [settlement.')}]` : ''}${entry.hsPort ? ', on its .anyone endpoint' : ''}`);
   }
+  for (const entry of topology.relayEnvs) say(`  renders ${entry.target}, its relay's env with TOON_RELAY_URL on the .anyone address`);
 } else if (command === 'gates') {
   say(plan(argv).gates.join(' '));
 } else if (command === 'up') {

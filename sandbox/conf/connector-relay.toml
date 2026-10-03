@@ -1,5 +1,6 @@
 # =============================================================================
-# relay-connector — the HUB. Terminates the relay's paid write routes and
+# relay-connector — the HUB. Terminates the relay's paid write routes and its
+# paid live feed's subscribe route, and
 # FORWARDS g.toon.store / g.toon.gastation / g.toon.provider.* /
 # g.toon.provider2.* over four peerings.
 # =============================================================================
@@ -59,7 +60,7 @@ key_file = "/app/data/signer.key"
 # publishers need no rewrite at all. No `btp_endpoint`: `POST /peers` prefers
 # BTP wherever a node publishes it, and the peerings here ride HTTP.
 [node]
-addresses = ["g.toon.relay", "g.toon.relay.ephemeral"]
+addresses = ["g.toon.relay", "g.toon.relay.ephemeral", "g.toon.relay.subscribe"]
 http_endpoint = "http://relay-connector:3000/ilp"
 
 # ── Terminated: the relay's paid write path ──────────────────────────────────
@@ -72,6 +73,20 @@ price = 1
 prefix = "g.toon.relay.ephemeral"
 handler_url = "http://relay:3100/write-ephemeral"
 price = 0
+
+# ── Terminated: the relay's paid live feed (infra#53) ───────────────────────
+# A subscription is paid here: every packet to this address credits its price
+# to the subscriber key in its NIP-98 header, and each live event the relay
+# broadcasts to that key debits TOON_BROADCAST_PRICE (conf/relay.conf). The
+# relay publishes this route — address and price, read off GET /ilp — as its
+# information document's `toon_subscription`, and only while the price is
+# FLAT and ABOVE ZERO: a free route or one priced by the KiB is no offer
+# (relay's docs/paid-feed.md). On the write port for the reason /write is:
+# only this connector reaches it.
+[[routes]]
+prefix = "g.toon.relay.subscribe"
+handler_url = "http://relay:3100/subscribe"
+price = 1
 
 # ── Settlement ───────────────────────────────────────────────────────────────
 # EVM: Circle's FiatToken v2.2 as USDC, deployed by scripts/seed-x402.sh at a

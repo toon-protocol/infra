@@ -64,6 +64,7 @@ Everything can be reached through the hub by ILP address:
 |---|---|---|
 | `g.toon.relay` | Nostr relay write | 1 |
 | `g.toon.relay.ephemeral` | ephemeral write | 0 |
+| `g.toon.relay.subscribe` | a subscription to the relay's paid live feed (credits the subscriber key) | 1 |
 | `g.toon.store` | blob store (kind:5094), ArNS broker (kind:5095) | 1100 base + 10/KiB |
 | `g.toon.gastation` | gas station (kind:5096 Solana, kind:5098 EVM) | 1100 |
 | `g.toon.provider.*`, `g.toon.provider2.*` | the two compute providers (spawn/extend paid, four routes free) | listing price + 100 |
@@ -669,6 +670,35 @@ make smoke-topology                                       # prove whatever is ru
   another config. Anything else that restarts a connector on other terms —
   `make up` straight after a one-chain topology — leaves the document on the
   old ones for up to five minutes.
+- **A relay node sells its live feed.** Both relay services run the Rust
+  relay, and each node's connector terminates a subscribe route beside its
+  write route — `g.toon.relay.subscribe` and `g.toon.relay2.subscribe`, flat
+  price 1, handled by the relay's `POST /subscribe` on its private write
+  port. A subscriber pays it with a NIP-98-signed packet, then reads the feed
+  over NIP-42 with the same key, each live event debiting the broadcast price
+  (relay's `docs/paid-feed.md`). The document's `toon_subscription` says so,
+  read off the same `GET /ilp` as `toon`, so it is held to the connector the
+  same way:
+
+  ```bash
+  curl -s -H 'Accept: application/nostr+json' http://localhost:7110/ | jq .toon_subscription
+  # { "ilp_address": "g.toon.relay2.subscribe", "price": 1, "broadcast_price": 1 }
+  ```
+
+  The relay is told three things (`conf/relay.conf`, `conf/relay2.conf`): its
+  subscribe address, the broadcast price, and `TOON_RELAY_URL` — **the URL a
+  subscriber dials**, because the relay holds NIP-98 `u` and NIP-42 `relay`
+  to its host. That URL depends on the topology: `ws://localhost:7100` for the
+  hub and `ws://localhost:7110` for `relay2`, their published read ports; but
+  a node hidden with `HS` is dialled at `ws://<address>.anyone:7100` (or
+  `:7110`), an address known only once the daemon has bootstrapped and kept
+  until `make clean`. So `up-topology` renders that relay's env with the
+  address beside the rendered connector configs
+  (`conf/.rendered/topology/relay.conf`, mounted through `RELAY_ENV`) and
+  **recreates** the relay once its connector answers on the new endpoint —
+  compose re-reads an env file only into a new container. The relay reads the
+  route on the same five-minute poll as the write route, so the restart
+  behind a re-rendered connector covers it too.
 
 `make smoke-topology` reads what `up-topology` recorded and asserts the
 selection: nothing else runs; every node publishes x402 terms on exactly its
@@ -677,7 +707,11 @@ says what that node's connector says — its own write address, the endpoint
 and seal key the connector publishes, the price it charges for the route and
 settlement on exactly the selected chains, compared with the connector's
 answer and never with a literal, and named by node when it is missing or
-disagrees; each relay node takes a paid write on each of them (gasless through
+disagrees; the same document's `toon_subscription` names that node's own
+subscribe route at the price the connector charges for it and the broadcast
+price the running relay's env sets, and the relay is told the URL a
+subscriber dials (a missing `toon_subscription` FAILs with its likely
+causes); each relay node takes a paid write on each of them (gasless through
 the Onboarder on EVM, sponsored by the node on Solana, over the circuit when
 hidden) and its book moves by its price; a write to the second relay paid
 through the hub lands; and every peering is open, collateralised and routed.
@@ -704,6 +738,16 @@ running, whose document still named the `.anyone` endpoint — which is why
 `up-topology` now restarts a relay behind a connector it replaces. On the same
 image `make up-payments` + `make smoke-payments` and `make up` + `make smoke`
 passed unchanged.
+
+The paid live feed (infra#53) moved both relays to the Rust relay
+(`rust-2026.10.02.20`). On it, `NODES="relay relay2" CHAINS=evm` passed
+`make smoke-topology`, and so did `NODES="relay relay2" CHAINS=evm HS=relay`
+from `make clean`. In the second run the hub's relay was recreated with its
+`.anyone` URL without any manual step. In that hidden topology, toon_cli's
+`toon relay subscribe` subscribed a hidden agent node at the hub's `.anyone`
+address and at `relay2`'s `ws://localhost:7110`. A live event from each feed
+reached the subscriber, and each balance went down by the broadcast price.
+`make up` + `make smoke` also passed unchanged on the Rust relay (2026-10-02).
 
 Not run as topology selections: `gas`, `anytoon`, `dealer`, `provider2`, and
 `HS=relay2`. They are wired the same way and held to the committed files by
