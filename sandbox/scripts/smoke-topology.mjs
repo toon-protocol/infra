@@ -14,7 +14,12 @@
 //      publishes, the price it charges for the route, and settlement on
 //      exactly the chains the topology was started with. Held to the
 //      connector's answer, read where the document sends a client, and never
-//      to a literal (scripts/lib/relay-document.mjs).
+//      to a literal (scripts/lib/relay-document.mjs). Its `toon_subscription`
+//      says where a subscription to its live feed is paid (infra#53): held
+//      to the same answer — the node's own subscribe address, terminated,
+//      at the route's price — and to the RUNNING relay's env: the broadcast
+//      price it sets, and the URL a subscriber dials (its published read
+//      port, or its virtual one on the `.anyone` address when hidden).
 //   3. EACH RELAY NODE, ON EACH CHAIN IT SETTLES ON, takes a PAID write from a
 //      channel this script opens against it; its relay returns the event, and
 //      the node's own book holds the voucher. On EVM the payer is a fresh
@@ -49,10 +54,10 @@ import { InMemoryChannelStore, ToonClient } from '@toon-protocol/client';
 import { Contract, JsonRpcProvider, Wallet, HDNodeWallet } from 'ethers';
 
 import { hostFetch, hostUrl } from './lib/sandbox-endpoints.mjs';
-import { RELAY_DOCUMENT_ACCEPT, documentProblems } from './lib/relay-document.mjs';
+import { RELAY_DOCUMENT_ACCEPT, documentProblems, readEnv, subscriptionProblems } from './lib/relay-document.mjs';
 import { NODES, PEERINGS } from './peerings.mjs';
 import { peeringChain } from './lib/peering-plan.mjs';
-import { NODE_KINDS, hiddenEndpoint } from './lib/topology.mjs';
+import { NODE_KINDS, hiddenEndpoint, relayUrl } from './lib/topology.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // sandbox/
 const RECORD = join(ROOT, 'conf', '.rendered', 'topology.json');
@@ -220,15 +225,22 @@ for (const [node, endpoint] of Object.entries(topology.hidden)) {
 
 // ── 2. each relay node's information document ────────────────────────────
 const relays = topology.nodes.filter((node) => NODE_KINDS[node].relay);
-if (relays.length > 0) step('2. each relay node’s information document says where a write is paid, as its connector does');
+if (relays.length > 0) step('2. each relay node’s information document says where a write and a subscription are paid, as its connector does');
+// The env the relay RUNS with — a hidden one reads a rendered copy — and not
+// the committed file.
+function runningEnv(service) {
+  const id = docker('compose', '--profile', '*', 'ps', '-q', service).split('\n')[0];
+  if (!id) throw new Error(`no ${service} container`);
+  return readEnv(JSON.parse(docker('inspect', '-f', '{{json .Config.Env}}', id)).join('\n'));
+}
 // One reading: the relay's document, and the self-description of the
 // connector it names — which has to be the node's own, at the endpoint that
 // connector publishes — read where the document sends a client: for a compose
 // name, the host port the sandbox publishes it on. A hidden node's `.anyone`
 // endpoint is not rewritten; its connector is read on its host port, as in
 // step 1.
-async function readDocument(node) {
-  const { address, readPort } = NODE_KINDS[node].relay;
+async function readDocument(node, env) {
+  const { address, subscribe, readPort } = NODE_KINDS[node].relay;
   let document;
   try {
     const res = await fetch(`http://localhost:${readPort}/`, { headers: { accept: RELAY_DOCUMENT_ACCEPT } });
@@ -238,14 +250,24 @@ async function readDocument(node) {
     return { problems: [`its relay serves no information document at http://localhost:${readPort}/ (Accept: ${RELAY_DOCUMENT_ACCEPT}) — ${e.message}`] };
   }
   const toon = document?.toon;
-  if (typeof toon !== 'object' || toon === null) return { problems: documentProblems(document, undefined, address) };
+  const feed = { address: subscribe, broadcastPrice: env.TOON_BROADCAST_PRICE };
+  // With no `toon` there is no connector to hold `toon_subscription` to: a
+  // relay publishes one only with the other, so only its absence is said.
+  if (typeof toon !== 'object' || toon === null) {
+    return { problems: [...documentProblems(document, undefined, address), ...(document?.toon_subscription ? [] : subscriptionProblems(document, undefined, feed))] };
+  }
   const own = topology.hidden[node] ?? NODES[NODE_KINDS[node].connector].url;
   if (toon.connector_url !== own) return { problems: [`its document sends a write to the connector ${toon.connector_url}, not to its own at ${own}`] };
   const at = topology.hidden[node] ? `${edge(node)}/ilp` : hostUrl(toon.connector_url);
   try {
     const res = await fetch(at);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return { toon, problems: documentProblems(document, await res.json(), address) };
+    const description = await res.json();
+    return {
+      toon,
+      subscription: document.toon_subscription,
+      problems: [...documentProblems(document, description, address), ...subscriptionProblems(document, description, feed)],
+    };
   } catch (e) {
     return { problems: [`its document names the connector ${toon.connector_url}, which does not answer the host at ${at} — ${e.message}`] };
   }
@@ -253,10 +275,20 @@ async function readDocument(node) {
 const published = {};
 for (const node of relays) {
   const { readPort } = NODE_KINDS[node].relay;
+  let env;
+  try {
+    env = runningEnv(node);
+  } catch (e) {
+    bad(`${node}: its relay's env cannot be read — ${e.message}`);
+    continue;
+  }
+  const dialled = relayUrl(node, topology.hidden[node] ? topology.address : undefined);
+  assert(env.TOON_RELAY_URL === dialled,
+    `${node}: its relay is told TOON_RELAY_URL=${env.TOON_RELAY_URL}, the URL a subscriber dials (${dialled})${env.TOON_RELAY_URL === dialled ? '' : ' — a relay told another host refuses every NIP-98 and NIP-42 a subscriber signs'}`);
   const deadline = Date.now() + DOCUMENT_WAIT_MS;
   let reading;
   for (;;) {
-    reading = await readDocument(node);
+    reading = await readDocument(node, env);
     if (reading.problems.length === 0 || Date.now() >= deadline) break;
     await sleep(2000);
   }
@@ -264,10 +296,11 @@ for (const node of relays) {
     for (const problem of reading.problems) bad(`${node}: ${problem}`);
     continue;
   }
-  const { toon } = reading;
+  const { toon, subscription } = reading;
   published[node] = toon;
   ok(`${node}: its relay (:${readPort}) says a write is paid at ${toon.ilp_address}, ${toon.price} per write, sealed to ${toon.connector_seal_key.slice(0, 18)}… — address, price, seal key and settlement as its connector describes them`);
   ok(`${node}: it is paid at ${toon.connector_url}, ${topology.hidden[node] ? 'its .anyone endpoint' : `its own connector, which the host reaches at ${hostUrl(toon.connector_url)}`}`);
+  ok(`${node}: its relay sells its live feed at ${subscription.ilp_address}, ${subscription.price} per subscribe packet and ${subscription.broadcast_price} per live event — the route and price its connector terminates, the broadcast price its env sets`);
   const chains = [...new Set(toon.settlement.map((s) => chainOf(s.network)))].sort();
   assert(chains.join() === [...topology.chainsOf[node]].sort().join(),
     `${node}: it lists settlement on ${chains.join(' + ') || 'nothing'} (selected: ${topology.chainsOf[node].join(' + ')})`);

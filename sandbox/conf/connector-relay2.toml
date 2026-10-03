@@ -1,6 +1,7 @@
 # =============================================================================
 # relay2-connector — THE SECOND RELAY NODE. Terminates the second relay's paid
-# write routes, g.toon.relay2 and g.toon.relay2.ephemeral, and forwards nothing.
+# write routes, g.toon.relay2 and g.toon.relay2.ephemeral, and its paid live
+# feed's g.toon.relay2.subscribe, and forwards nothing.
 # =============================================================================
 # A node of its own: its own connector, keys, ILP address and state volume,
 # with its own relay behind it (conf/relay2.conf). It exists so a topology can
@@ -27,7 +28,7 @@ key_file = "/app/data/signer.key"
 # The compose-network name: what the hub dials. The host reaches the same node
 # at 127.0.0.1:3290 through scripts/lib/sandbox-endpoints.mjs.
 [node]
-addresses = ["g.toon.relay2", "g.toon.relay2.ephemeral"]
+addresses = ["g.toon.relay2", "g.toon.relay2.ephemeral", "g.toon.relay2.subscribe"]
 http_endpoint = "http://relay2-connector:3000/ilp"
 
 # ── Terminated: the second relay's paid write path ───────────────────────────
@@ -40,6 +41,14 @@ price = 1
 prefix = "g.toon.relay2.ephemeral"
 handler_url = "http://relay2:3100/write-ephemeral"
 price = 0
+
+# ── Terminated: the second relay's paid live feed (infra#53) ────────────────
+# conf/connector-relay.toml says what the route is; flat and above zero, or
+# the relay offers no feed.
+[[routes]]
+prefix = "g.toon.relay2.subscribe"
+handler_url = "http://relay2:3100/subscribe"
+price = 1
 
 # ── Settlement ───────────────────────────────────────────────────────────────
 # The same two tables as the hub's (conf/connector-relay.toml says what each

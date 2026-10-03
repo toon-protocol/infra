@@ -355,7 +355,9 @@ topology:
 ## target left in conf/.rendered/topology.json): only the selected containers
 ## run; every node publishes x402 terms on exactly the chains selected; each
 ## relay node's information document says where a write to it is paid, and
-## says what that node's connector says (infra#51); each
+## says what that node's connector says (infra#51), and where a subscription
+## to its live feed is paid, at its connector's price and the broadcast price
+## and URL its relay runs with (infra#53); each
 ## relay node takes a PAID write on each of those chains from a channel the
 ## smoke opens against it, and its relay returns the event; with both relay
 ## nodes, a write to the second is paid THROUGH the hub and both books move;
