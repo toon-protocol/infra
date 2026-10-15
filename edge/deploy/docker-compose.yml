@@ -8,7 +8,7 @@
 # them"). Every hostname and upstream is in ./caddy/sites.caddy.
 #
 # Bring it up FIRST, before any node's shared-edge overlay: this project
-# creates the five per-node networks those overlays declare external, and the
+# creates the six per-node networks those overlays declare external, and the
 # Onboarder's.
 #
 #   cp .env.example .env    # then fill it in
@@ -64,6 +64,7 @@ services:
       - edge-gas
       - edge-gateway
       - edge-faucet
+      - edge-echo
       - edge-onboarder
     healthcheck:
       # The admin API answers once the config is loaded. 127.0.0.1, never
@@ -98,6 +99,9 @@ networks:
     name: edge-gateway
   edge-faucet:
     name: edge-faucet
+  # The Echo Merchant's (toon-protocol/echo-merchant, infra#55).
+  edge-echo:
+    name: edge-echo
   # Not a node's: the Onboarder's (onboarder/deploy, infra#23). Same rule.
   edge-onboarder:
     name: edge-onboarder
