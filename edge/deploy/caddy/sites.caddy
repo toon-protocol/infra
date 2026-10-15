@@ -7,7 +7,7 @@
 # ── The contract (infra#24) ──────────────────────────────────────────────────
 # Each node's own repository ships a shared-edge overlay that joins its
 # containers to that node's OWN external Docker network, `edge-<node>`, under
-# the aliases below. Caddy is on all six networks; no node is on another's
+# the aliases below. Caddy is on all seven networks; no node is on another's
 # (../docker-compose.yml says why). The ports are each container's own
 # listening port, read off the front that node used to ship.
 # ../bundle.test.mjs holds this table still.
@@ -22,6 +22,7 @@
 #   proxy.gateway.devnet           gateway-proxy:4000        edge-gateway (connector)
 #   gw.devnet, *.gw.devnet         https://gateway-gw:8443   edge-gateway (workloads)
 #   faucet.devnet                  faucet:3500               edge-faucet
+#   proxy.echo.devnet              echo-proxy:4000           edge-echo    (connector)
 #   onboard.devnet                 onboarder:4022            edge-onboarder
 #
 # The Onboarder (CONTEXT.md, infra#23) is not a node: it has no connector and
@@ -48,7 +49,7 @@
 # * `location ^~ /admin { return 404; }`  -> `respond /admin* 404`
 # * `client_max_body_size`                 -> `request_body { max_size }`
 # * `limit_req`                            -> `import rate_limited…`
-# * the store's and gas's `location = /ilp/identity` CORS rule
+# * the store's, gas's and echo's `location = /ilp/identity` CORS rule
 # * the gateway's TLS upstream hop (`proxy_ssl_*`)
 # Anything the old fronts did NOT do (the relay had no /admin rule, no body
 # limit and no rate limit) is not added here: this edge moves nodes, it does
@@ -88,9 +89,10 @@
 	}
 }
 
-# store/deploy/nginx/node.conf.template and gas-station/deploy/nginx/
-# node.conf.template: `location = /ilp/identity` always reaches the node's
-# connector, on EITHER of its names, and carries
+# store/deploy/nginx/node.conf.template, gas-station/deploy/nginx/
+# node.conf.template and echo-merchant/deploy/nginx/node.conf.template:
+# `location = /ilp/identity` always reaches the node's connector, on EITHER of
+# its names, and carries
 #   add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
 #   add_header Vary "Origin" always;
 # with DOMAIN=devnet.toonprotocol.dev. `defer` applies the headers after the
@@ -248,6 +250,25 @@ faucet.devnet.toonprotocol.dev {
 		max_size 1MiB
 	}
 	reverse_proxy faucet:3500 {
+		stream_close_delay 5m
+	}
+}
+
+# ── echo ─────────────────────────────────────────────────────────────────────
+# echo-merchant/deploy/nginx/node.conf.template (infra#55): gas's shape on one
+# name. client_max_body_size 512k; limit_req 200r/s burst=400; /admin 404; and
+# the /ilp/identity CORS rule. The Echo Merchant itself has no public path, as
+# there: only the connector reaches it, as the termination of g.toon.echo.
+
+proxy.echo.devnet.toonprotocol.dev {
+	respond /admin* 404
+	import rate_limited echo_proxy 400
+	request_body {
+		max_size 512KiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity echo-proxy:4000
+	reverse_proxy echo-proxy:4000 {
 		stream_close_delay 5m
 	}
 }

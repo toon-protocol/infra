@@ -13,10 +13,10 @@
 //   * THE CONTRACT: every hostname a node on this host serves maps to exactly
 //     the alias and port that node's shared-edge overlay joins its own
 //     `edge-<node>` network under,
-//     and no hostname is served that is not in the contract. Four other repos
+//     and no hostname is served that is not in the contract. Five other repos
 //     implement the far side of this table; a typo here is an outage there.
-//   * the five per-node networks, and the Onboarder's, are created
-//     HERE, under their literal names, Caddy joins all six, and no flat
+//   * the six per-node networks, and the Onboarder's, are created
+//     HERE, under their literal names, Caddy joins all seven, and no flat
 //     network joins the nodes;
 //   * the Caddy image is pinned by digest, because the Porkbun key lives in it;
 //   * the wildcard is issued over DNS-01 through Porkbun, keys from the env;
@@ -55,6 +55,8 @@ const CONTRACT = {
   [`faucet.devnet.${ZONE}`]: 'faucet:3500',
   // the Onboarder, not a node — onboarder/deploy/docker-compose.yml (infra#23)
   [`onboard.devnet.${ZONE}`]: 'onboarder:4022',
+  // the Echo Merchant — echo-merchant/deploy/nginx/node.conf.template (infra#55)
+  [`proxy.echo.devnet.${ZONE}`]: 'echo-proxy:4000',
 };
 
 /**
@@ -126,6 +128,7 @@ const GW_EDGE = `proxy.gateway.devnet.${ZONE}`;
 const GW_WORKLOADS = `gw.devnet.${ZONE}`; // the block that also holds *.gw
 const FAUCET = `faucet.devnet.${ZONE}`;
 const ONBOARD = `onboard.devnet.${ZONE}`;
+const ECHO = `proxy.echo.devnet.${ZONE}`;
 const RELAY = [`proxy.relay.devnet.${ZONE}`, `relay-ws.devnet.${ZONE}`];
 
 // client_max_body_size, from each node's nginx `location /`. nginx's `m` is
@@ -140,9 +143,11 @@ const BODY_LIMITS = {
   [FAUCET]: '1MiB',
   // express.json({ limit: '1mb' }) in onboarder/index.mjs: nothing larger is read.
   [ONBOARD]: '1MiB',
+  // echo-merchant/deploy/nginx/node.conf.template (infra#55): gas's limit.
+  [ECHO]: '512KiB',
 };
 
-// limit_req: `rate=200r/s burst=400` on store, gas and gateway, `rate=30r/s
+// limit_req: `rate=200r/s burst=400` on store, gas, gateway and echo, `rate=30r/s
 // burst=60` on the faucet. A sliding window of `burst` events per 2s keeps
 // both the burst and the average rate.
 const RATE_LIMITS = {
@@ -156,13 +161,14 @@ const RATE_LIMITS = {
   // New, not carried over: the faucet's limit, because each /settle spends
   // the Onboarder's own ETH.
   [ONBOARD]: 60,
+  [ECHO]: 400,
 };
 
 const body = (host) => siteFor(host).body;
 
 describe('/admin is never reachable from outside', () => {
-  // `location ^~ /admin { return 404; }` in the store, gas and gateway fronts.
-  for (const host of [...STORE, ...GAS, GW_EDGE]) {
+  // `location ^~ /admin { return 404; }` in the store, gas, gateway and echo fronts.
+  for (const host of [...STORE, ...GAS, GW_EDGE, ECHO]) {
     it(`${host} answers 404 for /admin*`, () => {
       assert.match(body(host), /^\s*respond \/admin\* 404$/m);
     });
@@ -211,13 +217,14 @@ describe('rate limits', () => {
 });
 
 describe('CORS on /ilp/identity', () => {
-  // `location = /ilp/identity` in the store and gas fronts: always the
+  // `location = /ilp/identity` in the store, gas and echo fronts: always the
   // connector, on either of the node's names, with the console's origin.
   for (const [host, connector] of [
     [STORE[0], 'store-proxy:4000'],
     [STORE[1], 'store-proxy:4000'],
     [GAS[0], 'gas-proxy:4000'],
     [GAS[1], 'gas-proxy:4000'],
+    [ECHO, 'echo-proxy:4000'],
   ]) {
     it(`${host} answers it from ${connector}, with the console's origin`, () => {
       const b = body(host);
@@ -334,7 +341,7 @@ describe('the image', () => {
 // can reach another's connector /admin or the gateway's handover door. A node's
 // overlay joins its own network, `external`, and nothing else of the edge's.
 // The Onboarder is not a node, but it is fronted the same way, on its own network.
-const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet', 'edge-onboarder'];
+const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet', 'edge-echo', 'edge-onboarder'];
 
 // Every file in the bundle, for the checks that must hold across all of them.
 const BUNDLE_FILES = [
@@ -358,7 +365,7 @@ describe('the compose project', () => {
     assert.deepEqual([...top.matchAll(/^    name: (\S+)$/gm)].map((m) => m[1]).sort(), [...NODE_NETWORKS].sort());
   });
 
-  it('joins Caddy to all six, and to nothing else', () => {
+  it('joins Caddy to all seven, and to nothing else', () => {
     const caddy = compose().slice(compose().indexOf('  caddy:'), compose().indexOf('\nnetworks:'));
     const joined = [...caddy.slice(caddy.indexOf('    networks:')).matchAll(/^      - (\S+)$/gm)].map((m) => m[1]);
     assert.deepEqual(joined.sort(), [...NODE_NETWORKS].sort());

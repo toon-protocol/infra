@@ -1,7 +1,7 @@
 # The public TOON devnet
 
 The sandbox is a whole TOON network on your machine. This is the other one: the
-relay, store, gas station and workload gateway nodes, plus the faucet, on
+relay, store, gas station, workload gateway and Echo Merchant nodes, plus the faucet, on
 public testnets, which anybody can reach and which the console leases from.
 Nothing here touches mainnet — Base Sepolia and Solana devnet carry no value,
 and the USDC is a mock mint anyone can draw from the faucet.
@@ -29,7 +29,7 @@ before/after numbers.
 
 One **Edge** (`edge/deploy` in this repo — Caddy, TLS issued over Porkbun
 DNS-01, its image pinned by digest) terminates every public hostname the host
-serves. Behind it sit four **Nodes**, each still GitOps from its own
+serves. Behind it sit five **Nodes**, each still GitOps from its own
 repository (connector ADR 0068) — its own `deploy/` bundle, a shared-edge
 overlay that joins only that node's `edge-<node>` network, and its own
 `toon-auto-apply-<node>` timer and lock, so a stuck or dirty node never blocks
@@ -42,10 +42,11 @@ is not a node (see "The Onboarder" below).
 | store | `toon-protocol/store` | `proxy.ario.devnet…`, `dvm.devnet…` — paid Arweave blob storage at `g.toon.store` |
 | gas | `toon-protocol/gas-station` | `proxy.gas.devnet…` — sponsored transactions at `g.toon.gas` |
 | workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…`, `proxy.gateway.devnet…` — a hostname for a workload |
+| echo | `toon-protocol/echo-merchant` | `proxy.echo.devnet…` — a priced route at `g.toon.echo` that answers with a mirror of the request and of its payment (a **Mirror**, in echo-merchant's `CONTEXT.md`) |
 | faucet | (hand-deployed, from `/root/faucet-connector/infra/linode-faucet`) | `faucet.devnet…` — mock USDC on both chains |
 | Onboarder (not a node) | `toon-protocol/infra` (`onboarder/deploy`) | `onboard.devnet…` — pays the gas for a gasless channel deposit on Base Sepolia |
 
-Every node kept its own connector, its own keys, its own ILP address and its
+Every node that moved kept its own connector, its own keys, its own ILP address and its
 own seal key across the move — nothing was re-keyed or republished, and no
 client-facing hostname changed. Only DNS moved: see "DNS" below.
 
@@ -97,12 +98,16 @@ by `edge/deploy/README.md` and connector ADR 0068:
    never collide with another node's or the edge's.
 3. **A distinct connector loopback port.** Every node's connector still binds
    its own loopback admin port, and on a shared host those now collide unless
-   each node is given a different one. The four nodes here were fixed by
+   each node is given a different one. The four nodes that moved here were fixed by
    separate per-node PRs: relay `3000`, workload-gateway `4001`, gas-station
-   `4002`, store `4003`.
+   `4002`, store `4003`. The Echo Merchant, the first node born on this host,
+   took `4005` (infra#55; `4004` is unused). These are the assignments; take
+   the next free one, and record it here.
 4. **Its own connector, keys, ILP address and seal key**, copied over from
    wherever the node ran before — never regenerated, since they are already
-   funded and pinned.
+   funded and pinned. A node that never ran anywhere else generates them with
+   its own `bootstrap.sh`, on the host, and they are backed up off the host
+   at once, like every other node's: payers open channels toward them.
 
 The faucet is the one exception: it has no shared-edge overlay of its own yet
 (GitOps for it is a follow-up), so it joins the edge through a **host-local**
@@ -297,6 +302,7 @@ records points at the one host, `97.107.134.182`:
 | `proxy.gas.devnet`, `gas.devnet` | gas |
 | `faucet.devnet` | faucet |
 | `gw.devnet`, `*.gw.devnet`, `proxy.gateway.devnet` | workload-gateway |
+| `proxy.echo.devnet` | echo |
 | `onboard.devnet` | the Onboarder |
 
 `proxy.provider.devnet` and `provider.devnet` are no longer part of the

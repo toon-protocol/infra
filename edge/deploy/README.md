@@ -2,10 +2,10 @@
 
 One Caddy on the devnet host that terminates TLS for every public hostname the
 host's nodes serve (infra#24, ADR 0001, the **Edge** in `CONTEXT.md`). It owns
-ports 80 and 443 and six Docker networks: **one per node**, `edge-relay`,
-`edge-store`, `edge-gas`, `edge-gateway` and `edge-faucet`, and
+ports 80 and 443 and seven Docker networks: **one per node**, `edge-relay`,
+`edge-store`, `edge-gas`, `edge-gateway`, `edge-faucet` and `edge-echo`, and
 `edge-onboarder` for the **Onboarder**, which is fronted like a node but is not
-one (`CONTEXT.md`, ADR 0002). Caddy joins all six. Each node joins **only its own**, from its repository's shared-edge
+one (`CONTEXT.md`, ADR 0002). Caddy joins all seven. Each node joins **only its own**, from its repository's shared-edge
 overlay, and is reached as `alias:port`. The edge holds no node's keys and
 never talks ILP.
 
@@ -37,6 +37,7 @@ of truth and `bundle.test.mjs` holds it still.
 | gateway | `edge-gateway` | `gw.devnet`, `*.gw.devnet` | `gateway-gw` | 8443 (**TLS**) |
 | gateway | `edge-gateway` | `proxy.gateway.devnet` | `gateway-proxy` | 4000 |
 | faucet | `edge-faucet` | `faucet.devnet` | `faucet` | 3500 |
+| echo | `edge-echo` | `proxy.echo.devnet` | `echo-proxy` | 4000 |
 | Onboarder (not a node) | `edge-onboarder` | `onboard.devnet` | `onboarder` | 4022 |
 
 A node's overlay declares its network `external: true` and keeps its own
@@ -45,19 +46,20 @@ A node's overlay declares its network `external: true` and keeps its own
 The ports are each container's own listening port, read off the front that
 node shipped before (`relay/deploy/Caddyfile`, the nginx templates under
 `store/`, `gas-station/`, `gateway/` `deploy/nginx/`, and
-`connector/infra/linode-faucet/nginx/`). The rules those fronts applied beyond
+`connector/infra/linode-faucet/nginx/`, and the Echo Merchant's
+`echo-merchant/deploy/nginx/`). The rules those fronts applied beyond
 plain proxying are carried over, each with its source cited in
 `caddy/sites.caddy`:
 
-- `/admin*` answers 404 on the store, gas and gateway-proxy names.
-- Body limits: 4 MiB for the store, 512 KiB for gas, 1 MiB for the
+- `/admin*` answers 404 on the store, gas, gateway-proxy and echo names.
+- Body limits: 4 MiB for the store, 512 KiB for gas and echo, 1 MiB for the
   gateway proxy, the faucet and the Onboarder, and 64 MiB for gateway
   workloads.
-- Per-client rate limits: 400 per 2s on store, gas and gateway, and 60 per
+- Per-client rate limits: 400 per 2s on store, gas, gateway and echo, and 60 per
   2s on the faucet, with `/health` exempt. An excess request gets **429**,
   where nginx answered 503. The Onboarder had no old front; it gets the
   faucet's 60 per 2s, because each `/settle` spends its own ETH.
-- CORS on `/ilp/identity` for store and gas. That path always reaches the
+- CORS on `/ilp/identity` for store, gas and echo. That path always reaches the
   node's connector, on either of its names.
 - The gateway's workload hop is TLS, with SNI `gateway` and no verification,
   so that the gateway tells a workload `X-Forwarded-Proto: https`. That hop
@@ -104,7 +106,7 @@ it. `docker-compose.yml` pins it **by digest**.
 
 ## Bring-up (on the host)
 
-Start the edge **before** any node's overlay. This project creates the six
+Start the edge **before** any node's overlay. This project creates the seven
 networks, and the overlays declare them external. Nothing else on the host may
 hold 80 or 443: stop a node's old nginx, certbot or Caddy first (ADR 0001).
 
@@ -209,8 +211,8 @@ the way an overlay joins: `store-proxy` on `edge-store`, and the wildcard's
 - the wildcard certificate and `no_grant`;
 - `/admin`, the body cap, CORS, the redirect, and a 502 for a node that is down;
 - the rate limit and `mem_limit`;
-- that the edge is on all six networks and created them;
+- that the edge is on all seven networks and created them;
 - that the store stub **cannot** reach the gateway stub by alias or by IP
   address, with a control probe that does reach the store's own alias.
 
-It refuses to run where any of the six network names already exists.
+It refuses to run where any of the seven network names already exists.
