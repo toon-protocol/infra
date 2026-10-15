@@ -49,7 +49,7 @@
 # * `location ^~ /admin { return 404; }`  -> `respond /admin* 404`
 # * `client_max_body_size`                 -> `request_body { max_size }`
 # * `limit_req`                            -> `import rate_limited…`
-# * the store's and gas's `location = /ilp/identity` CORS rule
+# * the store's, gas's and echo's `location = /ilp/identity` CORS rule
 # * the gateway's TLS upstream hop (`proxy_ssl_*`)
 # Anything the old fronts did NOT do (the relay had no /admin rule, no body
 # limit and no rate limit) is not added here: this edge moves nodes, it does
@@ -89,9 +89,10 @@
 	}
 }
 
-# store/deploy/nginx/node.conf.template and gas-station/deploy/nginx/
-# node.conf.template: `location = /ilp/identity` always reaches the node's
-# connector, on EITHER of its names, and carries
+# store/deploy/nginx/node.conf.template, gas-station/deploy/nginx/
+# node.conf.template and echo-merchant/deploy/nginx/node.conf.template:
+# `location = /ilp/identity` always reaches the node's connector, on EITHER of
+# its names, and carries
 #   add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
 #   add_header Vary "Origin" always;
 # with DOMAIN=devnet.toonprotocol.dev. `defer` applies the headers after the

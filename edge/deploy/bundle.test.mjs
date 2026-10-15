@@ -143,10 +143,11 @@ const BODY_LIMITS = {
   [FAUCET]: '1MiB',
   // express.json({ limit: '1mb' }) in onboarder/index.mjs: nothing larger is read.
   [ONBOARD]: '1MiB',
+  // echo-merchant/deploy/nginx/node.conf.template (infra#55): gas's limit.
   [ECHO]: '512KiB',
 };
 
-// limit_req: `rate=200r/s burst=400` on store, gas and gateway, `rate=30r/s
+// limit_req: `rate=200r/s burst=400` on store, gas, gateway and echo, `rate=30r/s
 // burst=60` on the faucet. A sliding window of `burst` events per 2s keeps
 // both the burst and the average rate.
 const RATE_LIMITS = {
@@ -166,7 +167,7 @@ const RATE_LIMITS = {
 const body = (host) => siteFor(host).body;
 
 describe('/admin is never reachable from outside', () => {
-  // `location ^~ /admin { return 404; }` in the store, gas and gateway fronts.
+  // `location ^~ /admin { return 404; }` in the store, gas, gateway and echo fronts.
   for (const host of [...STORE, ...GAS, GW_EDGE, ECHO]) {
     it(`${host} answers 404 for /admin*`, () => {
       assert.match(body(host), /^\s*respond \/admin\* 404$/m);
@@ -216,7 +217,7 @@ describe('rate limits', () => {
 });
 
 describe('CORS on /ilp/identity', () => {
-  // `location = /ilp/identity` in the store and gas fronts: always the
+  // `location = /ilp/identity` in the store, gas and echo fronts: always the
   // connector, on either of the node's names, with the console's origin.
   for (const [host, connector] of [
     [STORE[0], 'store-proxy:4000'],

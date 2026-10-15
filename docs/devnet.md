@@ -42,7 +42,7 @@ is not a node (see "The Onboarder" below).
 | store | `toon-protocol/store` | `proxy.ario.devnet…`, `dvm.devnet…` — paid Arweave blob storage at `g.toon.store` |
 | gas | `toon-protocol/gas-station` | `proxy.gas.devnet…` — sponsored transactions at `g.toon.gas` |
 | workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…`, `proxy.gateway.devnet…` — a hostname for a workload |
-| echo | `toon-protocol/echo-merchant` | `proxy.echo.devnet…` — a priced route at `g.toon.echo` that answers with a Mirror of the request and its payment |
+| echo | `toon-protocol/echo-merchant` | `proxy.echo.devnet…` — a priced route at `g.toon.echo` that answers with a mirror of the request and of its payment (a **Mirror**, in echo-merchant's `CONTEXT.md`) |
 | faucet | (hand-deployed, from `/root/faucet-connector/infra/linode-faucet`) | `faucet.devnet…` — mock USDC on both chains |
 | Onboarder (not a node) | `toon-protocol/infra` (`onboarder/deploy`) | `onboard.devnet…` — pays the gas for a gasless channel deposit on Base Sepolia |
 
