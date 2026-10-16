@@ -16,27 +16,21 @@
 #   hostname (.toonprotocol.dev)   upstream                  network
 #   (the apex itself)              relay-proxy:3000          edge-relay   (THE connector)
 #   relay                          relay-ws:7100             edge-relay   (Nostr WS)
-#   proxy.relay.devnet             relay-proxy:3000          edge-relay   (connector)
-#   relay-ws.devnet                relay-ws:7100             edge-relay   (Nostr WS)
-#   proxy.ario.devnet              relay-proxy:3000          edge-relay   (transitional)
 #   dvm.devnet                     store-dvm:3400            edge-store   (health)
-#   proxy.gas.devnet               relay-proxy:3000          edge-relay   (transitional)
 #   gas.devnet                     gas-web:3400              edge-gas     (health)
-#   proxy.gateway.devnet           relay-proxy:3000          edge-relay   (transitional)
 #   gw.devnet, *.gw.devnet         https://gateway-gw:8443   edge-gateway (workloads)
 #   faucet.devnet                  faucet:3500               edge-faucet
-#   proxy.echo.devnet              relay-proxy:3000          edge-relay   (transitional)
 #   onboard.devnet                 onboarder:4022            edge-onboarder
 #
 # ── One connector ────────────────────────────────────────────────────────────
 # The devnet runs ONE connector, the relay's, at the apex toonprotocol.dev,
 # with every app (store, gas, gateway, echo) a direct route of it. The store,
 # gas station, gateway and Echo Merchant run no connector of their own on the
-# devnet any more; their apps stay on their own networks as above. The old
-# per-node connector names, proxy.{ario,gas,gateway,echo}.devnet, and the
-# /ilp/identity path on dvm.devnet and gas.devnet, all reach the one connector
-# now. They are TRANSITIONAL: kept only until a toon CLI release ships the new
-# devnet preset, then removed in a follow-up.
+# devnet any more; their apps stay on their own networks as above. The
+# /ilp/identity path on dvm.devnet and gas.devnet reaches the one connector.
+# The old per-node connector names (proxy.{relay,ario,gas,gateway,echo}.devnet)
+# and relay-ws.devnet are no longer served: a toon CLI release ships the new
+# devnet preset.
 #
 # The Onboarder (CONTEXT.md, infra#23) is not a node: it has no connector and
 # no ILP address. It is fronted the same way, and ../../../onboarder/deploy is
@@ -160,37 +154,12 @@ relay.toonprotocol.dev {
 	}
 }
 
-proxy.relay.devnet.toonprotocol.dev {
-	reverse_proxy relay-proxy:3000 {
-		stream_close_delay 5m
-	}
-}
-
-relay-ws.devnet.toonprotocol.dev {
-	reverse_proxy relay-ws:7100 {
-		stream_close_delay 5m
-	}
-}
-
 # ── store ────────────────────────────────────────────────────────────────────
-# store/deploy/nginx/node.conf.template: one server block for both names, so
-# every rule applies to both, including /ilp/identity reaching the connector
-# from dvm.devnet too. client_max_body_size 4m; limit_req 200r/s burst=400.
-# Transitional: both names' connector paths now reach the one connector (see
-# "One connector" above); store-dvm stays the store's own.
-
-proxy.ario.devnet.toonprotocol.dev {
-	respond /admin* 404
-	import rate_limited store_proxy 400
-	request_body {
-		max_size 4MiB
-	}
-	import ilp_identity_cors
-	reverse_proxy /ilp/identity relay-proxy:3000
-	reverse_proxy relay-proxy:3000 {
-		stream_close_delay 5m
-	}
-}
+# store/deploy/nginx/node.conf.template: one server block for the store's
+# names, including /ilp/identity reaching the connector from dvm.devnet too.
+# client_max_body_size 4m; limit_req 200r/s burst=400. /ilp/identity reaches
+# the one connector (see "One connector" above); store-dvm stays the store's
+# own.
 
 dvm.devnet.toonprotocol.dev {
 	respond /admin* 404
@@ -210,21 +179,8 @@ dvm.devnet.toonprotocol.dev {
 # client_max_body_size 512k ("a wire transaction or a forward request is
 # kilobytes"). The gas station's POST /gas has no public path, as there: only
 # the connector reaches it, as the termination of a paid route.
-# Transitional: both names' connector paths now reach the one connector (see
-# "One connector" above); gas-web stays the gas station's own.
-
-proxy.gas.devnet.toonprotocol.dev {
-	respond /admin* 404
-	import rate_limited gas_proxy 400
-	request_body {
-		max_size 512KiB
-	}
-	import ilp_identity_cors
-	reverse_proxy /ilp/identity relay-proxy:3000
-	reverse_proxy relay-proxy:3000 {
-		stream_close_delay 5m
-	}
-}
+# /ilp/identity reaches the one connector (see "One connector" above);
+# gas-web stays the gas station's own.
 
 gas.devnet.toonprotocol.dev {
 	respond /admin* 404
@@ -240,20 +196,8 @@ gas.devnet.toonprotocol.dev {
 }
 
 # ── gateway ──────────────────────────────────────────────────────────────────
-# gateway/deploy/nginx/node.conf.template.
-
-# The sealed ILP edge: /admin 404, client_max_body_size 1m, limit_req.
-# Transitional: it now reaches the one connector (see "One connector" above).
-proxy.gateway.devnet.toonprotocol.dev {
-	respond /admin* 404
-	import rate_limited gateway_proxy 400
-	request_body {
-		max_size 1MiB
-	}
-	reverse_proxy relay-proxy:3000 {
-		stream_close_delay 5m
-	}
-}
+# gateway/deploy/nginx/node.conf.template. Its sealed ILP edge is the one
+# connector now (see "One connector" above).
 
 # Every workload, plus the bare domain (which the gateway answers 503
 # `toon-gateway-reason: no_grant`: a grant is held for a label, never for the
@@ -300,26 +244,6 @@ faucet.devnet.toonprotocol.dev {
 		max_size 1MiB
 	}
 	reverse_proxy faucet:3500 {
-		stream_close_delay 5m
-	}
-}
-
-# ── echo ─────────────────────────────────────────────────────────────────────
-# echo-merchant/deploy/nginx/node.conf.template (infra#55): gas's shape on one
-# name. client_max_body_size 512k; limit_req 200r/s burst=400; /admin 404; and
-# the /ilp/identity CORS rule. The Echo Merchant itself has no public path, as
-# there: only the connector reaches it, as the termination of g.toon.echo.
-# Transitional: it now reaches the one connector (see "One connector" above).
-
-proxy.echo.devnet.toonprotocol.dev {
-	respond /admin* 404
-	import rate_limited echo_proxy 400
-	request_body {
-		max_size 512KiB
-	}
-	import ilp_identity_cors
-	reverse_proxy /ilp/identity relay-proxy:3000
-	reverse_proxy relay-proxy:3000 {
 		stream_close_delay 5m
 	}
 }

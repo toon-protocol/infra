@@ -102,9 +102,11 @@ out=$(get "$APEX" /ilp -i)
 expect "reaches relay-proxy" "$out" "upstream=relay-proxy"
 expect "passes Host through" "$out" "host=$APEX"
 expect "sets X-Forwarded-Proto: https" "$out" "xfp=https"
-for old in proxy.ario proxy.gas proxy.gateway proxy.echo proxy.relay; do
-  out=$(get "$old.$ZONE" /ilp -i)
-  expect "$old.devnet reaches the one connector too" "$out" "upstream=relay-proxy"
+# The old connector names are gone: Caddy holds no certificate for them, so
+# the handshake fails and nothing is answered (curl reports 000).
+for old in proxy.ario proxy.gas proxy.gateway proxy.echo proxy.relay relay-ws; do
+  out=$(get "$old.$ZONE" /ilp -o /dev/null -w '%{http_code}' 2>/dev/null || true)
+  expect "$old.devnet is no longer served" "$out" "000"
 done
 
 echo "── the wildcard: <label>.gw -> https://gateway-gw:8443"

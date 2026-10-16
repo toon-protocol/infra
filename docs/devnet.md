@@ -38,11 +38,11 @@ is not a node (see "The Onboarder" below).
 
 | Node | Repository | Serves |
 |---|---|---|
-| relay | `toon-protocol/relay` | `proxy.relay.devnet…`, `relay-ws.devnet…` — paid Nostr writes at `g.toon.relay`, free reads over `wss://` |
-| store | `toon-protocol/store` | `proxy.ario.devnet…`, `dvm.devnet…` — paid Arweave blob storage at `g.toon.store` |
-| gas | `toon-protocol/gas-station` | `proxy.gas.devnet…` — sponsored transactions at `g.toon.gas` |
-| workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…`, `proxy.gateway.devnet…` — a hostname for a workload |
-| echo | `toon-protocol/echo-merchant` | `proxy.echo.devnet…` — a priced route at `g.toon.echo` that answers with a mirror of the request and of its payment (a **Mirror**, in echo-merchant's `CONTEXT.md`) |
+| relay | `toon-protocol/relay` | `toonprotocol.dev` (the one connector), `relay.toonprotocol.dev` — paid Nostr writes at `g.toon.relay`, free reads over `wss://` |
+| store | `toon-protocol/store` | `dvm.devnet…` — paid Arweave blob storage at `g.toon.store`, through the one connector |
+| gas | `toon-protocol/gas-station` | `gas.devnet…` — sponsored transactions at `g.toon.gas`, through the one connector |
+| workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…` — a hostname for a workload |
+| echo | `toon-protocol/echo-merchant` | nothing of its own — a priced route, through the one connector, at `g.toon.echo` that answers with a mirror of the request and of its payment (a **Mirror**, in echo-merchant's `CONTEXT.md`) |
 | faucet | (hand-deployed, from `/root/faucet-connector/infra/linode-faucet`) | `faucet.devnet…` — mock USDC on both chains |
 | Onboarder (not a node) | `toon-protocol/infra` (`onboarder/deploy`) | `onboard.devnet…` — pays the gas for a gasless channel deposit on Base Sepolia |
 
@@ -63,12 +63,12 @@ something this repo stands up again.
 
 ### The Workload Gateway node
 
-A tenant seals a **Gateway Handover** to its connector at
-`proxy.gateway.devnet.toonprotocol.dev` (free), and the workload is then
-served at `<label>.gw.devnet.toonprotocol.dev` over TLS. This node is
-unchanged by the move other than its DNS: it still runs from
-`toon-protocol/gateway`, still keeps its own connector and keys, and is still
-what the console leases a hostname from.
+A tenant seals a **Gateway Handover** through the one connector at
+`toonprotocol.dev` (free), and the workload is then served at
+`<label>.gw.devnet.toonprotocol.dev` over TLS. The node still runs from
+`toon-protocol/gateway` and is still what the console leases a hostname from,
+but it runs no connector of its own on the devnet any more: its handover
+route is a direct route of the one connector.
 
 The certificate is a **wildcard**, issued over **DNS-01** through the Porkbun
 API — the gateway serves every label under its domain and a label is the
@@ -246,7 +246,7 @@ provider is running again:
    sandbox's own addresses and its committed test wallet.
 2. **A handover.** Seal a Gateway Handover to
    `g.toon.workload-gateway.handover` at
-   `https://proxy.gateway.devnet.toonprotocol.dev`, using
+   `https://toonprotocol.dev`, the one connector, using
    `provider/tools/grant`. The gateway sends `status` to the members the
    handover names and admits it only if one of them takes the grant — there is
    no signature to check any more (spec §12.1, ADR 0016).
@@ -298,18 +298,18 @@ records points at the one host, `97.107.134.182`:
 | Record | Node |
 |---|---|
 | `toonprotocol.dev` (the apex), `relay` | relay: the one connector, and its WebSocket |
-| `proxy.ario.devnet`, `dvm.devnet` | store |
-| `proxy.relay.devnet`, `relay-ws.devnet` | relay |
-| `proxy.gas.devnet`, `gas.devnet` | gas |
+| `dvm.devnet` | store |
+| `gas.devnet` | gas |
 | `faucet.devnet` | faucet |
-| `gw.devnet`, `*.gw.devnet`, `proxy.gateway.devnet` | workload-gateway |
-| `proxy.echo.devnet` | echo |
+| `gw.devnet`, `*.gw.devnet` | workload-gateway |
 | `onboard.devnet` | the Onboarder |
 
-The devnet runs one connector, the relay's, at the apex. `proxy.ario.devnet`,
-`proxy.gas.devnet`, `proxy.gateway.devnet` and `proxy.echo.devnet` reach that
-connector too, until a toon CLI release ships the new devnet preset; a
-follow-up removes them (`edge/deploy/README.md`).
+The devnet runs one connector, the relay's, at the apex. The old connector
+names, `proxy.relay.devnet`, `relay-ws.devnet`, `proxy.ario.devnet`,
+`proxy.gas.devnet`, `proxy.gateway.devnet` and `proxy.echo.devnet`, are no
+longer served by the edge (`edge/deploy/README.md`). Their A records are
+deleted from Porkbun once the edge stops serving them; until then they resolve
+to the host and fail the TLS handshake.
 
 `proxy.provider.devnet` and `provider.devnet` are no longer part of the
 devnet's contract: the edge has no `edge-provider` network and fronts no

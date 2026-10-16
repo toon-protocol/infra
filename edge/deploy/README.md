@@ -20,8 +20,9 @@ The devnet runs **one connector**, the relay's, at the apex
 `toonprotocol.dev`, with the relay's WebSocket at `relay.toonprotocol.dev`.
 Every app (store, gas, gateway, echo) is a direct route of that connector,
 and those nodes run no connector of their own on the devnet. Their old
-connector names still answer, from the one connector, until a toon CLI
-release ships the new devnet preset. A follow-up removes them.
+connector names (`proxy.{relay,ario,gas,gateway,echo}.devnet`) and
+`relay-ws.devnet` are no longer served; the toon CLI's devnet preset names the
+apex and `relay.toonprotocol.dev`.
 
 Why not one flat network: on one, every node could reach every other node's
 connector, its `/admin` included, and the gateway's handover door, none of
@@ -38,9 +39,6 @@ of truth and `bundle.test.mjs` holds it still.
 |---|---|---|---|---|
 | relay (the one connector) | `edge-relay` | `toonprotocol.dev` (the apex) | `relay-proxy` | 3000 |
 | relay | `edge-relay` | `relay` (WebSocket) | `relay-ws` | 7100 |
-| relay | `edge-relay` | `proxy.relay.devnet` | `relay-proxy` | 3000 |
-| relay | `edge-relay` | `relay-ws.devnet` (WebSocket) | `relay-ws` | 7100 |
-| relay (transitional) | `edge-relay` | `proxy.ario.devnet`, `proxy.gas.devnet`, `proxy.gateway.devnet`, `proxy.echo.devnet` | `relay-proxy` | 3000 |
 | store | `edge-store` | `dvm.devnet` | `store-dvm` | 3400 |
 | gas | `edge-gas` | `gas.devnet` | `gas-web` | 3400 |
 | gateway | `edge-gateway` | `gw.devnet`, `*.gw.devnet` | `gateway-gw` | 8443 (**TLS**) |
@@ -58,17 +56,15 @@ node shipped before (`relay/deploy/Caddyfile`, the nginx templates under
 plain proxying are carried over, each with its source cited in
 `caddy/sites.caddy`:
 
-- `/admin*` answers 404 on the apex and the store, gas, gateway-proxy and echo
-  names.
+- `/admin*` answers 404 on the apex and the store and gas names.
 - Body limits: 4 MiB for the apex (the one connector carries store uploads
-  too) and the store, 512 KiB for gas and echo, 1 MiB for the gateway proxy,
-  the faucet and the Onboarder, and 64 MiB for gateway workloads. The old
-  names keep their old caps while they last.
-- Per-client rate limits: 400 per 2s on the apex, store, gas, gateway and echo, and 60 per
+  too) and the store, 512 KiB for gas, 1 MiB for the faucet and the
+  Onboarder, and 64 MiB for gateway workloads.
+- Per-client rate limits: 400 per 2s on the apex, store, gas and gateway workloads, and 60 per
   2s on the faucet, with `/health` exempt. An excess request gets **429**,
   where nginx answered 503. The Onboarder had no old front; it gets the
   faucet's 60 per 2s, because each `/settle` spends its own ETH.
-- CORS on `/ilp/identity` for the apex, store, gas and echo. That path always
+- CORS on `/ilp/identity` for the apex, store and gas. That path always
   reaches the one connector, on every name that serves it.
 - The gateway's workload hop is TLS, with SNI `gateway` and no verification,
   so that the gateway tells a workload `X-Forwarded-Proto: https`. That hop
@@ -226,7 +222,7 @@ the way an overlay joins: the one connector's `relay-proxy` on `edge-relay`,
 and the wildcard's `gateway-gw` on `edge-gateway`. Then it checks:
 
 - routing, `Host`, `X-Forwarded-Proto`, the TLS hop and its SNI, and that
-  every old connector name reaches the one connector;
+  no old connector name is served any more;
 - the wildcard certificate and `no_grant`;
 - `/admin`, the body cap, CORS, the redirect, and a 502 for a node that is down;
 - the rate limit and `mem_limit`;
