@@ -297,6 +297,7 @@ records points at the one host, `97.107.134.182`:
 
 | Record | Node |
 |---|---|
+| `toonprotocol.dev` (the apex), `relay` | relay: the one connector, and its WebSocket |
 | `proxy.ario.devnet`, `dvm.devnet` | store |
 | `proxy.relay.devnet`, `relay-ws.devnet` | relay |
 | `proxy.gas.devnet`, `gas.devnet` | gas |
@@ -304,6 +305,11 @@ records points at the one host, `97.107.134.182`:
 | `gw.devnet`, `*.gw.devnet`, `proxy.gateway.devnet` | workload-gateway |
 | `proxy.echo.devnet` | echo |
 | `onboard.devnet` | the Onboarder |
+
+The devnet runs one connector, the relay's, at the apex. `proxy.ario.devnet`,
+`proxy.gas.devnet`, `proxy.gateway.devnet` and `proxy.echo.devnet` reach that
+connector too, until a toon CLI release ships the new devnet preset; a
+follow-up removes them (`edge/deploy/README.md`).
 
 `proxy.provider.devnet` and `provider.devnet` are no longer part of the
 devnet's contract: the edge has no `edge-provider` network and fronts no

@@ -38,25 +38,31 @@ const sites = read('caddy/sites.caddy');
 // ── The contract (infra#24; the per-node overlays join under these) ─────────
 const ZONE = 'toonprotocol.dev';
 const CONTRACT = {
+  // THE connector, the relay's, at the apex, and its relay's WebSocket. Every
+  // app on the devnet is a direct route of this one connector.
+  [ZONE]: 'relay-proxy:3000',
+  [`relay.${ZONE}`]: 'relay-ws:7100',
   // relay — ports from relay/deploy/Caddyfile
   [`proxy.relay.devnet.${ZONE}`]: 'relay-proxy:3000',
   [`relay-ws.devnet.${ZONE}`]: 'relay-ws:7100',
+  // TRANSITIONAL: the old per-node connector names all reach the one
+  // connector, until a toon CLI release ships the new devnet preset. Removed
+  // in a follow-up.
+  [`proxy.ario.devnet.${ZONE}`]: 'relay-proxy:3000',
+  [`proxy.gas.devnet.${ZONE}`]: 'relay-proxy:3000',
+  [`proxy.gateway.devnet.${ZONE}`]: 'relay-proxy:3000',
+  [`proxy.echo.devnet.${ZONE}`]: 'relay-proxy:3000',
   // store — store/deploy/nginx/node.conf.template
-  [`proxy.ario.devnet.${ZONE}`]: 'store-proxy:4000',
   [`dvm.devnet.${ZONE}`]: 'store-dvm:3400',
   // gas — gas-station/deploy/nginx/node.conf.template
-  [`proxy.gas.devnet.${ZONE}`]: 'gas-proxy:4000',
   [`gas.devnet.${ZONE}`]: 'gas-web:3400',
   // gateway — gateway/deploy/nginx/node.conf.template; the workload hop is TLS
   [`gw.devnet.${ZONE}`]: 'https://gateway-gw:8443',
   [`*.gw.devnet.${ZONE}`]: 'https://gateway-gw:8443',
-  [`proxy.gateway.devnet.${ZONE}`]: 'gateway-proxy:4000',
   // faucet — connector/infra/linode-faucet/nginx/node.conf.template
   [`faucet.devnet.${ZONE}`]: 'faucet:3500',
   // the Onboarder, not a node — onboarder/deploy/docker-compose.yml (infra#23)
   [`onboard.devnet.${ZONE}`]: 'onboarder:4022',
-  // the Echo Merchant — echo-merchant/deploy/nginx/node.conf.template (infra#55)
-  [`proxy.echo.devnet.${ZONE}`]: 'echo-proxy:4000',
 };
 
 /**
@@ -129,11 +135,16 @@ const GW_WORKLOADS = `gw.devnet.${ZONE}`; // the block that also holds *.gw
 const FAUCET = `faucet.devnet.${ZONE}`;
 const ONBOARD = `onboard.devnet.${ZONE}`;
 const ECHO = `proxy.echo.devnet.${ZONE}`;
-const RELAY = [`proxy.relay.devnet.${ZONE}`, `relay-ws.devnet.${ZONE}`];
+const RELAY = [`proxy.relay.devnet.${ZONE}`, `relay-ws.devnet.${ZONE}`, `relay.${ZONE}`];
+// The one connector: it carries every app's traffic, the store's uploads
+// included, so it gets the connector fronts' rules and the largest body cap.
+const ONE = ZONE;
+const NEW_NAMES = [ZONE, `relay.${ZONE}`];
 
 // client_max_body_size, from each node's nginx `location /`. nginx's `m` is
 // MiB, so these are written in Caddy's binary units.
 const BODY_LIMITS = {
+  [ONE]: '4MiB',
   [STORE[0]]: '4MiB',
   [STORE[1]]: '4MiB',
   [GAS[0]]: '512KiB',
@@ -151,6 +162,7 @@ const BODY_LIMITS = {
 // burst=60` on the faucet. A sliding window of `burst` events per 2s keeps
 // both the burst and the average rate.
 const RATE_LIMITS = {
+  [ONE]: 400,
   [STORE[0]]: 400,
   [STORE[1]]: 400,
   [GAS[0]]: 400,
@@ -168,7 +180,7 @@ const body = (host) => siteFor(host).body;
 
 describe('/admin is never reachable from outside', () => {
   // `location ^~ /admin { return 404; }` in the store, gas, gateway and echo fronts.
-  for (const host of [...STORE, ...GAS, GW_EDGE, ECHO]) {
+  for (const host of [ONE, ...STORE, ...GAS, GW_EDGE, ECHO]) {
     it(`${host} answers 404 for /admin*`, () => {
       assert.match(body(host), /^\s*respond \/admin\* 404$/m);
     });
@@ -218,13 +230,15 @@ describe('rate limits', () => {
 
 describe('CORS on /ilp/identity', () => {
   // `location = /ilp/identity` in the store, gas and echo fronts: always the
-  // connector, on either of the node's names, with the console's origin.
+  // connector, on either of the node's names, with the console's origin. There
+  // is one connector now, so every one of them reaches it.
   for (const [host, connector] of [
-    [STORE[0], 'store-proxy:4000'],
-    [STORE[1], 'store-proxy:4000'],
-    [GAS[0], 'gas-proxy:4000'],
-    [GAS[1], 'gas-proxy:4000'],
-    [ECHO, 'echo-proxy:4000'],
+    [ONE, 'relay-proxy:3000'],
+    [STORE[0], 'relay-proxy:3000'],
+    [STORE[1], 'relay-proxy:3000'],
+    [GAS[0], 'relay-proxy:3000'],
+    [GAS[1], 'relay-proxy:3000'],
+    [ECHO, 'relay-proxy:3000'],
   ]) {
     it(`${host} answers it from ${connector}, with the console's origin`, () => {
       const b = body(host);
@@ -291,6 +305,18 @@ describe('certificates', () => {
     assert.match(caddyfile(), /acme_dns porkbun \{\s*api_key \{env\.PORKBUN_API_KEY\}\s*api_secret_key \{env\.PORKBUN_SECRET_KEY\}\s*\}/);
   });
 
+  it('waits out Porkbun for the names new with the one connector, and only those', () => {
+    // On the mainnet box, certmagic's own propagation check timed out for
+    // brand-new names although the TXT records resolved publicly. A flat 30s
+    // delay and no check of its own (Let's Encrypt checks) fixed it per site.
+    assert.match(caddyfile(), /^\(patient_dns01\) \{\s*tls \{\s*dns porkbun \{\s*api_key \{env\.PORKBUN_API_KEY\}\s*api_secret_key \{env\.PORKBUN_SECRET_KEY\}\s*\}\s*propagation_delay 30s\s*propagation_timeout -1\s*\}\s*\}/m);
+    const importing = blocks.filter((b) => /^\s*import patient_dns01$/m.test(b.body)).flatMap((b) => b.addresses);
+    assert.deepEqual(importing.sort(), [...NEW_NAMES].sort());
+    // Nothing else about certificates lives in the site table.
+    const code = sites.replace(/^\s*#.*\n/gm, '');
+    assert.doesNotMatch(code, /^\s*tls\b|porkbun|acme/m);
+  });
+
   it('serves exactly the shared site table', () => {
     assert.match(caddyfile(), /^import sites\.caddy$/m);
     assert.doesNotMatch(caddyfile(), /reverse_proxy/);
@@ -305,6 +331,8 @@ describe('certificates', () => {
     assert.match(test, /^\s*local_certs$/m);
     assert.doesNotMatch(test, /acme_dns|porkbun/);
     assert.match(test, /^import \/etc\/caddy\/sites\.caddy$/m);
+    // The patient snippet the new names import exists here too, as the internal CA.
+    assert.match(test, /^\(patient_dns01\) \{\s*tls internal\s*\}/m);
     assert.doesNotMatch(test, /reverse_proxy/);
   });
 });
@@ -347,7 +375,7 @@ const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', '
 const BUNDLE_FILES = [
   'docker-compose.yml', 'caddy/Caddyfile', 'caddy/sites.caddy', 'README.md', '.env.example',
   'auto-apply.sh', 'toon-auto-apply-edge.service', 'toon-auto-apply-edge.timer',
-  'test/smoke.sh', 'test/docker-compose.edge.yml', 'test/docker-compose.stub-store.yml', 'test/docker-compose.stub-gateway.yml', 'test/Caddyfile',
+  'test/smoke.sh', 'test/docker-compose.edge.yml', 'test/docker-compose.stub-relay.yml', 'test/docker-compose.stub-gateway.yml', 'test/Caddyfile',
 ];
 
 describe('the compose project', () => {

@@ -1,0 +1,22 @@
+# A stub of the one connector, the relay's, joined to the edge exactly the way
+# the relay's shared-edge overlay joins it: its OWN compose project, its own
+# `default` network kept, and ONLY its own edge network, `edge-relay`, declared
+# external, under the contract's alias. ./smoke.sh brings it up after the edge.
+#
+#   relay-proxy   plain HTTP on :3000, echoes what it was sent
+name: edge-smoke-stub-relay
+
+services:
+  relay:
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    volumes:
+      - ./stub/relay.Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default: {}
+      edge-relay:
+        aliases: [relay-proxy]
+
+networks:
+  edge-relay:
+    external: true
+    name: edge-relay
