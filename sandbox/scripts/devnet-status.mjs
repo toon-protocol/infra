@@ -13,7 +13,7 @@
 // local sandbox, where the money is a committed throwaway. This proves the
 // REACHABILITY and the DIRECTORY of the real devnet:
 //
-//   * every node's `GET /ilp` — the routes it terminates, their prices, and
+//   * the one connector's `GET /ilp` — the routes it terminates, their prices, and
 //     the settlement identities a payer would open a channel against. That
 //     document is the authority on all of it (connector ADR 0050, ND-07): the
 //     connector proved each settlement fact against a live chain at boot, so
@@ -35,13 +35,12 @@
 // exactly the machine it is most useful on.
 
 const DEVNET = {
-  relayRead: 'wss://relay-ws.devnet.toonprotocol.dev',
+  relayRead: 'wss://relay.toonprotocol.dev',
+  // The devnet runs ONE connector, the relay's, at the apex: the store, gas,
+  // gateway and echo routes are all direct routes of it (infra#57).
   nodes: [
-    { name: 'store', url: 'https://proxy.ario.devnet.toonprotocol.dev' },
-    { name: 'relay', url: 'https://proxy.relay.devnet.toonprotocol.dev' },
-    { name: 'gas', url: 'https://proxy.gas.devnet.toonprotocol.dev' },
+    { name: 'one connector', url: 'https://toonprotocol.dev' },
     { name: 'provider', url: 'https://proxy.provider.devnet.toonprotocol.dev' },
-    { name: 'workload-gateway', url: 'https://proxy.gateway.devnet.toonprotocol.dev' },
   ],
   // A label under the gateway's domain that is certainly not a workload: a
   // canonical one is 52 base32 characters, and a handover's readable `name`

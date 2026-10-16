@@ -42,16 +42,6 @@ const CONTRACT = {
   // app on the devnet is a direct route of this one connector.
   [ZONE]: 'relay-proxy:3000',
   [`relay.${ZONE}`]: 'relay-ws:7100',
-  // relay — ports from relay/deploy/Caddyfile
-  [`proxy.relay.devnet.${ZONE}`]: 'relay-proxy:3000',
-  [`relay-ws.devnet.${ZONE}`]: 'relay-ws:7100',
-  // TRANSITIONAL: the old per-node connector names all reach the one
-  // connector, until a toon CLI release ships the new devnet preset. Removed
-  // in a follow-up.
-  [`proxy.ario.devnet.${ZONE}`]: 'relay-proxy:3000',
-  [`proxy.gas.devnet.${ZONE}`]: 'relay-proxy:3000',
-  [`proxy.gateway.devnet.${ZONE}`]: 'relay-proxy:3000',
-  [`proxy.echo.devnet.${ZONE}`]: 'relay-proxy:3000',
   // store — store/deploy/nginx/node.conf.template
   [`dvm.devnet.${ZONE}`]: 'store-dvm:3400',
   // gas — gas-station/deploy/nginx/node.conf.template
@@ -64,6 +54,13 @@ const CONTRACT = {
   // the Onboarder, not a node — onboarder/deploy/docker-compose.yml (infra#23)
   [`onboard.devnet.${ZONE}`]: 'onboarder:4022',
 };
+
+// The old per-node connector names and the relay's old names. They reached the
+// one connector while toon CLI v0.2.0 still named them, and are gone now.
+const REMOVED = [
+  'proxy.relay.devnet', 'relay-ws.devnet',
+  'proxy.ario.devnet', 'proxy.gas.devnet', 'proxy.gateway.devnet', 'proxy.echo.devnet',
+].map((h) => `${h}.${ZONE}`);
 
 /**
  * The top-level site blocks of a Caddyfile: each one's addresses and body.
@@ -119,6 +116,11 @@ describe('the contract: every hostname on the host, and where it goes', () => {
     assert.deepEqual(served, Object.keys(CONTRACT).sort());
   });
 
+  it('serves none of the old connector names any more', () => {
+    const served = blocks.flatMap((b) => b.addresses);
+    for (const host of REMOVED) assert.ok(!served.includes(host), `${host} is still served`);
+  });
+
   it('serves each hostname exactly once', () => {
     const served = blocks.flatMap((b) => b.addresses);
     assert.equal(new Set(served).size, served.length);
@@ -128,14 +130,12 @@ describe('the contract: every hostname on the host, and where it goes', () => {
 // ── What the old fronts did beyond plain proxying ───────────────────────────
 // Each row cites the file the rule was carried over from. The nginx fronts
 // applied every rule to the whole server block, i.e. to both of a node's names.
-const STORE = ['proxy.ario.devnet', 'dvm.devnet'].map((h) => `${h}.${ZONE}`);
-const GAS = ['proxy.gas.devnet', 'gas.devnet'].map((h) => `${h}.${ZONE}`);
-const GW_EDGE = `proxy.gateway.devnet.${ZONE}`;
+const STORE = `dvm.devnet.${ZONE}`;
+const GAS = `gas.devnet.${ZONE}`;
 const GW_WORKLOADS = `gw.devnet.${ZONE}`; // the block that also holds *.gw
 const FAUCET = `faucet.devnet.${ZONE}`;
 const ONBOARD = `onboard.devnet.${ZONE}`;
-const ECHO = `proxy.echo.devnet.${ZONE}`;
-const RELAY = [`proxy.relay.devnet.${ZONE}`, `relay-ws.devnet.${ZONE}`, `relay.${ZONE}`];
+const RELAY = [`relay.${ZONE}`];
 // The one connector: it carries every app's traffic, the store's uploads
 // included, so it gets the connector fronts' rules and the largest body cap.
 const ONE = ZONE;
@@ -145,17 +145,12 @@ const NEW_NAMES = [ZONE, `relay.${ZONE}`];
 // MiB, so these are written in Caddy's binary units.
 const BODY_LIMITS = {
   [ONE]: '4MiB',
-  [STORE[0]]: '4MiB',
-  [STORE[1]]: '4MiB',
-  [GAS[0]]: '512KiB',
-  [GAS[1]]: '512KiB',
-  [GW_EDGE]: '1MiB',
+  [STORE]: '4MiB',
+  [GAS]: '512KiB',
   [GW_WORKLOADS]: '64MiB',
   [FAUCET]: '1MiB',
   // express.json({ limit: '1mb' }) in onboarder/index.mjs: nothing larger is read.
   [ONBOARD]: '1MiB',
-  // echo-merchant/deploy/nginx/node.conf.template (infra#55): gas's limit.
-  [ECHO]: '512KiB',
 };
 
 // limit_req: `rate=200r/s burst=400` on store, gas, gateway and echo, `rate=30r/s
@@ -163,24 +158,20 @@ const BODY_LIMITS = {
 // both the burst and the average rate.
 const RATE_LIMITS = {
   [ONE]: 400,
-  [STORE[0]]: 400,
-  [STORE[1]]: 400,
-  [GAS[0]]: 400,
-  [GAS[1]]: 400,
-  [GW_EDGE]: 400,
+  [STORE]: 400,
+  [GAS]: 400,
   [GW_WORKLOADS]: 400,
   [FAUCET]: 60,
   // New, not carried over: the faucet's limit, because each /settle spends
   // the Onboarder's own ETH.
   [ONBOARD]: 60,
-  [ECHO]: 400,
 };
 
 const body = (host) => siteFor(host).body;
 
 describe('/admin is never reachable from outside', () => {
   // `location ^~ /admin { return 404; }` in the store, gas, gateway and echo fronts.
-  for (const host of [ONE, ...STORE, ...GAS, GW_EDGE, ECHO]) {
+  for (const host of [ONE, STORE, GAS]) {
     it(`${host} answers 404 for /admin*`, () => {
       assert.match(body(host), /^\s*respond \/admin\* 404$/m);
     });
@@ -230,15 +221,12 @@ describe('rate limits', () => {
 
 describe('CORS on /ilp/identity', () => {
   // `location = /ilp/identity` in the store, gas and echo fronts: always the
-  // connector, on either of the node's names, with the console's origin. There
-  // is one connector now, so every one of them reaches it.
+  // connector, with the console's origin. There is one connector now, so the
+  // apex and the store's and gas station's app names all reach it.
   for (const [host, connector] of [
     [ONE, 'relay-proxy:3000'],
-    [STORE[0], 'relay-proxy:3000'],
-    [STORE[1], 'relay-proxy:3000'],
-    [GAS[0], 'relay-proxy:3000'],
-    [GAS[1], 'relay-proxy:3000'],
-    [ECHO, 'relay-proxy:3000'],
+    [STORE, 'relay-proxy:3000'],
+    [GAS, 'relay-proxy:3000'],
   ]) {
     it(`${host} answers it from ${connector}, with the console's origin`, () => {
       const b = body(host);

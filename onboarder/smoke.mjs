@@ -66,7 +66,7 @@ const TARGET = DEVNET
       // faucet is its one minter.
       usdc: "0x0C996d7c934c79a6255254875607Fe69df25C0E1",
       faucetUrl: process.env.FAUCET_URL ?? "https://faucet.devnet.toonprotocol.dev",
-      connectorUrl: process.env.CONNECTOR_URL ?? "https://proxy.relay.devnet.toonprotocol.dev",
+      connectorUrl: process.env.CONNECTOR_URL ?? "https://toonprotocol.dev",
     }
   : {
       name: "TOON sandbox anvil",
