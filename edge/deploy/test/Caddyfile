@@ -11,4 +11,10 @@
 	}
 }
 
+# Production's patient DNS-01 issuance for brand-new names (../caddy/Caddyfile),
+# replaced by the internal CA like every other name here.
+(patient_dns01) {
+	tls internal
+}
+
 import /etc/caddy/sites.caddy

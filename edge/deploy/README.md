@@ -10,10 +10,18 @@ overlay, and is reached as `alias:port`. The edge holds no node's keys and
 never talks ILP.
 
 ```
-visitor ──▶ caddy :443 ──(edge-store)────▶ store-proxy:4000, store-dvm:3400
-                       ──(edge-gateway)──▶ gateway-gw:8443, gateway-proxy:4000
+visitor ──▶ caddy :443 ──(edge-relay)────▶ relay-proxy:3000 (the one connector), relay-ws:7100
+                       ──(edge-store)────▶ store-dvm:3400
+                       ──(edge-gateway)──▶ gateway-gw:8443
                        ──(…)─────────────▶ …
 ```
+
+The devnet runs **one connector**, the relay's, at the apex
+`toonprotocol.dev`, with the relay's WebSocket at `relay.toonprotocol.dev`.
+Every app (store, gas, gateway, echo) is a direct route of that connector,
+and those nodes run no connector of their own on the devnet. Their old
+connector names still answer, from the one connector, until a toon CLI
+release ships the new devnet preset. A follow-up removes them.
 
 Why not one flat network: on one, every node could reach every other node's
 connector, its `/admin` included, and the gateway's handover door, none of
@@ -28,16 +36,15 @@ of truth and `bundle.test.mjs` holds it still.
 
 | Node | Network | Hostname | Alias | Port |
 |---|---|---|---|---|
+| relay (the one connector) | `edge-relay` | `toonprotocol.dev` (the apex) | `relay-proxy` | 3000 |
+| relay | `edge-relay` | `relay` (WebSocket) | `relay-ws` | 7100 |
 | relay | `edge-relay` | `proxy.relay.devnet` | `relay-proxy` | 3000 |
 | relay | `edge-relay` | `relay-ws.devnet` (WebSocket) | `relay-ws` | 7100 |
-| store | `edge-store` | `proxy.ario.devnet` | `store-proxy` | 4000 |
+| relay (transitional) | `edge-relay` | `proxy.ario.devnet`, `proxy.gas.devnet`, `proxy.gateway.devnet`, `proxy.echo.devnet` | `relay-proxy` | 3000 |
 | store | `edge-store` | `dvm.devnet` | `store-dvm` | 3400 |
-| gas | `edge-gas` | `proxy.gas.devnet` | `gas-proxy` | 4000 |
 | gas | `edge-gas` | `gas.devnet` | `gas-web` | 3400 |
 | gateway | `edge-gateway` | `gw.devnet`, `*.gw.devnet` | `gateway-gw` | 8443 (**TLS**) |
-| gateway | `edge-gateway` | `proxy.gateway.devnet` | `gateway-proxy` | 4000 |
 | faucet | `edge-faucet` | `faucet.devnet` | `faucet` | 3500 |
-| echo | `edge-echo` | `proxy.echo.devnet` | `echo-proxy` | 4000 |
 | Onboarder (not a node) | `edge-onboarder` | `onboard.devnet` | `onboarder` | 4022 |
 
 A node's overlay declares its network `external: true` and keeps its own
@@ -51,16 +58,18 @@ node shipped before (`relay/deploy/Caddyfile`, the nginx templates under
 plain proxying are carried over, each with its source cited in
 `caddy/sites.caddy`:
 
-- `/admin*` answers 404 on the store, gas, gateway-proxy and echo names.
-- Body limits: 4 MiB for the store, 512 KiB for gas and echo, 1 MiB for the
-  gateway proxy, the faucet and the Onboarder, and 64 MiB for gateway
-  workloads.
-- Per-client rate limits: 400 per 2s on store, gas, gateway and echo, and 60 per
+- `/admin*` answers 404 on the apex and the store, gas, gateway-proxy and echo
+  names.
+- Body limits: 4 MiB for the apex (the one connector carries store uploads
+  too) and the store, 512 KiB for gas and echo, 1 MiB for the gateway proxy,
+  the faucet and the Onboarder, and 64 MiB for gateway workloads. The old
+  names keep their old caps while they last.
+- Per-client rate limits: 400 per 2s on the apex, store, gas, gateway and echo, and 60 per
   2s on the faucet, with `/health` exempt. An excess request gets **429**,
   where nginx answered 503. The Onboarder had no old front; it gets the
   faucet's 60 per 2s, because each `/settle` spends its own ETH.
-- CORS on `/ilp/identity` for store, gas and echo. That path always reaches the
-  node's connector, on either of its names.
+- CORS on `/ilp/identity` for the apex, store, gas and echo. That path always
+  reaches the one connector, on every name that serves it.
 - The gateway's workload hop is TLS, with SNI `gateway` and no verification,
   so that the gateway tells a workload `X-Forwarded-Proto: https`. That hop
   sets `Host` to the visitor's explicitly, because Caddy would otherwise
@@ -85,6 +94,15 @@ TXT than Caddy's 2-minute propagation window, so the first two attempts timed
 out and Caddy retried on its own, falling back to ZeroSSL. Until it lands, the
 name answers with a TLS `internal error` alert. Wait rather than restart. The keys are the same pair the workload gateway node
 already uses.
+
+The two names new with the one connector, `toonprotocol.dev` and
+`relay.toonprotocol.dev`, import `patient_dns01` (`caddy/Caddyfile`): a flat
+30s wait for Porkbun and **no** propagation check of certmagic's own
+(`propagation_timeout -1`), so Let's Encrypt is what checks the TXT record.
+On the mainnet box certmagic's own check timed out for brand-new names even
+though the records resolved publicly. That issuer is Let's Encrypt alone, with
+no ZeroSSL fallback. `test/Caddyfile` defines the same snippet as
+`tls internal`.
 
 ## The image
 
@@ -204,15 +222,16 @@ edge/deploy/test/smoke.sh                 # the edge on local Docker, end to end
 and production's `sites.caddy`. The only change is Caddy's internal CA in
 place of ACME (`test/Caddyfile`), on loopback ports 18080 and 18443. It starts
 two stub nodes, each in **its own** compose project on **its own** network,
-the way an overlay joins: `store-proxy` on `edge-store`, and the wildcard's
-`gateway-gw` on `edge-gateway`. Then it checks:
+the way an overlay joins: the one connector's `relay-proxy` on `edge-relay`,
+and the wildcard's `gateway-gw` on `edge-gateway`. Then it checks:
 
-- routing, `Host`, `X-Forwarded-Proto`, the TLS hop and its SNI;
+- routing, `Host`, `X-Forwarded-Proto`, the TLS hop and its SNI, and that
+  every old connector name reaches the one connector;
 - the wildcard certificate and `no_grant`;
 - `/admin`, the body cap, CORS, the redirect, and a 502 for a node that is down;
 - the rate limit and `mem_limit`;
 - that the edge is on all seven networks and created them;
-- that the store stub **cannot** reach the gateway stub by alias or by IP
-  address, with a control probe that does reach the store's own alias.
+- that the relay stub **cannot** reach the gateway stub by alias or by IP
+  address, with a control probe that does reach the relay's own alias.
 
 It refuses to run where any of the seven network names already exists.

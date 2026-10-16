@@ -30,4 +30,22 @@
 	}
 }
 
+# ── Patience for a brand-new name ────────────────────────────────────────────
+# Imported by the sites that are new with the one connector (toonprotocol.dev
+# and relay.toonprotocol.dev). On the mainnet box this same config timed out in
+# certmagic's OWN DNS propagation check for brand-new names even though the
+# challenge TXT already resolved publicly. Fixed there per site, as here: wait
+# a flat 30s for Porkbun's nameservers, and skip certmagic's check
+# (propagation_timeout -1), so Let's Encrypt itself is what checks the record.
+(patient_dns01) {
+	tls {
+		dns porkbun {
+			api_key {env.PORKBUN_API_KEY}
+			api_secret_key {env.PORKBUN_SECRET_KEY}
+		}
+		propagation_delay 30s
+		propagation_timeout -1
+	}
+}
+
 import sites.caddy

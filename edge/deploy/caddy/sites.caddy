@@ -2,7 +2,8 @@
 #
 # Imported by ./Caddyfile (production: ACME over DNS-01 through Porkbun) and
 # by ../test/Caddyfile (a local smoke test: Caddy's internal CA). Site blocks
-# only; nothing about certificates lives in this file.
+# only. The one thing about certificates here is `import patient_dns01` on the
+# names that need it; each Caddyfile defines that snippet its own way.
 #
 # ── The contract (infra#24) ──────────────────────────────────────────────────
 # Each node's own repository ships a shared-edge overlay that joins its
@@ -13,17 +14,29 @@
 # ../bundle.test.mjs holds this table still.
 #
 #   hostname (.toonprotocol.dev)   upstream                  network
+#   (the apex itself)              relay-proxy:3000          edge-relay   (THE connector)
+#   relay                          relay-ws:7100             edge-relay   (Nostr WS)
 #   proxy.relay.devnet             relay-proxy:3000          edge-relay   (connector)
 #   relay-ws.devnet                relay-ws:7100             edge-relay   (Nostr WS)
-#   proxy.ario.devnet              store-proxy:4000          edge-store   (connector)
+#   proxy.ario.devnet              relay-proxy:3000          edge-relay   (transitional)
 #   dvm.devnet                     store-dvm:3400            edge-store   (health)
-#   proxy.gas.devnet               gas-proxy:4000            edge-gas     (connector)
+#   proxy.gas.devnet               relay-proxy:3000          edge-relay   (transitional)
 #   gas.devnet                     gas-web:3400              edge-gas     (health)
-#   proxy.gateway.devnet           gateway-proxy:4000        edge-gateway (connector)
+#   proxy.gateway.devnet           relay-proxy:3000          edge-relay   (transitional)
 #   gw.devnet, *.gw.devnet         https://gateway-gw:8443   edge-gateway (workloads)
 #   faucet.devnet                  faucet:3500               edge-faucet
-#   proxy.echo.devnet              echo-proxy:4000           edge-echo    (connector)
+#   proxy.echo.devnet              relay-proxy:3000          edge-relay   (transitional)
 #   onboard.devnet                 onboarder:4022            edge-onboarder
+#
+# ── One connector ────────────────────────────────────────────────────────────
+# The devnet runs ONE connector, the relay's, at the apex toonprotocol.dev,
+# with every app (store, gas, gateway, echo) a direct route of it. The store,
+# gas station, gateway and Echo Merchant run no connector of their own on the
+# devnet any more; their apps stay on their own networks as above. The old
+# per-node connector names, proxy.{ario,gas,gateway,echo}.devnet, and the
+# /ilp/identity path on dvm.devnet and gas.devnet, all reach the one connector
+# now. They are TRANSITIONAL: kept only until a toon CLI release ships the new
+# devnet preset, then removed in a follow-up.
 #
 # The Onboarder (CONTEXT.md, infra#23) is not a node: it has no connector and
 # no ILP address. It is fronted the same way, and ../../../onboarder/deploy is
@@ -106,7 +119,14 @@
 	}
 }
 
-# ── relay ────────────────────────────────────────────────────────────────────
+# ── relay: the one connector ─────────────────────────────────────────────────
+# `import patient_dns01` on the two names new with the one connector: the
+# snippet is defined in ./Caddyfile (production) and ../test/Caddyfile (the
+# smoke test's internal CA). In production it waits out Porkbun's slow
+# nameservers instead of relying on certmagic's own propagation check, which
+# timed out for brand-new names on the mainnet box even though the TXT records
+# already resolved publicly.
+#
 # relay/deploy/Caddyfile: plain `reverse_proxy` to both, nothing else. The
 # relay's write port (3100) is deliberately absent, as it was there: it is the
 # payment-oblivious surface, and a public path to it is a free door.
@@ -114,6 +134,31 @@
 # `stream_close_delay` on every upstream: a Caddy reload otherwise closes every
 # open WebSocket at once, where nginx's reload let old workers drain. A reload
 # is what auto-apply.sh does on every merged change to this directory.
+
+# The one connector, at the apex. It now also carries what the store, gas,
+# gateway and echo connectors carried, so it gets their treatment: /admin 404,
+# their rate limit, the most permissive of their body caps (the store's 4 MiB,
+# for uploads), and the /ilp/identity CORS rule.
+toonprotocol.dev {
+	import patient_dns01
+	respond /admin* 404
+	import rate_limited one_connector 400
+	request_body {
+		max_size 4MiB
+	}
+	import ilp_identity_cors
+	reverse_proxy /ilp/identity relay-proxy:3000
+	reverse_proxy relay-proxy:3000 {
+		stream_close_delay 5m
+	}
+}
+
+relay.toonprotocol.dev {
+	import patient_dns01
+	reverse_proxy relay-ws:7100 {
+		stream_close_delay 5m
+	}
+}
 
 proxy.relay.devnet.toonprotocol.dev {
 	reverse_proxy relay-proxy:3000 {
@@ -131,6 +176,8 @@ relay-ws.devnet.toonprotocol.dev {
 # store/deploy/nginx/node.conf.template: one server block for both names, so
 # every rule applies to both, including /ilp/identity reaching the connector
 # from dvm.devnet too. client_max_body_size 4m; limit_req 200r/s burst=400.
+# Transitional: both names' connector paths now reach the one connector (see
+# "One connector" above); store-dvm stays the store's own.
 
 proxy.ario.devnet.toonprotocol.dev {
 	respond /admin* 404
@@ -139,8 +186,8 @@ proxy.ario.devnet.toonprotocol.dev {
 		max_size 4MiB
 	}
 	import ilp_identity_cors
-	reverse_proxy /ilp/identity store-proxy:4000
-	reverse_proxy store-proxy:4000 {
+	reverse_proxy /ilp/identity relay-proxy:3000
+	reverse_proxy relay-proxy:3000 {
 		stream_close_delay 5m
 	}
 }
@@ -152,7 +199,7 @@ dvm.devnet.toonprotocol.dev {
 		max_size 4MiB
 	}
 	import ilp_identity_cors
-	reverse_proxy /ilp/identity store-proxy:4000
+	reverse_proxy /ilp/identity relay-proxy:3000
 	reverse_proxy store-dvm:3400 {
 		stream_close_delay 5m
 	}
@@ -163,6 +210,8 @@ dvm.devnet.toonprotocol.dev {
 # client_max_body_size 512k ("a wire transaction or a forward request is
 # kilobytes"). The gas station's POST /gas has no public path, as there: only
 # the connector reaches it, as the termination of a paid route.
+# Transitional: both names' connector paths now reach the one connector (see
+# "One connector" above); gas-web stays the gas station's own.
 
 proxy.gas.devnet.toonprotocol.dev {
 	respond /admin* 404
@@ -171,8 +220,8 @@ proxy.gas.devnet.toonprotocol.dev {
 		max_size 512KiB
 	}
 	import ilp_identity_cors
-	reverse_proxy /ilp/identity gas-proxy:4000
-	reverse_proxy gas-proxy:4000 {
+	reverse_proxy /ilp/identity relay-proxy:3000
+	reverse_proxy relay-proxy:3000 {
 		stream_close_delay 5m
 	}
 }
@@ -184,7 +233,7 @@ gas.devnet.toonprotocol.dev {
 		max_size 512KiB
 	}
 	import ilp_identity_cors
-	reverse_proxy /ilp/identity gas-proxy:4000
+	reverse_proxy /ilp/identity relay-proxy:3000
 	reverse_proxy gas-web:3400 {
 		stream_close_delay 5m
 	}
@@ -194,13 +243,14 @@ gas.devnet.toonprotocol.dev {
 # gateway/deploy/nginx/node.conf.template.
 
 # The sealed ILP edge: /admin 404, client_max_body_size 1m, limit_req.
+# Transitional: it now reaches the one connector (see "One connector" above).
 proxy.gateway.devnet.toonprotocol.dev {
 	respond /admin* 404
 	import rate_limited gateway_proxy 400
 	request_body {
 		max_size 1MiB
 	}
-	reverse_proxy gateway-proxy:4000 {
+	reverse_proxy relay-proxy:3000 {
 		stream_close_delay 5m
 	}
 }
@@ -259,6 +309,7 @@ faucet.devnet.toonprotocol.dev {
 # name. client_max_body_size 512k; limit_req 200r/s burst=400; /admin 404; and
 # the /ilp/identity CORS rule. The Echo Merchant itself has no public path, as
 # there: only the connector reaches it, as the termination of g.toon.echo.
+# Transitional: it now reaches the one connector (see "One connector" above).
 
 proxy.echo.devnet.toonprotocol.dev {
 	respond /admin* 404
@@ -267,8 +318,8 @@ proxy.echo.devnet.toonprotocol.dev {
 		max_size 512KiB
 	}
 	import ilp_identity_cors
-	reverse_proxy /ilp/identity echo-proxy:4000
-	reverse_proxy echo-proxy:4000 {
+	reverse_proxy /ilp/identity relay-proxy:3000
+	reverse_proxy relay-proxy:3000 {
 		stream_close_delay 5m
 	}
 }
