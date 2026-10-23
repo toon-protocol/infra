@@ -16,7 +16,7 @@
 //     and no hostname is served that is not in the contract. Five other repos
 //     implement the far side of this table; a typo here is an outage there.
 //   * the six per-node networks, and the Onboarder's, are created
-//     HERE, under their literal names, Caddy joins all seven, and no flat
+//     HERE, under their literal names, Caddy joins all eight, and no flat
 //     network joins the nodes;
 //   * the Caddy image is pinned by digest, because the Porkbun key lives in it;
 //   * the wildcard is issued over DNS-01 through Porkbun, keys from the env;
@@ -53,6 +53,8 @@ const CONTRACT = {
   [`faucet.devnet.${ZONE}`]: 'faucet:3500',
   // the Onboarder, not a node — onboarder/deploy/docker-compose.yml (infra#23)
   [`onboard.devnet.${ZONE}`]: 'onboarder:4022',
+  // blossom — blossom/deploy/Caddyfile: its public port only
+  [`blossom.devnet.${ZONE}`]: 'blossom:3000',
 };
 
 // The old per-node connector names and the relay's old names. They reached the
@@ -135,11 +137,12 @@ const GAS = `gas.devnet.${ZONE}`;
 const GW_WORKLOADS = `gw.devnet.${ZONE}`; // the block that also holds *.gw
 const FAUCET = `faucet.devnet.${ZONE}`;
 const ONBOARD = `onboard.devnet.${ZONE}`;
+const BLOSSOM = `blossom.devnet.${ZONE}`;
 const RELAY = [`relay.${ZONE}`];
 // The one connector: it carries every app's traffic, the store's uploads
 // included, so it gets the connector fronts' rules and the largest body cap.
 const ONE = ZONE;
-const NEW_NAMES = [ZONE, `relay.${ZONE}`];
+const NEW_NAMES = [ZONE, `relay.${ZONE}`, BLOSSOM];
 
 // client_max_body_size, from each node's nginx `location /`. nginx's `m` is
 // MiB, so these are written in Caddy's binary units.
@@ -151,6 +154,8 @@ const BODY_LIMITS = {
   [FAUCET]: '1MiB',
   // express.json({ limit: '1mb' }) in onboarder/index.mjs: nothing larger is read.
   [ONBOARD]: '1MiB',
+  // A report (one Nostr event) is the largest body the public port reads.
+  [BLOSSOM]: '64KiB',
 };
 
 // limit_req: `rate=200r/s burst=400` on store, gas, gateway and echo, `rate=30r/s
@@ -165,6 +170,8 @@ const RATE_LIMITS = {
   // New, not carried over: the faucet's limit, because each /settle spends
   // the Onboarder's own ETH.
   [ONBOARD]: 60,
+  // New, not carried over: the store's, since every read is free.
+  [BLOSSOM]: 400,
 };
 
 const body = (host) => siteFor(host).body;
@@ -357,7 +364,7 @@ describe('the image', () => {
 // can reach another's connector /admin or the gateway's handover door. A node's
 // overlay joins its own network, `external`, and nothing else of the edge's.
 // The Onboarder is not a node, but it is fronted the same way, on its own network.
-const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet', 'edge-echo', 'edge-onboarder'];
+const NODE_NETWORKS = ['edge-relay', 'edge-store', 'edge-gas', 'edge-gateway', 'edge-faucet', 'edge-echo', 'edge-onboarder', 'edge-blossom'];
 
 // Every file in the bundle, for the checks that must hold across all of them.
 const BUNDLE_FILES = [
@@ -381,7 +388,7 @@ describe('the compose project', () => {
     assert.deepEqual([...top.matchAll(/^    name: (\S+)$/gm)].map((m) => m[1]).sort(), [...NODE_NETWORKS].sort());
   });
 
-  it('joins Caddy to all seven, and to nothing else', () => {
+  it('joins Caddy to all eight, and to nothing else', () => {
     const caddy = compose().slice(compose().indexOf('  caddy:'), compose().indexOf('\nnetworks:'));
     const joined = [...caddy.slice(caddy.indexOf('    networks:')).matchAll(/^      - (\S+)$/gm)].map((m) => m[1]);
     assert.deepEqual(joined.sort(), [...NODE_NETWORKS].sort());

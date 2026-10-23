@@ -66,6 +66,7 @@ services:
       - edge-faucet
       - edge-echo
       - edge-onboarder
+      - edge-blossom
     healthcheck:
       # The admin API answers once the config is loaded. 127.0.0.1, never
       # localhost: "localhost" in a container can resolve to ::1.
@@ -105,6 +106,8 @@ networks:
   # Not a node's: the Onboarder's (onboarder/deploy, infra#23). Same rule.
   edge-onboarder:
     name: edge-onboarder
+  edge-blossom:
+    name: edge-blossom
 
 volumes:
   caddy_data:
