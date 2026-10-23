@@ -2,10 +2,10 @@
 
 One Caddy on the devnet host that terminates TLS for every public hostname the
 host's nodes serve (infra#24, ADR 0001, the **Edge** in `CONTEXT.md`). It owns
-ports 80 and 443 and seven Docker networks: **one per node**, `edge-relay`,
-`edge-store`, `edge-gas`, `edge-gateway`, `edge-faucet` and `edge-echo`, and
-`edge-onboarder` for the **Onboarder**, which is fronted like a node but is not
-one (`CONTEXT.md`, ADR 0002). Caddy joins all seven. Each node joins **only its own**, from its repository's shared-edge
+ports 80 and 443 and eight Docker networks: **one per node**, `edge-relay`,
+`edge-store`, `edge-gas`, `edge-gateway`, `edge-faucet`, `edge-echo` and
+`edge-blossom`, and `edge-onboarder` for the **Onboarder**, which is fronted
+like a node but is not one (`CONTEXT.md`, ADR 0002). Caddy joins all eight. Each node joins **only its own**, from its repository's shared-edge
 overlay, and is reached as `alias:port`. The edge holds no node's keys and
 never talks ILP.
 
@@ -43,6 +43,7 @@ of truth and `bundle.test.mjs` holds it still.
 | gas | `edge-gas` | `gas.devnet` | `gas-web` | 3400 |
 | gateway | `edge-gateway` | `gw.devnet`, `*.gw.devnet` | `gateway-gw` | 8443 (**TLS**) |
 | faucet | `edge-faucet` | `faucet.devnet` | `faucet` | 3500 |
+| blossom | `edge-blossom` | `blossom.devnet` | `blossom` | 3000 (its public port only) |
 | Onboarder (not a node) | `edge-onboarder` | `onboard.devnet` | `onboarder` | 4022 |
 
 A node's overlay declares its network `external: true` and keeps its own
@@ -120,7 +121,7 @@ it. `docker-compose.yml` pins it **by digest**.
 
 ## Bring-up (on the host)
 
-Start the edge **before** any node's overlay. This project creates the seven
+Start the edge **before** any node's overlay. This project creates the eight
 networks, and the overlays declare them external. Nothing else on the host may
 hold 80 or 443: stop a node's old nginx, certbot or Caddy first (ADR 0001).
 
@@ -226,8 +227,8 @@ and the wildcard's `gateway-gw` on `edge-gateway`. Then it checks:
 - the wildcard certificate and `no_grant`;
 - `/admin`, the body cap, CORS, the redirect, and a 502 for a node that is down;
 - the rate limit and `mem_limit`;
-- that the edge is on all seven networks and created them;
+- that the edge is on all eight networks and created them;
 - that the relay stub **cannot** reach the gateway stub by alias or by IP
   address, with a control probe that does reach the relay's own alias.
 
-It refuses to run where any of the seven network names already exists.
+It refuses to run where any of the eight network names already exists.

@@ -8,7 +8,7 @@
 # ── The contract (infra#24) ──────────────────────────────────────────────────
 # Each node's own repository ships a shared-edge overlay that joins its
 # containers to that node's OWN external Docker network, `edge-<node>`, under
-# the aliases below. Caddy is on all seven networks; no node is on another's
+# the aliases below. Caddy is on all eight networks; no node is on another's
 # (../docker-compose.yml says why). The ports are each container's own
 # listening port, read off the front that node used to ship.
 # ../bundle.test.mjs holds this table still.
@@ -192,6 +192,44 @@ gas.devnet.toonprotocol.dev {
 	reverse_proxy /ilp/identity relay-proxy:3000
 	reverse_proxy gas-web:3400 {
 		stream_close_delay 5m
+	}
+}
+
+# ── blossom ──────────────────────────────────────────────────────────────────
+# blossom/deploy/Caddyfile: only the blob app's public port (3000), and only
+# the methods and paths it serves there. Its write port (3001) is reached by
+# the one connector alone, over edge-blossom, as the termination of the paid
+# g.toon.blossom.* routes; paid writes go to the apex's /ilp, so this name
+# serves no /ilp of its own. A new name, so `import patient_dns01`.
+#
+# The only bodies the public port reads are a BUD-09 report (one Nostr event)
+# and a direct PUT it refuses 403, so 64 KiB is plenty; uploads never cross
+# this site. The store's rate limit, since every read is free.
+
+blossom.devnet.toonprotocol.dev {
+	import patient_dns01
+	import rate_limited blossom 400
+	request_body {
+		max_size 64KiB
+	}
+
+	# BUD-01 reads and BUD-12 DELETE of the owner's holding (any extension
+	# after the hash, either case), BUD-12 list, BUD-06 preflight, BUD-09
+	# report, and a direct PUT to a paid path, which the app refuses 403
+	# saying where to pay. CORS preflights for each.
+	@public expression `
+		(method('GET', 'HEAD', 'DELETE', 'OPTIONS') && path_regexp('^/[0-9a-fA-F]{64}(\\.[^/]*)?$')) ||
+		(method('GET', 'HEAD', 'OPTIONS') && path_regexp('^/list/[0-9a-f]{64}$')) ||
+		(method('HEAD', 'OPTIONS') && path('/upload')) ||
+		(method('PUT', 'OPTIONS') && path('/report', '/upload', '/mirror', '/media'))
+	`
+	handle @public {
+		reverse_proxy blossom:3000 {
+			stream_close_delay 5m
+		}
+	}
+	handle {
+		respond "not found" 404
 	}
 }
 

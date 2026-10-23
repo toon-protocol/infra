@@ -13,8 +13,8 @@
 # questions with the real hostnames, verifying every certificate against the
 # edge's own root, and checks that one stub node cannot reach the other.
 #
-# It needs Docker, curl and openssl, and the seven network names edge-relay,
-# edge-store, edge-gas, edge-gateway, edge-faucet, edge-echo and edge-onboarder to be free: it creates and
+# It needs Docker, curl and openssl, and the eight network names edge-relay,
+# edge-store, edge-gas, edge-gateway, edge-faucet, edge-echo, edge-onboarder and edge-blossom to be free: it creates and
 # removes them, so it refuses to run on a host that already has any of them (a
 # real devnet host, say).
 set -euo pipefail
@@ -24,7 +24,7 @@ DEPLOY=$(cd "$HERE/.." && pwd)
 EDGE=(docker compose -p edge-smoke --project-directory "$DEPLOY" -f "$DEPLOY/docker-compose.yml" -f "$HERE/docker-compose.edge.yml")
 STUB_RELAY=(docker compose -f "$HERE/docker-compose.stub-relay.yml")
 STUB_GATEWAY=(docker compose -f "$HERE/docker-compose.stub-gateway.yml")
-NETWORKS=(edge-relay edge-store edge-gas edge-gateway edge-faucet edge-echo edge-onboarder)
+NETWORKS=(edge-relay edge-store edge-gas edge-gateway edge-faucet edge-echo edge-onboarder edge-blossom)
 ZONE=devnet.toonprotocol.dev
 APEX=toonprotocol.dev   # the one connector
 WORK=$(mktemp -d)

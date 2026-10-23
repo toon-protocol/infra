@@ -1,7 +1,7 @@
 # The public TOON devnet
 
 The sandbox is a whole TOON network on your machine. This is the other one: the
-relay, store, gas station, workload gateway and Echo Merchant nodes, plus the faucet, on
+relay, store, gas station, workload gateway, Echo Merchant and blob app (blossom) nodes, plus the faucet, on
 public testnets, which anybody can reach and which the console leases from.
 Nothing here touches mainnet — Base Sepolia and Solana devnet carry no value,
 and the USDC is a mock mint anyone can draw from the faucet.
@@ -29,7 +29,7 @@ before/after numbers.
 
 One **Edge** (`edge/deploy` in this repo — Caddy, TLS issued over Porkbun
 DNS-01, its image pinned by digest) terminates every public hostname the host
-serves. Behind it sit five **Nodes**, each still GitOps from its own
+serves. Behind it sit six **Nodes**, each still GitOps from its own
 repository (connector ADR 0068) — its own `deploy/` bundle, a shared-edge
 overlay that joins only that node's `edge-<node>` network, and its own
 `toon-auto-apply-<node>` timer and lock, so a stuck or dirty node never blocks
@@ -42,6 +42,7 @@ is not a node (see "The Onboarder" below).
 | store | `toon-protocol/store` | `dvm.devnet…` — paid Arweave blob storage at `g.toon.store`, through the one connector |
 | gas | `toon-protocol/gas-station` | `gas.devnet…` — sponsored transactions at `g.toon.gas`, through the one connector |
 | workload-gateway | `toon-protocol/gateway` | `*.gw.devnet…` — a hostname for a workload |
+| blossom | `toon-protocol/blossom` | `blossom.devnet…` — free Blossom reads (BUD-01, list, preflight, report); paid upload, mirror and media at `g.toon.blossom.upload`, `.mirror` and `.media`, through the one connector |
 | echo | `toon-protocol/echo-merchant` | nothing of its own — a priced route, through the one connector, at `g.toon.echo` that answers with a mirror of the request and of its payment (a **Mirror**, in echo-merchant's `CONTEXT.md`) |
 | faucet | (hand-deployed, from `/root/faucet-connector/infra/linode-faucet`) | `faucet.devnet…` — mock USDC on both chains |
 | Onboarder (not a node) | `toon-protocol/infra` (`onboarder/deploy`) | `onboard.devnet…` — pays the gas for a gasless channel deposit on Base Sepolia |
@@ -101,7 +102,8 @@ by `edge/deploy/README.md` and connector ADR 0068:
    each node is given a different one. The four nodes that moved here were fixed by
    separate per-node PRs: relay `3000`, workload-gateway `4001`, gas-station
    `4002`, store `4003`. The Echo Merchant, the first node born on this host,
-   took `4005` (infra#55; `4004` is unused). These are the assignments; take
+   took `4005` (infra#55; `4004` is unused). The blob app (blossom) runs no
+   connector on the host, so it takes none. These are the assignments; take
    the next free one, and record it here.
 4. **Its own connector, keys, ILP address and seal key**, copied over from
    wherever the node ran before — never regenerated, since they are already
